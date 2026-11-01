@@ -47,3 +47,4 @@ extern Model* modelPsyReverb2;
 extern Model* modelLifeform;
 extern Model* modelSpikes;
 extern Model* modelGates;
+extern Model* modelBastion;

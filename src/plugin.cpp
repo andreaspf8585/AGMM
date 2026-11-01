@@ -44,6 +44,7 @@ void init(Plugin *p)
 	p->addModel(modelLifeform);
 	p->addModel(modelSpikes);
 	p->addModel(modelGates);
+	p->addModel(modelBastion);
 
 
 
