@@ -1,0 +1,336 @@
+{
+  "slug": "AGMM",
+  "name": "AGMM",
+  "version": "2.0.0",
+  "license": "proprietary",
+  "brand": "AGMM",
+  "author": "Andreas Gkogkos",
+  "authorEmail": "andreas.gkogkos@protonmail.com",
+  "authorUrl": "https://www.youtube.com/@andreas.gkogkos",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "Reverb",
+      "name": "Reverb",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "BlackHoleReverb",
+      "name": "BlackHoleReverb",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "DarkHall",
+      "name": "DarkHall",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "DarkHallGranular",
+      "name": "DarkHallGranular",
+      "description": "reverb, granular",
+      "tags": [
+        "reverb",
+        "drone"
+      ]
+    },
+    {
+      "slug": "InstantDrone",
+      "name": "InstantDrone",
+      "description": "reverb, drone",
+      "tags": [
+        "reverb",
+        "drone"
+      ]
+    },
+    {
+      "slug": "SickDelay",
+      "name": "SickDelay",
+      "description": "delay",
+      "tags": [
+        "delay"
+      ]
+    },
+    {
+      "slug": "PsyDelay",
+      "name": "PsyDelay",
+      "description": "delay",
+      "tags": [
+        "delay"
+      ]
+    },
+    {
+      "slug": "PsyLFO",
+      "name": "PsyLFO",
+      "description": "LFO",
+      "tags": [
+        "LFO",
+        "gate",
+        "trigger"
+      ]
+    },
+    {
+      "slug": "SpringPendulum",
+      "name": "SpringPendulum",
+      "description": "LFO,gate,trigger",
+      "tags": [
+        "LFO",
+        "gate",
+        "trigger"
+      ]
+    },
+    {
+      "slug": "RandomWalk",
+      "name": "RandomWalk",
+      "description": "LFO,gate,trigger",
+      "tags": [
+        "LFO",
+        "gate",
+        "trigger",
+        "polyphonic"
+      ]
+    },
+    {
+      "slug": "BouncingBalls",
+      "name": "BouncingBalls",
+      "description": "gate, trigger",
+      "tags": [
+        "gate",
+        "trigger",
+        "polyphonic"
+      ]
+    },
+    {
+      "slug": "PsyReverb",
+      "name": "PsyReverb",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "LSDrone",
+      "name": "LSDrone",
+      "description": "drone",
+      "tags": [
+        "drone"
+      ]
+    },
+    {
+      "slug": "Pharmakon",
+      "name": "Pharmakon",
+      "description": "drone",
+      "tags": [
+        "drone"
+      ]
+    },
+    {
+      "slug": "Dice",
+      "name": "Dice",
+      "description": "random gates, Vocts",
+      "tags": [
+        "random"
+      ]
+    },
+    {
+      "slug": "DiceOnSteroids",
+      "name": "DiceOnSteroids",
+      "description": "random gates, voct",
+      "tags": [
+        "random",
+        "gates",
+        "voct"
+      ]
+    },
+    {
+      "slug": "RainStorm",
+      "name": "RainStorm",
+      "description": "reverb",
+      "tags": [
+        "reverb",
+        "distortion"
+      ]
+    },
+    {
+      "slug": "Stagger",
+      "name": "Stagger",
+      "description": "VCO",
+      "tags": [
+        "VCO"
+      ]
+    },
+    {
+      "slug": "PsySeq",
+      "name": "PsySeq",
+      "description": "sequencer",
+      "tags": [
+        "sequencer",
+        "random"
+      ]
+    },
+    {
+      "slug": "HeatRev",
+      "name": "HeatRev",
+      "description": "",
+      "tags": []
+    },
+    {
+      "slug": "Ambience",
+      "name": "Ambience",
+      "description": "revirb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "CellAutoGate",
+      "name": "CellAutoGate",
+      "description": "gate",
+      "tags": [
+        "gate"
+      ]
+    },
+    {
+      "slug": "ExpressArpeggiator",
+      "name": "ExpressArpeggiator",
+      "description": "Arpeggiator",
+      "tags": [
+        "Arpeggiator"
+      ]
+    },
+    {
+      "slug": "Mixer3",
+      "name": "Mixer3",
+      "description": "mixer",
+      "tags": [
+        "mixer"
+      ]
+    },
+    {
+      "slug": "Mixer6",
+      "name": "Mixer6",
+      "description": "mixer",
+      "tags": [
+        "mixer"
+      ]
+    },
+    {
+      "slug": "Swapper",
+      "name": "Swapper",
+      "description": "swap signals",
+      "tags": [
+        "swap signals"
+      ]
+    },
+    {
+      "slug": "FancyADSR",
+      "name": "FancyADSR",
+      "description": "FancyADSR",
+      "tags": [
+        "adsr"
+      ]
+    },
+    {
+      "slug": "VCA2",
+      "name": "VCA2",
+      "description": "VCA",
+      "tags": [
+        "VCA"
+      ]
+    },
+    {
+      "slug": "VCAPoly",
+      "name": "VCAPoly",
+      "description": "VCA up to 16 voices",
+      "tags": [
+        "vca",
+        "polyphony"
+      ]
+    },
+    {
+      "slug": "Range",
+      "name": "Range",
+      "description": "offset",
+      "tags": [
+        "range",
+        "offset"
+      ]
+    },
+    {
+      "slug": "Sampler",
+      "name": "Sampler",
+      "description": "sampler",
+      "tags": [
+        "sampler"
+      ]
+    },
+    {
+      "slug": "Whirlpool",
+      "name": "Whirlpool",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "Vortex",
+      "name": "Vortex",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "InfinityRev",
+      "name": "InfinityRev",
+      "description": "Reverb",
+      "tags": [
+        "Reverb"
+      ]
+    },
+    {
+      "slug": "Stagger2",
+      "name": "Stagger2",
+      "description": "VCO",
+      "tags": [
+        "VCO"
+      ]
+    },
+    {
+      "slug": "PsyReverb2",
+      "name": "PsyReverb2",
+      "description": "reverb",
+      "tags": [
+        "reverb"
+      ]
+    },
+    {
+      "slug": "Lifeform",
+      "name": "Lifeform",
+      "description": "visualization",
+      "tags": [
+        "visualization"
+      ]
+    },
+    {
+      "slug": "Spikes",
+      "name": "Spikes",
+      "description": "LFO",
+      "tags": [
+        "lfo"
+      ]
+    }
+  ]
+}

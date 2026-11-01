@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -e  # stop on error
+
+echo "Cleaning..."
+make clean
+
+echo "Building..."
+make -j16
+
+echo "Creating dist..."
+make dist
+
+echo "Installing..."
+make install
+
+echo "Done."
+ cp dist/AGMM-2.0.0-win-x64.vcvplugin /c/Users/andreas/AppData/Local/Rack2/plugins-win-x64
