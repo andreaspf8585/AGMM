@@ -43,6 +43,7 @@ void init(Plugin *p)
 	p->addModel(modelPsyReverb2);
 	p->addModel(modelLifeform);
 	p->addModel(modelSpikes);
+	p->addModel(modelGates);
 
 
 

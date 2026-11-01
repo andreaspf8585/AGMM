@@ -46,3 +46,4 @@ extern Model* modelStagger2;
 extern Model* modelPsyReverb2;
 extern Model* modelLifeform;
 extern Model* modelSpikes;
+extern Model* modelGates;

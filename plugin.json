@@ -331,6 +331,15 @@
       "tags": [
         "lfo"
       ]
+    },
+    {
+      "slug": "Gates",
+      "name": "Gates",
+      "description": "logic gates",
+      "tags": [
+        "logic",
+        "gates"
+      ]
     }
   ]
 }
