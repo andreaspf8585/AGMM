@@ -162,9 +162,9 @@ static float processLPG(float in, LPGState& st, float fc, float res, float drive
 }
 
 // ============================================================
-// Panel layout constants — DOUBLED WIDTH
+// Panel layout constants — HALF WIDTH (original 4HP-ish width)
 // ============================================================
-static const float BS_W = RACK_GRID_WIDTH * 64;   // 480 (doubled)
+static const float BS_W = RACK_GRID_WIDTH * 32;   // 240 (half of doubled)
 static const float BS_H = RACK_GRID_HEIGHT;       // 380
 
 // ---- Left column (signal path) ----
@@ -172,16 +172,16 @@ static const float BS_MAIN_Y   = 90.f;    // Cutoff / Res / Drive knobs
 static const float BS_SIGIN_Y  = 170.f;   // Signal input jacks (LP/BP/HP)
 static const float BS_OUT_Y    = 300.f;   // Output jacks (LP/BP/HP)
 
-// ---- Right column (engine + CV) ----
-static const float BS_ENGINE_Y = 70.f;    // Engine selector + lights
+// ---- Right column (engine + CV) — now stacked vertically on half width ----
+static const float BS_ENGINE_Y = 60.f;    // Engine selector + lights
 static const float BS_CVATT_Y  = 160.f;   // CV attenuverters
-static const float BS_CVIN_Y   = 220.f;   // CV input jacks
+static const float BS_CVIN_Y   = 240.f;   // CV input jacks
 
-// Column X positions
-// Left half occupies 0..240, right half 240..480
-static float bsLeftX(int i)  { return 60.f + 60.f * i; }   // 60, 120, 180
-static float bsRightX(int i) { return 300.f + 60.f * i; }  // 300, 360, 420
-static const float BS_RIGHT_CX = 360.f;                    // right half center
+// Column X positions for half width (240)
+// Left half occupies 0..120, right half 120..240
+static float bsLeftX(int i)  { return 30.f + 30.f * i; }   // 30, 60, 90
+static float bsRightX(int i) { return 150.f + 30.f * i; }  // 150, 180, 210
+static const float BS_RIGHT_CX = 180.f;                    // right half center
 
 // ============================================================
 struct Bastion : Module {
@@ -485,10 +485,10 @@ struct BastionPanel : TransparentWidget {
         drawPanelBase(vg, BS_W, BS_H, "BASTION");
 
         // Vertical divider: left signal path | right engine+CV
-        verticalDivider(vg, 240.f, 50.f, 350.f);
+        verticalDivider(vg, 120.f, 50.f, 350.f);
 
         // ---- LEFT: FILTER (main knobs) ----
-        sectionHeader(vg, 20.f, BS_MAIN_Y - 28.f, 200.f, "FILTER");
+        sectionHeader(vg, 10.f, BS_MAIN_Y - 28.f, 100.f, "FILTER");
         const char* mainTitles[3] = {"CUTOFF", "RES", "DRIVE"};
         for (int i = 0; i < 3; ++i) {
             float cx = bsLeftX(i);
@@ -497,13 +497,13 @@ struct BastionPanel : TransparentWidget {
         }
 
         // ---- LEFT: INPUTS ----
-        sectionHeader(vg, 20.f, BS_SIGIN_Y - 32.f, 200.f, "INPUTS");
+        sectionHeader(vg, 10.f, BS_SIGIN_Y - 32.f, 100.f, "INPUTS");
         label(vg, bsLeftX(0), BS_SIGIN_Y + 24.f, "LP", 7.f, colHi());
         label(vg, bsLeftX(1), BS_SIGIN_Y + 24.f, "BP", 7.f, colAccent());
         label(vg, bsLeftX(2), BS_SIGIN_Y + 24.f, "HP", 7.f, colMag());
 
         // ---- LEFT: OUTPUTS ----
-        sectionHeader(vg, 20.f, BS_OUT_Y - 32.f, 200.f, "OUTPUTS");
+        sectionHeader(vg, 10.f, BS_OUT_Y - 32.f, 100.f, "OUTPUTS");
         label(vg, bsLeftX(0), BS_OUT_Y + 24.f, "LP", 7.f, colHi());
         label(vg, bsLeftX(1), BS_OUT_Y + 24.f, "BP", 7.f, colAccent());
         label(vg, bsLeftX(2), BS_OUT_Y + 24.f, "HP", 7.f, colMag());
@@ -513,7 +513,7 @@ struct BastionPanel : TransparentWidget {
         label(vg, BS_RIGHT_CX, BS_ENGINE_Y - 34.f, "ENGINE", 7.f, colAccent());
 
         // ---- RIGHT: CV ----
-        sectionHeader(vg, 260.f, BS_CVATT_Y - 20.f, 200.f, "CV");
+        sectionHeader(vg, 130.f, BS_CVATT_Y - 20.f, 100.f, "CV");
         const char* cvTitles[3] = {"CUT", "RES", "DRV"};
         for (int i = 0; i < 3; ++i) {
             float cx = bsRightX(i);
@@ -545,7 +545,7 @@ struct BastionWidget : ModuleWidget {
         setModule(module);
         setPanel(createPanel(asset::plugin(pluginInstance, "res/Bastion.svg")));
 
-        // Panel (doubled width)
+        // Panel (half width)
         addChild(new BastionPanel());
 
         // ========================================================
@@ -584,11 +584,11 @@ struct BastionWidget : ModuleWidget {
         addParam(createParamCentered<BastionEngineKnob>(
             Vec(BS_RIGHT_CX, BS_ENGINE_Y), module, Bastion::ENGINE_PARAM));
 
-        // Engine indicator lights (flanking the knob, wider spacing)
+        // Engine indicator lights (flanking the knob, closer spacing for half width)
         addChild(createLightCentered<SmallLight<GreenLight>>(
-            Vec(BS_RIGHT_CX - 56.f, BS_ENGINE_Y), module, Bastion::LIGHT_ENGINE_A));
-                addChild(createLightCentered<SmallLight<GreenLight>>(
-            Vec(BS_RIGHT_CX + 56.f, BS_ENGINE_Y), module, Bastion::LIGHT_ENGINE_B));
+            Vec(BS_RIGHT_CX - 28.f, BS_ENGINE_Y), module, Bastion::LIGHT_ENGINE_A));
+        addChild(createLightCentered<SmallLight<GreenLight>>(
+            Vec(BS_RIGHT_CX + 28.f, BS_ENGINE_Y), module, Bastion::LIGHT_ENGINE_B));
 
         // CV attenuverters: Cut / Res / Drv
         addParam(createParamCentered<Trimpot>(
@@ -596,9 +596,9 @@ struct BastionWidget : ModuleWidget {
         addParam(createParamCentered<Trimpot>(
             Vec(bsRightX(1), BS_CVATT_Y), module, Bastion::RES_CV_PARAM));
         addParam(createParamCentered<Trimpot>(
-            Vec(bsRightX(2), BS_CVATT_Y), module, Bastion::DRIVE_CV_PARAM));
+                      Vec(bsRightX(2), BS_CVATT_Y), module, Bastion::DRIVE_CV_PARAM));
 
-        // CV inputs: Cut / Res / Drv
+        // CV input jacks: Cut / Res / Drv
         addInput(createInputCentered<PJ301MPort>(
             Vec(bsRightX(0), BS_CVIN_Y), module, Bastion::CUTOFF_INPUT));
         addInput(createInputCentered<PJ301MPort>(
@@ -606,13 +606,45 @@ struct BastionWidget : ModuleWidget {
         addInput(createInputCentered<PJ301MPort>(
             Vec(bsRightX(2), BS_CVIN_Y), module, Bastion::DRIVE_INPUT));
 
+        // ========================================================
         // Screws
+        // ========================================================
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
     }
+
+    void appendContextMenu(Menu* menu) override {
+        Bastion* module = dynamic_cast<Bastion*>(this->module);
+        if (!module) return;
+
+        menu->addChild(new MenuSeparator);
+
+        // Engine quick-select submenu
+        menu->addChild(createSubmenuItem("Engine", "",
+            [=](Menu* submenu) {
+                const char* names[NUM_ENGINES] = {
+                    "Moog Ladder", "TB-303 Diode", "MS-20", "SEM SVF",
+                    "Steiner-Parker", "CEM3320", "Roland OTA",
+                    "EMS Diode", "EDP Wasp", "Buchla LPG"
+                };
+                for (int i = 0; i < NUM_ENGINES; ++i) {
+                    submenu->addChild(createCheckMenuItem(names[i], "",
+                        [=]() { return (int)std::round(module->params[Bastion::ENGINE_PARAM].getValue()) == i; },
+                        [=]() { module->params[Bastion::ENGINE_PARAM].setValue((float)i); }
+                    ));
+                }
+            }
+        ));
+
+        menu->addChild(createMenuItem("Reset State", "", [=]() {
+            module->onReset();
+        }));
+    }
 };
 
+// ============================================================
+// Module registration
 // ============================================================
 Model* modelBastion = createModel<Bastion, BastionWidget>("Bastion");
