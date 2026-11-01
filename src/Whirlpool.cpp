@@ -5,13 +5,187 @@
 #include <vector>
 #include <algorithm>
 
-static const float WH_W = RACK_GRID_WIDTH * 20;   // 300
-static const float WH_H = RACK_GRID_HEIGHT;       // 380
-static const float WH_DX = 30.f, WH_DY = 46.f, WH_DW = 240.f, WH_DH = 90.f;
-static const float WH_RA = 156.f, WH_RAH = 90.f;  // row A: 5 knobs with CV + attenuverter
-static const float WH_RB = 256.f, WH_RBH = 50.f;  // row B: stereo switches + clear
-static const float WH_JY = 346.f;                 // row C: jacks
+// ------------------------------------------------------------
+// Layout constants
+// ------------------------------------------------------------
+static const int   WH_SCOPE_N = 222;               // waveform history bins (1 px each)
+static const int   WH_SPEC_N  = 4096;              // FFT size
+static const int   WH_BANDS   = 111;               // spectrum bands (2 px each)
+static const float WH_W = RACK_GRID_WIDTH * 20;    // 300
+static const float WH_H = RACK_GRID_HEIGHT;        // 380
+static const float WH_DX = 20.f, WH_DY = 46.f, WH_DW = 260.f, WH_DH = 130.f;   // large display
+static const float WH_RA = 192.f, WH_RAH = 90.f;   // row A: 5 knobs with CV + attenuverter
+static const float WH_RB = 286.f, WH_RBH = 30.f;   // row B: stereo switches + clear
+static const float WH_JY = 346.f;                  // row C: jacks
 static float whCol(int i) { return 38.f + 56.f * i; }
+
+// Plot area inside the display
+static const float WD_PX = 8.f, WD_PY = 18.f, WD_PW = 222.f, WD_PH = 96.f;
+static const float WD_TABX[3] = {6.f, 46.f, 86.f};
+static const float WD_TABW[3] = {36.f, 36.f, 46.f};
+
+// ------------------------------------------------------------
+// Reverb engine: 8-line feedback delay network (FDN)
+//   stereo input -> early reflections + 4-stage allpass diffusion per side
+//   -> 8 modulated delay lines (4-point Hermite read) with per-line RT60 gain
+//      and one-pole damping, mixed by an orthonormal 8x8 Hadamard matrix
+//   -> decorrelated stereo taps + DC blocker
+// ------------------------------------------------------------
+namespace whengine {
+
+static const int N = 8;
+static const float BASE[N] = {1117.f, 1327.f, 1601.f, 1861.f, 2143.f, 2423.f, 2713.f, 2999.f};  // samples @ 48 kHz (primes)
+static const float PL[N]   = {1.f,  1.f, -1.f, -1.f,  1.f, 1.f, -1.f, -1.f};   // Walsh patterns: L / R in+out taps
+static const float PR[N]   = {1.f, -1.f,  1.f, -1.f, -1.f, 1.f, -1.f,  1.f};
+static const float ER_MS[N] = {4.3f, 8.9f, 13.7f, 17.9f, 23.5f, 29.1f, 36.7f, 43.3f};
+static const float ER_G[N]  = {0.80f, -0.70f, 0.60f, -0.55f, 0.45f, -0.40f, 0.32f, -0.28f};
+static const int   AP_L[4] = {89, 131, 223, 337};
+static const int   AP_R[4] = {97, 149, 241, 359};
+
+struct Shared {
+    float delay[N] = {};      // current delay lengths (samples)
+    float mod[N] = {};        // current modulation offsets (samples)
+    float gain[N] = {};       // per-line feedback gain from RT60
+    float erTap[N] = {};      // early reflection tap times (samples)
+    float lpCoef = 0.5f;      // damping one-pole coefficient
+    float inGain = 0.3f;
+    float erLevel = 0.28f;
+};
+
+struct Allpass {
+    std::vector<float> buf;
+    int pos = 0;
+    void resize(int n) { buf.assign(n, 0.f); pos = 0; }
+    void clear() { std::fill(buf.begin(), buf.end(), 0.f); pos = 0; }
+    float process(float x, float g) {
+        float d = buf[pos];
+        float v = x - g * d;
+        buf[pos] = v;
+        if (++pos >= (int) buf.size()) pos = 0;
+        return d + g * v;
+    }
+};
+
+inline float readHermite(const std::vector<float>& b, int w, float d, int mask) {
+    float pos = (float) w - d;
+    int i0 = (int) std::floor(pos);
+    float f = pos - (float) i0;
+    float ym1 = b[(i0 - 1) & mask];
+    float y0  = b[i0 & mask];
+    float y1  = b[(i0 + 1) & mask];
+    float y2  = b[(i0 + 2) & mask];
+    float c1 = 0.5f * (y1 - ym1);
+    float c2 = ym1 - 2.5f * y0 + 2.f * y1 - 0.5f * y2;
+    float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
+    return ((c3 * f + c2) * f + c1) * f + y0;
+}
+
+inline void hadamard8(float* x) {
+    for (int i = 0; i < 8; i += 2) { float a = x[i], b = x[i + 1]; x[i] = a + b; x[i + 1] = a - b; }
+    for (int i = 0; i < 8; i += 4)
+        for (int j = 0; j < 2; ++j) { float a = x[i + j], b = x[i + j + 2]; x[i + j] = a + b; x[i + j + 2] = a - b; }
+    for (int j = 0; j < 4; ++j) { float a = x[j], b = x[j + 4]; x[j] = a + b; x[j + 4] = a - b; }
+    for (int i = 0; i < 8; ++i) x[i] *= 0.35355339f;
+}
+
+struct Engine {
+    std::vector<float> line[N];
+    int mask = 0, w = 0;
+    float lp[N] = {};
+    float lineAbs[N] = {};
+
+    std::vector<float> er;
+    int erMask = 0, erW = 0;
+
+    Allpass apL[4], apR[4];
+
+    float dcXL = 0.f, dcYL = 0.f, dcXR = 0.f, dcYR = 0.f;
+
+    void init(float sr) {
+        float srf = sr / 48000.f;
+        int need = (int) (2999.f * 2.0f * srf + 20.f * srf + 64.f);
+        int len = 1;
+        while (len < need) len <<= 1;
+        mask = len - 1;
+        for (int i = 0; i < N; ++i) line[i].assign(len, 0.f);
+
+        int erNeed = (int) (0.13f * sr);
+        int erLen = 1;
+        while (erLen < erNeed) erLen <<= 1;
+        erMask = erLen - 1;
+        er.assign(erLen, 0.f);
+
+        for (int i = 0; i < 4; ++i) {
+            apL[i].resize(std::max(8, (int) (AP_L[i] * srf)));
+            apR[i].resize(std::max(8, (int) (AP_R[i] * srf)));
+        }
+        reset();
+    }
+
+    void reset() {
+        for (int i = 0; i < N; ++i) {
+            std::fill(line[i].begin(), line[i].end(), 0.f);
+            lp[i] = 0.f;
+            lineAbs[i] = 0.f;
+        }
+        std::fill(er.begin(), er.end(), 0.f);
+        for (int i = 0; i < 4; ++i) { apL[i].clear(); apR[i].clear(); }
+        w = 0;
+        erW = 0;
+        dcXL = dcYL = dcXR = dcYR = 0.f;
+    }
+
+    void process(const Shared& s, float inL, float inR, float& wetL, float& wetR) {
+        // early reflections (alternating L / R taps)
+        er[erW] = 0.5f * (inL + inR);
+        float erL = 0.f, erR = 0.f;
+        for (int t = 0; t < N; ++t) {
+            float v = er[(erW - (int) s.erTap[t]) & erMask] * ER_G[t];
+            if (t & 1) erR += v; else erL += v;
+        }
+        erW = (erW + 1) & erMask;
+
+        // input diffusion
+        float dl = inL, dr = inR;
+        for (int i = 0; i < 4; ++i) {
+            dl = apL[i].process(dl, 0.6f);
+            dr = apR[i].process(dr, 0.6f);
+        }
+
+        // read, damp, apply RT60 gain
+        float y[N];
+        float oL = 0.f, oR = 0.f;
+        for (int i = 0; i < N; ++i) {
+            float r = readHermite(line[i], w, s.delay[i] + s.mod[i], mask);
+            lp[i] += s.lpCoef * (r - lp[i]);
+            y[i] = lp[i] * s.gain[i];
+            lineAbs[i] = std::fabs(y[i]);
+            oL += PL[i] * y[i];
+            oR += PR[i] * y[i];
+        }
+
+        // feedback matrix + injection
+        float f[N];
+        for (int i = 0; i < N; ++i) f[i] = y[i];
+        hadamard8(f);
+        for (int i = 0; i < N; ++i) {
+            float v = f[i] + (dl * PL[i] + dr * PR[i]) * s.inGain;
+            line[i][w] = rack::math::clamp(v, -20.f, 20.f);
+        }
+        w = (w + 1) & mask;
+
+        float wl = oL * 0.35f + erL * s.erLevel;
+        float wr = oR * 0.35f + erR * s.erLevel;
+
+        // DC blocker
+        float hl = wl - dcXL + 0.995f * dcYL; dcXL = wl; dcYL = hl;
+        float hr = wr - dcXR + 0.995f * dcYR; dcXR = wr; dcYR = hr;
+        wetL = hl;
+        wetR = hr;
+    }
+};
+
+} // namespace whengine
 
 struct Whirlpool : Module {
     enum ParamId {
@@ -51,52 +225,14 @@ struct Whirlpool : Module {
         LIGHTS_LEN
     };
 
-    struct Tank {
-        std::vector<float> delayL[4];
-        std::vector<float> delayR[4];
-        size_t writeIdx[4] = {0, 0, 0, 0};
-        float iirL = 0.0f;
-        float iirR = 0.0f;
-        float lfoPhase = 0.0f;
-
-        void resize(int sizes[4]) {
-            for (int i = 0; i < 4; ++i) {
-                delayL[i].resize(sizes[i], 0.0f);
-                delayR[i].resize(sizes[i], 0.0f);
-                // a shrinking buffer must not leave the write index out of range
-                if (writeIdx[i] >= (size_t) sizes[i]) writeIdx[i] = 0;
-            }
-        }
-
-        void reset() {
-            for (int i = 0; i < 4; ++i) {
-                std::fill(delayL[i].begin(), delayL[i].end(), 0.0f);
-                std::fill(delayR[i].begin(), delayR[i].end(), 0.0f);
-                writeIdx[i] = 0;
-            }
-            iirL = iirR = 0.0f;
-            lfoPhase = 0.0f;
-        }
-    };
-
-    struct Channel {
-        Tank tanks[4];
-        void reset() {
-            for (auto& t : tanks) t.reset();
-        }
-        void resize(int tankSizes[4][4]) {
-            for (int i = 0; i < 4; ++i)
-                tanks[i].resize(tankSizes[i]);
-        }
-    };
-
     static constexpr int MAX_CHANNELS = 16;
-    Channel channels[MAX_CHANNELS];
+    whengine::Engine engines[MAX_CHANNELS];
+    whengine::Shared sh;
 
-    static constexpr int BASE_A = 4801;
-    static constexpr int BASE_B = 3607;
-    static constexpr int BASE_C = 2411;
-    static constexpr int BASE_D = 1201;
+    float allocSr = 0.f;
+    float kSmooth = 0.001f, kSize = 0.0005f;
+    float sizeS = 1.f, rtS = 4.f, fcS = 6000.f, detS = 0.2f;
+    float lfoPhase[8] = {};
 
     // Clear trigger handling
     dsp::SchmittTrigger clearButtonTrigger;
@@ -104,38 +240,44 @@ struct Whirlpool : Module {
     bool clearRequested = false;
     float clearFade = 1.0f;
     bool clearActive = false;
-
     int limiterRecovery = 0;
-    bool stereoInput = false;
-    bool stereoOutput = false;
-
-    float lastBigness = -1.f;
-    float lastSr = 0.f;
 
     // Display data (written by the audio thread, read by the UI thread;
     // a torn read is only cosmetic)
-    float dispLevel[4] = {};
-    float dispLfo[4] = {};
-    float dispVal[5] = {};      // replace, brightness, detune, bigness, mix (with CV)
-    float meterIn = 0.f, meterOutL = 0.f, meterOutR = 0.f;
+    int dispMode = 0;                 // 0 wave, 1 bars, 2 spectrum (saved with the patch)
     int dispCh = 1;
+    float dispVal[5] = {};            // replace, brightness, detune, bigness, mix (with CV)
+    float dispLine[8] = {};           // FDN line levels (voice 0)
+    float dispDelayMs[8] = {};
+    float dispRt60 = 4.f;
+    float dispSr = 48000.f;
+    float meterOutL = 0.f, meterOutR = 0.f;
+
+    float scopeMinL[WH_SCOPE_N] = {}, scopeMaxL[WH_SCOPE_N] = {};
+    float scopeMinR[WH_SCOPE_N] = {}, scopeMaxR[WH_SCOPE_N] = {};
+    float scopeMinI[WH_SCOPE_N] = {}, scopeMaxI[WH_SCOPE_N] = {};
+    int scopeHead = 0, scopeCount = 0, scopeBinSamples = 864;
+    float accMinL = 1e9f, accMaxL = -1e9f, accMinR = 1e9f, accMaxR = -1e9f, accMinI = 1e9f, accMaxI = -1e9f;
+
+    float specBuf[WH_SPEC_N] = {};
+    int specPos = 0;
 
     Whirlpool() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        configParam(REPLACE_PARAM, 0.f, 1.f, 0.f, "Replace", "%", 0.f, 100.f);
+        configParam(REPLACE_PARAM, 0.f, 1.f, 0.f, "Replace (shortens the tail)", "%", 0.f, 100.f);
         configParam(REPLACE_ATTEN, -1.f, 1.f, 0.f, "Replace CV attenuverter", "%", 0.f, 100.f);
-        configParam(BRIGHTNESS_PARAM, 0.f, 1.f, 0.5f, "Brightness", "%", 0.f, 100.f);
+        configParam(BRIGHTNESS_PARAM, 0.f, 1.f, 0.5f, "Brightness (damping)", "%", 0.f, 100.f);
         configParam(BRIGHTNESS_ATTEN, -1.f, 1.f, 0.f, "Brightness CV attenuverter", "%", 0.f, 100.f);
-        configParam(DETUNE_PARAM, 0.f, 1.f, 0.2f, "Detune", "%", 0.f, 100.f);
+        configParam(DETUNE_PARAM, 0.f, 1.f, 0.2f, "Detune (modulation)", "%", 0.f, 100.f);
         configParam(DETUNE_ATTEN, -1.f, 1.f, 0.f, "Detune CV attenuverter", "%", 0.f, 100.f);
-        configParam(BIGNESS_PARAM, 0.f, 1.f, 0.6f, "Bigness", "%", 0.f, 100.f);
+        configParam(BIGNESS_PARAM, 0.f, 1.f, 0.6f, "Bigness (room size and decay)", "%", 0.f, 100.f);
         configParam(BIGNESS_ATTEN, -1.f, 1.f, 0.f, "Bigness CV attenuverter", "%", 0.f, 100.f);
         configParam(MIX_PARAM, 0.f, 1.f, 0.5f, "Dry/wet", "%", 0.f, 100.f);
         configParam(MIX_ATTEN, -1.f, 1.f, 0.f, "Mix CV attenuverter", "%", 0.f, 100.f);
 
-        configSwitch(IN_STEREO_BUTTON_PARAM, 0.f, 1.f, 0.f, "Stereo input", {"Off (mono / poly)", "On"});
-        configSwitch(OUT_STEREO_BUTTON_PARAM, 0.f, 1.f, 0.f, "Stereo output", {"Off (mono / poly)", "On"});
+        configSwitch(IN_STEREO_BUTTON_PARAM, 0.f, 1.f, 0.f, "Stereo input (L/R into one reverb)", {"Off (mono / poly)", "On"});
+        configSwitch(OUT_STEREO_BUTTON_PARAM, 0.f, 1.f, 0.f, "Stereo output (voices summed to L/R)", {"Off (mono / poly)", "On"});
         configButton(CLEAR_BUTTON_PARAM, "Clear");
 
         configInput(IN_L_INPUT, "Left / poly");
@@ -151,33 +293,37 @@ struct Whirlpool : Module {
         configOutput(OUT_R_OUTPUT, "Right");
         configLight(CLEAR_BUTTON_LIGHT, "Clear");
 
-        onReset();
+        for (int i = 0; i < 8; ++i) lfoPhase[i] = 0.125f * i;
     }
 
     void onReset() override {
         for (int c = 0; c < MAX_CHANNELS; ++c)
-            channels[c].reset();
+            engines[c].reset();
         clearRequested = false;
         clearFade = 1.0f;
         clearActive = false;
         limiterRecovery = 0;
-        stereoInput = false;
-        stereoOutput = false;
     }
 
-    void resizeDelays(float bigness, float sampleRate) {
-        float rateFactor = sampleRate / 44100.0f;
-        float sizeScale = 0.2f + bigness * 1.2f;
-        int newSizes[4][4];
-        for (int t = 0; t < 4; ++t) {
-            float tankScale = 1.0f - t * 0.15f;
-            newSizes[t][0] = std::max(16, (int)(BASE_A * sizeScale * tankScale * rateFactor));
-            newSizes[t][1] = std::max(16, (int)(BASE_B * sizeScale * tankScale * rateFactor));
-            newSizes[t][2] = std::max(16, (int)(BASE_C * sizeScale * tankScale * rateFactor));
-            newSizes[t][3] = std::max(16, (int)(BASE_D * sizeScale * tankScale * rateFactor));
-        }
-        for (int ch = 0; ch < MAX_CHANNELS; ++ch)
-            channels[ch].resize(newSizes);
+    json_t* dataToJson() override {
+        json_t* root = json_object();
+        json_object_set_new(root, "displayMode", json_integer(dispMode));
+        return root;
+    }
+
+    void dataFromJson(json_t* root) override {
+        json_t* m = json_object_get(root, "displayMode");
+        if (m) dispMode = rack::math::clamp((int) json_integer_value(m), 0, 2);
+    }
+
+    void allocate(float sr) {
+        for (int c = 0; c < MAX_CHANNELS; ++c)
+            engines[c].init(sr);
+        allocSr = sr;
+        dispSr = sr;
+        kSmooth = 1.f - std::exp(-1.f / (0.05f * sr));
+        kSize   = 1.f - std::exp(-1.f / (0.12f * sr));
+        scopeBinSamples = std::max(1, (int) (sr / 55.5f));      // 222 bins ~ 4 s of history
     }
 
     float getParam(int paramId, int attenId, int cvId) {
@@ -189,36 +335,36 @@ struct Whirlpool : Module {
     }
 
     void process(const ProcessArgs& args) override {
-        float sampleRate = args.sampleRate;
-        float sampleTime = 1.0f / sampleRate;
+        const float sr = args.sampleRate;
+        const float sampleTime = 1.0f / sr;
+        const float srf = sr / 48000.f;
 
+        if (sr != allocSr) {
+            allocate(sr);
+            sizeS = 0.35f + 1.65f * params[BIGNESS_PARAM].getValue();
+            rtS = 0.35f * std::pow(60.f, params[BIGNESS_PARAM].getValue());
+            fcS = 800.f * std::pow(24.f, params[BRIGHTNESS_PARAM].getValue());
+            detS = params[DETUNE_PARAM].getValue();
+        }
+
+        // ---------------- channel handling ----------------
         int inLch = inputs[IN_L_INPUT].getChannels();
         int inRch = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getChannels() : 0;
         bool useStereoIn = params[IN_STEREO_BUTTON_PARAM].getValue() > 0.5f;
+        bool useStereoOut = params[OUT_STEREO_BUTTON_PARAM].getValue() > 0.5f;
 
-        int numChannels = 1;
-        if (useStereoIn) {
-            numChannels = 2;
-            stereoInput = true;
-        } else {
-            numChannels = std::max(inLch, inRch);
-            numChannels = rack::math::clamp(numChannels, 1, MAX_CHANNELS);
-            stereoInput = false;
-        }
+        int numChannels = useStereoIn ? 1 : rack::math::clamp(std::max(inLch, inRch), 1, MAX_CHANNELS);
         dispCh = numChannels;
 
-        bool useStereoOut = params[OUT_STEREO_BUTTON_PARAM].getValue() > 0.5f;
         if (useStereoOut) {
-            outputs[OUT_L_OUTPUT].setChannels(2);
-            outputs[OUT_R_OUTPUT].setChannels(2);
-            stereoOutput = true;
+            outputs[OUT_L_OUTPUT].setChannels(1);
+            outputs[OUT_R_OUTPUT].setChannels(1);
         } else {
             outputs[OUT_L_OUTPUT].setChannels(numChannels);
             outputs[OUT_R_OUTPUT].setChannels(numChannels);
-            stereoOutput = false;
         }
 
-        // Read parameters (raw, no smoothing)
+        // ---------------- parameters ----------------
         float replace = getParam(REPLACE_PARAM, REPLACE_ATTEN, REPLACE_CV_INPUT);
         float brightness = getParam(BRIGHTNESS_PARAM, BRIGHTNESS_ATTEN, BRIGHTNESS_CV_INPUT);
         float detune = getParam(DETUNE_PARAM, DETUNE_ATTEN, DETUNE_CV_INPUT);
@@ -227,14 +373,41 @@ struct Whirlpool : Module {
         dispVal[0] = replace; dispVal[1] = brightness; dispVal[2] = detune;
         dispVal[3] = bigness; dispVal[4] = mix;
 
-        // Resize delays when bigness (or the sample rate) changes
-        if (std::abs(bigness - lastBigness) > 0.01f || sampleRate != lastSr) {
-            resizeDelays(bigness, sampleRate);
-            lastBigness = bigness;
-            lastSr = sampleRate;
-        }
+        // targets, smoothed so that no knob move or CV step ever clicks
+        float sizeT = 0.35f + 1.65f * bigness;                                     // delay length scale
+        float rtT   = 0.35f * std::pow(60.f, bigness) * (1.f - 0.92f * replace);   // RT60 in seconds
+        rtT = std::max(rtT, 0.05f);
+        float fcT   = std::min(800.f * std::pow(24.f, brightness), 0.45f * sr);    // damping cutoff
+        sizeS += kSize * (sizeT - sizeS);
+        rtS   += kSmooth * (rtT - rtS);
+        fcS   += kSmooth * (fcT - fcS);
+        detS  += kSmooth * (detune - detS);
+        dispRt60 = rtS;
 
-        // Clear trigger with fade
+        // ---------------- shared per-sample engine state ----------------
+        float gSum = 0.f;
+        float depth = detS * 16.f * srf;
+        for (int i = 0; i < whengine::N; ++i) {
+            float d = whengine::BASE[i] * srf * sizeS;
+            sh.delay[i] = d;
+            float g = std::exp(-6.9078f * d / (sr * rtS));      // -60 dB after RT60
+            g = std::min(g, 0.9995f);
+            sh.gain[i] = g;
+            gSum += g;
+
+            lfoPhase[i] += (0.12f + 0.065f * i + 0.6f * detS) * sampleTime;
+            if (lfoPhase[i] >= 1.f) lfoPhase[i] -= 1.f;
+            sh.mod[i] = std::sin(2.f * (float) M_PI * lfoPhase[i]) * depth;
+
+            sh.erTap[i] = whengine::ER_MS[i] * 0.001f * sr * (0.4f + 0.8f * sizeS);
+            dispDelayMs[i] = d / sr * 1000.f;
+        }
+        sh.lpCoef = 1.f - std::exp(-2.f * (float) M_PI * fcS * sampleTime);
+        float gAvg = gSum / (float) whengine::N;
+        sh.inGain = 0.35f * (0.55f + 0.45f * std::sqrt(std::max(0.f, 1.f - gAvg * gAvg)));
+        sh.erLevel = 0.28f;
+
+        // ---------------- clear with fade ----------------
         bool clearPressed = params[CLEAR_BUTTON_PARAM].getValue() > 0.5f;
         bool clearTrig = clearButtonTrigger.process(clearPressed ? 1.f : 0.f) ||
                          clearInputTrigger.process(inputs[CLEAR_INPUT].getVoltage());
@@ -243,7 +416,7 @@ struct Whirlpool : Module {
         if (clearRequested) {
             clearFade -= sampleTime * 10.f;
             if (clearFade <= 0.0f) {
-                for (int i = 0; i < MAX_CHANNELS; ++i) channels[i].reset();
+                for (int i = 0; i < MAX_CHANNELS; ++i) engines[i].reset();
                 clearFade = 0.0f;
                 clearRequested = false;
                 clearActive = true;
@@ -259,23 +432,17 @@ struct Whirlpool : Module {
         }
         lights[CLEAR_BUTTON_LIGHT].setSmoothBrightness(clearPressed ? 1.0f : 0.0f, sampleTime);
 
-        // Algorithm parameters
-        float feedback = 0.35f + (1.0f - replace) * 0.35f;
-        float lowpassBase = 0.01f + brightness * 0.35f;
-        lowpassBase = rack::math::clamp(lowpassBase, 0.001f, 0.99f);
-        float lfoDepth = 4.0f + detune * 20.0f;
-        float md = 1.f - 5.f * sampleTime;
+        // ---------------- voices ----------------
+        const float cd = std::cos(mix * 0.5f * (float) M_PI);      // equal-power dry / wet
+        const float sw = std::sin(mix * 0.5f * (float) M_PI);
+        const float md = 1.f - 5.f * sampleTime;
 
+        float sumL = 0.f, sumR = 0.f, monIn = 0.f;
         for (int c = 0; c < numChannels; ++c) {
             float dryL, dryR;
             if (useStereoIn) {
-                if (c == 0) {
-                    dryL = inputs[IN_L_INPUT].getVoltage();
-                    dryR = inputs[IN_R_INPUT].getVoltage();
-                } else {
-                    dryL = inputs[IN_R_INPUT].getVoltage();
-                    dryR = inputs[IN_L_INPUT].getVoltage();
-                }
+                dryL = inputs[IN_L_INPUT].getVoltage();
+                dryR = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getVoltage() : dryL;
             } else {
                 dryL = inputs[IN_L_INPUT].getPolyVoltage(c);
                 dryR = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getPolyVoltage(c) : dryL;
@@ -283,135 +450,66 @@ struct Whirlpool : Module {
             if (!std::isfinite(dryL)) dryL = 0.f;
             if (!std::isfinite(dryR)) dryR = 0.f;
 
-            float currentInL = dryL;
-            float currentInR = dryR;
+            float wetL, wetR;
+            engines[c].process(sh, dryL, dryR, wetL, wetR);
 
-            // 4 serial tanks
-            for (int t = 0; t < 4; ++t) {
-                Tank& tank = channels[c].tanks[t];
+            float outL = (dryL * cd + wetL * sw) * clearFade;
+            float outR = (dryR * cd + wetR * sw) * clearFade;
 
-                // LFO with per-tank frequency variation
-                float lfoSpeed = 0.1f + detune * (1.2f + t * 0.2f);
-                tank.lfoPhase += lfoSpeed / sampleRate;
-                if (tank.lfoPhase >= 1.0f) tank.lfoPhase -= 1.0f;
-                float phase = tank.lfoPhase * 2.0f * M_PI;
-                float modL = std::sin(phase) * lfoDepth;
-                float modR = std::cos(phase) * lfoDepth;
-
-                // Linear interpolated read from a delay line
-                auto readDelay = [&](const std::vector<float>& buf, size_t idx, float offset) -> float {
-                    int size = (int)buf.size();
-                    if (size <= 1) return 0.f;
-                    float pos = (float)idx - offset;
-                    if (pos < 0) pos += size;
-                    int i0 = (int)pos;
-                    int i1 = (i0 + 1) % size;
-                    float frac = pos - i0;
-                    return buf[i0] * (1.f - frac) + buf[i1] * frac;
-                };
-
-                float offsetA = tank.delayL[0].size() * 0.35f;
-                float offsetB = tank.delayL[1].size() * 0.40f;
-                float offsetC = tank.delayL[2].size() * 0.50f;
-                float offsetD = tank.delayL[3].size() * 0.60f;
-
-                float outA_L = readDelay(tank.delayL[0], tank.writeIdx[0], offsetA + modL);
-                float outA_R = readDelay(tank.delayR[0], tank.writeIdx[0], offsetA + modR);
-                float outB_L = readDelay(tank.delayL[1], tank.writeIdx[1], offsetB - modR);
-                float outB_R = readDelay(tank.delayR[1], tank.writeIdx[1], offsetB - modL);
-                float outC_L = readDelay(tank.delayL[2], tank.writeIdx[2], offsetC);
-                float outC_R = readDelay(tank.delayR[2], tank.writeIdx[2], offsetC);
-                float outD_L = readDelay(tank.delayL[3], tank.writeIdx[3], offsetD);
-                float outD_R = readDelay(tank.delayR[3], tank.writeIdx[3], offsetD);
-
-                // Mix into tank
-                float tankL = currentInL + (outA_L - outC_R) * feedback * 0.35f;
-                float tankR = currentInR + (outA_R + outC_L) * feedback * 0.35f;
-                tankL = rack::math::clamp(tankL, -12.f, 12.f);
-                tankR = rack::math::clamp(tankR, -12.f, 12.f);
-
-                // Write to A
-                tank.delayL[0][tank.writeIdx[0]] = tankL;
-                tank.delayR[0][tank.writeIdx[0]] = tankR;
-
-                // Write to B
-                float bL = rack::math::clamp(tankL - outB_R * feedback * 0.35f, -12.f, 12.f);
-                float bR = rack::math::clamp(tankR + outB_L * feedback * 0.35f, -12.f, 12.f);
-                tank.delayL[1][tank.writeIdx[1]] = bL;
-                tank.delayR[1][tank.writeIdx[1]] = bR;
-
-                // Write to C
-                float cL = rack::math::clamp(outB_L * 0.35f + outD_R * 0.35f, -12.f, 12.f);
-                float cR = rack::math::clamp(outB_R * 0.35f - outD_L * 0.35f, -12.f, 12.f);
-                tank.delayL[2][tank.writeIdx[2]] = cL;
-                tank.delayR[2][tank.writeIdx[2]] = cR;
-
-                // Write to D
-                tank.delayL[3][tank.writeIdx[3]] = outC_L;
-                tank.delayR[3][tank.writeIdx[3]] = outC_R;
-
-                // Advance pointers
-                for (int i = 0; i < 4; ++i)
-                    tank.writeIdx[i] = (tank.writeIdx[i] + 1) % tank.delayL[i].size();
-
-                // Lowpass filter on the output of this tank
-                float sumL = (outA_L + outB_L + outC_L) * 0.333f;
-                float sumR = (outA_R + outB_R + outC_R) * 0.333f;
-                tank.iirL += lowpassBase * (sumL - tank.iirL);
-                tank.iirR += lowpassBase * (sumR - tank.iirR);
-                if (!std::isfinite(tank.iirL)) tank.iirL = 0.f;
-                if (!std::isfinite(tank.iirR)) tank.iirR = 0.f;
-
-                currentInL = tank.iirL;
-                currentInR = tank.iirR;
-
-                if (c == 0) {
-                    float lv = std::max(std::fabs(tank.iirL), std::fabs(tank.iirR));
-                    dispLevel[t] = std::max(lv, dispLevel[t] * md);
-                    dispLfo[t] = tank.lfoPhase;
-                }
-            }
-
-            // Final mix
-            float outL = (1.f - mix) * dryL + mix * currentInL;
-            float outR = (1.f - mix) * dryR + mix * currentInR;
-            outL *= clearFade;
-            outR *= clearFade;
-            outL = rack::math::clamp(outL, -12.f, 12.f);
-            outR = rack::math::clamp(outR, -12.f, 12.f);
-
-            // Safety limiter
+            // safety: never let a NaN or runaway value out
             if (!std::isfinite(outL) || !std::isfinite(outR)) {
                 outL = outR = 0.f;
                 if (limiterRecovery == 0) {
-                    for (int i = 0; i < MAX_CHANNELS; ++i) channels[i].reset();
-                    limiterRecovery = (int)(sampleRate * 0.1f);
+                    for (int i = 0; i < MAX_CHANNELS; ++i) engines[i].reset();
+                    limiterRecovery = (int) (sr * 0.1f);
                 }
             }
             if (limiterRecovery > 0) {
                 outL = outR = 0.f;
                 limiterRecovery--;
             }
+            outL = rack::math::clamp(outL, -12.f, 12.f);
+            outR = rack::math::clamp(outR, -12.f, 12.f);
+
+            sumL += outL;
+            sumR += outR;
+            monIn += 0.5f * (dryL + dryR);
 
             if (c == 0) {
-                meterIn = std::max(0.5f * (std::fabs(dryL) + std::fabs(dryR)), meterIn * md);
-                meterOutL = std::max(std::fabs(outL), meterOutL * md);
-                meterOutR = std::max(std::fabs(outR), meterOutR * md);
+                for (int i = 0; i < whengine::N; ++i)
+                    dispLine[i] = std::max(engines[0].lineAbs[i], dispLine[i] * md);
             }
 
-            // Output routing
-            if (useStereoOut) {
-                if (c == 0) {
-                    outputs[OUT_L_OUTPUT].setVoltage(outL, 0);
-                    outputs[OUT_R_OUTPUT].setVoltage(outR, 0);
-                } else if (c == 1) {
-                    outputs[OUT_L_OUTPUT].setVoltage(outR, 1);
-                    outputs[OUT_R_OUTPUT].setVoltage(outL, 1);
-                }
-            } else {
+            if (!useStereoOut) {
                 outputs[OUT_L_OUTPUT].setVoltage(outL, c);
                 outputs[OUT_R_OUTPUT].setVoltage(outR, c);
             }
+        }
+        if (useStereoOut) {
+            sumL = rack::math::clamp(sumL, -12.f, 12.f);
+            sumR = rack::math::clamp(sumR, -12.f, 12.f);
+            outputs[OUT_L_OUTPUT].setVoltage(sumL, 0);
+            outputs[OUT_R_OUTPUT].setVoltage(sumR, 0);
+        }
+
+        // ---------------- display feeds ----------------
+        meterOutL = std::max(std::fabs(sumL), meterOutL * md);
+        meterOutR = std::max(std::fabs(sumR), meterOutR * md);
+
+        specBuf[specPos] = 0.5f * (sumL + sumR);
+        specPos = (specPos + 1) & (WH_SPEC_N - 1);
+
+        accMinL = std::min(accMinL, sumL); accMaxL = std::max(accMaxL, sumL);
+        accMinR = std::min(accMinR, sumR); accMaxR = std::max(accMaxR, sumR);
+        accMinI = std::min(accMinI, monIn); accMaxI = std::max(accMaxI, monIn);
+        if (++scopeCount >= scopeBinSamples) {
+            scopeCount = 0;
+            scopeHead = (scopeHead + 1) % WH_SCOPE_N;
+            scopeMinL[scopeHead] = accMinL; scopeMaxL[scopeHead] = accMaxL;
+            scopeMinR[scopeHead] = accMinR; scopeMaxR[scopeHead] = accMaxR;
+            scopeMinI[scopeHead] = accMinI; scopeMaxI[scopeHead] = accMaxI;
+            accMinL = accMinR = accMinI = 1e9f;
+            accMaxL = accMaxR = accMaxI = -1e9f;
         }
     }
 };
@@ -570,11 +668,11 @@ struct WHPanel : TransparentWidget {
             label(vg, cx + 15.f, WH_RA + 80.f, "ATT");
         }
 
-        const char* b[3] = {"STEREO IN", "STEREO OUT", "CLEAR"};
+        const char* b[3] = {"ST IN", "ST OUT", "CLEAR"};
         for (int i = 0; i < 3; ++i) {
             float cx = whCol(i + 1);
             plate(vg, cx - 28.f, WH_RB, 56.f, WH_RBH);
-            label(vg, cx, WH_RB + 41.f, b[i]);
+            drawText(vg, cx + 11.f, WH_RB + WH_RBH / 2.f, b[i], 6.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
         }
 
         const char* io[5] = {"L IN", "R IN", "CLR IN", "OUT L", "OUT R"};
@@ -583,16 +681,125 @@ struct WHPanel : TransparentWidget {
     }
 };
 
-// Display: four tanks as concentric rings, each driven by its own LFO and level
-struct WHDisplay : TransparentWidget {
+// Display: switchable WAVE / BARS / SPECTRUM view (click a tab, click the plot to cycle,
+// or use the module's context menu)
+struct WHDisplay : OpaqueWidget {
     Whirlpool* module = nullptr;
+
+    float barPeak[8] = {};
+    float specSm[WH_BANDS], specPk[WH_BANDS];
+    std::vector<float> win, twC, twS, re, im, pw;
+
+    float scMinL[WH_SCOPE_N], scMaxL[WH_SCOPE_N], scMinR[WH_SCOPE_N], scMaxR[WH_SCOPE_N];
+    float scMinI[WH_SCOPE_N], scMaxI[WH_SCOPE_N];
+
     WHDisplay(Whirlpool* m) : module(m) {
         box.pos = Vec(WH_DX, WH_DY);
         box.size = Vec(WH_DW, WH_DH);
+
+        win.resize(WH_SPEC_N);
+        twC.resize(WH_SPEC_N / 2);
+        twS.resize(WH_SPEC_N / 2);
+        re.assign(WH_SPEC_N, 0.f);
+        im.assign(WH_SPEC_N, 0.f);
+        pw.assign(WH_SPEC_N / 2, 0.f);
+        for (int i = 0; i < WH_SPEC_N; ++i)
+            win[i] = 0.5f - 0.5f * std::cos(2.f * (float) M_PI * i / (float) WH_SPEC_N);   // Hann
+        for (int i = 0; i < WH_SPEC_N / 2; ++i) {
+            twC[i] = std::cos(2.f * (float) M_PI * i / (float) WH_SPEC_N);
+            twS[i] = std::sin(2.f * (float) M_PI * i / (float) WH_SPEC_N);
+        }
+        for (int b = 0; b < WH_BANDS; ++b) { specSm[b] = -90.f; specPk[b] = -90.f; }
+    }
+
+    // ---------- interaction ----------
+    void onButton(const ButtonEvent& e) override {
+        if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
+            if (module) {
+                if (e.pos.y < 15.f) {
+                    for (int i = 0; i < 3; ++i)
+                        if (e.pos.x >= WD_TABX[i] && e.pos.x < WD_TABX[i] + WD_TABW[i])
+                            module->dispMode = i;
+                } else if (e.pos.y < WH_DH - 16.f) {
+                    module->dispMode = (module->dispMode + 1) % 3;
+                }
+            }
+            e.consume(this);
+        }
+    }
+
+    // ---------- FFT (iterative radix-2, in place) ----------
+    void fft() {
+        const int N = WH_SPEC_N;
+        for (int i = 1, j = 0; i < N; ++i) {
+            int bit = N >> 1;
+            for (; j & bit; bit >>= 1) j ^= bit;
+            j ^= bit;
+            if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
+        }
+        for (int len = 2; len <= N; len <<= 1) {
+            int half = len >> 1, step = N / len;
+            for (int i = 0; i < N; i += len) {
+                for (int k = 0; k < half; ++k) {
+                    float wr = twC[k * step], wi = -twS[k * step];
+                    int a = i + k, b = a + half;
+                    float tr = re[b] * wr - im[b] * wi;
+                    float ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr; im[b] = im[a] - ti;
+                    re[a] += tr;        im[a] += ti;
+                }
+            }
+        }
+    }
+
+    // fills dbOut[WH_BANDS] (dB re 5 V peak) from the module's output history
+    void computeSpectrum(float sr, float* dbOut) {
+        int pos = module->specPos;
+        for (int i = 0; i < WH_SPEC_N; ++i) {
+            re[i] = module->specBuf[(pos + i) & (WH_SPEC_N - 1)] * win[i];
+            im[i] = 0.f;
+        }
+        fft();
+        for (int k = 0; k < WH_SPEC_N / 2; ++k) {
+            float a = std::sqrt(re[k] * re[k] + im[k] * im[k]) * 4.f / (float) WH_SPEC_N;   // amplitude in volts
+            pw[k] = a * a;
+        }
+        const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
+        const float binHz = sr / (float) WH_SPEC_N;
+        const float ratio = fMax / fMin;
+        for (int b = 0; b < WH_BANDS; ++b) {
+            float f0 = fMin * std::pow(ratio, (float) b / WH_BANDS);
+            float f1 = fMin * std::pow(ratio, (float) (b + 1) / WH_BANDS);
+            float lo = f0 / binHz, hi = f1 / binHz;
+            float p;
+            if (hi - lo < 1.f) {
+                float posb = 0.5f * (lo + hi);
+                int i0 = rack::math::clamp((int) posb, 0, WH_SPEC_N / 2 - 2);
+                float fr = posb - (float) i0;
+                p = pw[i0] * (1.f - fr) + pw[i0 + 1] * fr;
+            } else {
+                int i0 = rack::math::clamp((int) std::ceil(lo), 0, WH_SPEC_N / 2 - 1);
+                int i1 = rack::math::clamp((int) std::floor(hi), i0, WH_SPEC_N / 2 - 1);
+                float s = 0.f;
+                for (int k = i0; k <= i1; ++k) s += pw[k];
+                p = s / (float) (i1 - i0 + 1);
+            }
+            dbOut[b] = 10.f * std::log10(p / 25.f + 1e-12f);      // 0 dB = 5 V amplitude
+        }
     }
 
     void draw(const DrawArgs& args) override {
-        screenBase(args.vg, WH_DW, WH_DH);
+        NVGcontext* vg = args.vg;
+        screenBase(vg, WH_DW, WH_DH);
+
+        // plot well
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, WD_PX - 1.f, WD_PY - 1.f, WD_PW + 2.f, WD_PH + 2.f, 2.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
         Widget::draw(args);
     }
 
@@ -600,113 +807,262 @@ struct WHDisplay : TransparentWidget {
         if (layer != 1) { Widget::drawLayer(args, layer); return; }
         NVGcontext* vg = args.vg;
         const float W = WH_DW, H = WH_DH;
+        const float PX = WD_PX, PY = WD_PY, PW = WD_PW, PH = WD_PH;
 
-        float lvl[4] = {1.6f, 1.1f, 0.7f, 0.4f};
-        float lfo[4] = {0.10f, 0.35f, 0.60f, 0.85f};
+        // ---------- gather data ----------
+        int mode = 0, ch = 1;
         float pv[5] = {0.2f, 0.5f, 0.3f, 0.6f, 0.5f};
-        float mIn = 2.f, mL = 2.6f, mR = 2.2f, fade = 1.f;
-        int ch = 1;
+        float mL = 2.6f, mR = 2.2f, fade = 1.f, rt = 4.1f, sr = 48000.f;
+        float lineLv[8], lineMs[8];
+        static float specDb[WH_BANDS];
         bool sIn = false, sOut = false;
+
         if (module) {
-            for (int t = 0; t < 4; ++t) { lvl[t] = module->dispLevel[t]; lfo[t] = module->dispLfo[t]; }
-            for (int i = 0; i < 5; ++i) pv[i] = module->dispVal[i];
-            mIn = module->meterIn; mL = module->meterOutL; mR = module->meterOutR;
-            fade = module->clearFade;
+            mode = rack::math::clamp(module->dispMode, 0, 2);
             ch = module->dispCh;
+            for (int i = 0; i < 5; ++i) pv[i] = module->dispVal[i];
+            mL = module->meterOutL; mR = module->meterOutR;
+            fade = module->clearFade;
+            rt = module->dispRt60;
+            sr = module->dispSr;
             sIn = module->params[Whirlpool::IN_STEREO_BUTTON_PARAM].getValue() > 0.5f;
             sOut = module->params[Whirlpool::OUT_STEREO_BUTTON_PARAM].getValue() > 0.5f;
+            for (int i = 0; i < 8; ++i) { lineLv[i] = module->dispLine[i]; lineMs[i] = module->dispDelayMs[i]; }
+            if (mode == 0) {
+                int head = module->scopeHead;
+                for (int i = 0; i < WH_SCOPE_N; ++i) {
+                    int idx = (head + 1 + i) % WH_SCOPE_N;
+                    scMinL[i] = module->scopeMinL[idx]; scMaxL[i] = module->scopeMaxL[idx];
+                    scMinR[i] = module->scopeMinR[idx]; scMaxR[i] = module->scopeMaxR[idx];
+                    scMinI[i] = module->scopeMinI[idx]; scMaxI[i] = module->scopeMaxI[idx];
+                }
+            } else if (mode == 2) {
+                computeSpectrum(sr, specDb);
+            }
+        } else {
+            // module browser preview: synthetic data
+            mode = 2;
+            for (int i = 0; i < 8; ++i) { lineLv[i] = 3.f * (0.35f + 0.65f * std::fabs(std::sin(i * 1.3f + 0.4f))); lineMs[i] = whengine::BASE[i] / 48.f * 1.3f; }
+            for (int b = 0; b < WH_BANDS; ++b)
+                specDb[b] = -18.f - 58.f * std::pow((float) b / WH_BANDS, 0.75f) + 5.f * std::sin(b * 0.45f);
         }
 
-        // ---- vortex ----
-        const float cx = 56.f, cy = 47.f;
-        const float R = 18.f + 22.f * pv[3];
-        for (int t = 0; t < 4; ++t) {
-            float r = R * (1.f - 0.15f * t);
-            float a = std::min(lvl[t] / 4.f, 1.f);
-            NVGcolor col = nvgLerpRGBA(colAccent(), colViolet(), t / 3.f);
+        // ---------- plot ----------
+        nvgSave(vg);
+        nvgScissor(vg, PX - 1.f, PY - 1.f, PW + 2.f, PH + 2.f);
+        nvgLineCap(vg, NVG_BUTT);
+
+        if (mode == 0) {
+            // ===== WAVE: scrolling min/max envelope of the output (L cyan, R violet), dry input in white =====
+            const float mid = PY + PH / 2.f, half = PH / 2.f - 2.f, sc = half / 5.f;
 
             nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (int) (14 + 20 * a)));
+            for (int k = 1; k < 4; ++k) {
+                float x = PX + PW - k * (PW / 4.f) + 0.5f;
+                nvgMoveTo(vg, x, PY); nvgLineTo(vg, x, PY + PH);
+            }
+            nvgMoveTo(vg, PX, mid + 0.5f); nvgLineTo(vg, PX + PW, mid + 0.5f);
+            nvgMoveTo(vg, PX, mid - half * 0.5f + 0.5f); nvgLineTo(vg, PX + PW, mid - half * 0.5f + 0.5f);
+            nvgMoveTo(vg, PX, mid + half * 0.5f + 0.5f); nvgLineTo(vg, PX + PW, mid + half * 0.5f + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            float a0 = lfo[t] * 2.f * (float) M_PI + t * 0.9f;
-            float len = 1.0f + 3.0f * a;
+            const float step = PW / (float) WH_SCOPE_N;
+            auto env = [&](const float* mn, const float* mx, NVGcolor col, float baseA) {
+                for (int q = 0; q < 4; ++q) {
+                    int i0 = q * WH_SCOPE_N / 4, i1 = (q + 1) * WH_SCOPE_N / 4;
+                    nvgBeginPath(vg);
+                    for (int i = i0; i < i1; ++i) {
+                        float hi = rack::math::clamp(mx[i] * sc, -half, half);
+                        float lo = rack::math::clamp(mn[i] * sc, -half, half);
+                        if (mx[i] < mn[i]) continue;               // empty bin
+                        float hh = std::max(hi - lo, 1.f);
+                        nvgRect(vg, PX + i * step, mid - hi, std::max(step, 1.f), hh);
+                    }
+                    nvgFillColor(vg, withAlpha(col, baseA * (0.35f + 0.65f * (q + 1) / 4.f)));
+                    nvgFill(vg);
+                }
+            };
+            env(scMinI, scMaxI, nvgRGB(255, 255, 255), 0.22f);
+            env(scMinR, scMaxR, colViolet(), 0.75f);
+            env(scMinL, scMaxL, colAccent(), 0.75f);
+
+            // legend
+            const char* lg[3] = {"L", "R", "IN"};
+            NVGcolor lc[3] = {colAccent(), colViolet(), nvgRGB(255, 255, 255)};
+            for (int i = 0; i < 3; ++i) {
+                float x = PX + 6.f + i * 22.f;
+                nvgBeginPath(vg);
+                nvgRect(vg, x, PY + 5.f, 4.f, 4.f);
+                nvgFillColor(vg, withAlpha(lc[i], 0.9f));
+                nvgFill(vg);
+                drawText(vg, x + 7.f, PY + 7.f, lg[i], 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.5f);
+            }
+            // newest data is on the right
+            drawText(vg, PX + 4.f, PY + PH - 6.f, "-4 S", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
+            drawText(vg, PX + PW - 4.f, PY + PH - 6.f, "NOW", 5.5f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.f);
+        } else if (mode == 1) {
+            // ===== BARS: the 8 FDN line levels with peak hold and delay length =====
+            const float cell = PW / 8.f, barW = 17.f;
+            const float base = PY + PH - 11.f, maxH = PH - 20.f;
+
+            nvgBeginPath(vg);
+            for (int k = 1; k <= 3; ++k) {
+                float y = base - maxH * k / 4.f + 0.5f;
+                nvgMoveTo(vg, PX, y); nvgLineTo(vg, PX + PW, y);
+            }
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            char buf[32];
+            for (int i = 0; i < 8; ++i) {
+                float h = rack::math::clamp(std::sqrt(lineLv[i] / 4.f), 0.f, 1.f);
+                barPeak[i] = std::max(h, barPeak[i] - 0.007f);
+                float x = PX + i * cell + (cell - barW) / 2.f;
+                float bh = std::max(h * maxH, 1.f);
+                NVGcolor c0 = nvgLerpRGBA(colAccent(), colViolet(), i / 7.f);
+
+                // glow
+                nvgBeginPath(vg);
+                nvgRect(vg, x - 2.f, base - bh - 2.f, barW + 4.f, bh + 4.f);
+                nvgFillColor(vg, withAlpha(c0, 0.10f));
+                nvgFill(vg);
+                // bar
+                nvgBeginPath(vg);
+                nvgRect(vg, x, base - bh, barW, bh);
+                nvgFillPaint(vg, nvgLinearGradient(vg, 0, base, 0, base - maxH, withAlpha(c0, 0.55f), nvgLerpRGBA(c0, nvgRGB(255, 255, 255), 0.55f)));
+                nvgFill(vg);
+                // peak hold
+                float py = base - barPeak[i] * maxH;
+                nvgBeginPath(vg);
+                nvgRect(vg, x, py - 1.f, barW, 1.6f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 220));
+                nvgFill(vg);
+
+                snprintf(buf, sizeof(buf), "%.0f", lineMs[i]);
+                drawText(vg, x + barW / 2.f, base + 6.f, buf, 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
+            }
+            // segment gaps
+            nvgBeginPath(vg);
+            for (float y = base - 3.f; y > base - maxH; y -= 4.f)
+                nvgRect(vg, PX, y, PW, 1.f);
+            nvgFillColor(vg, nvgRGBA(3, 6, 9, 235));
+            nvgFill(vg);
+
+            drawText(vg, PX + 4.f, PY + 7.f, "FDN LINES - DELAY MS", 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+        } else {
+            // ===== SPECTRUM: log-frequency FFT of the output =====
+            const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
+            auto xOf = [&](float f) { return PX + PW * std::log(f / fMin) / std::log(fMax / fMin); };
+            auto yOf = [&](float db) { return PY + PH - rack::math::clamp((db + 90.f) / 90.f, 0.f, 1.f) * PH; };
+
+            // grid
+            nvgBeginPath(vg);
+            const float fl[9] = {50.f, 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f, 20000.f};
+            for (int i = 0; i < 9; ++i) {
+                if (fl[i] >= fMax) continue;
+                float x = xOf(fl[i]) + 0.5f;
+                nvgMoveTo(vg, x, PY); nvgLineTo(vg, x, PY + PH);
+            }
+            for (int d = -20; d >= -80; d -= 20) {
+                float y = yOf((float) d) + 0.5f;
+                nvgMoveTo(vg, PX, y); nvgLineTo(vg, PX + PW, y);
+            }
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // smoothing + peak hold
+            for (int b = 0; b < WH_BANDS; ++b) {
+                float v = rack::math::clamp(specDb[b], -90.f, 0.f);
+                specSm[b] += (v > specSm[b] ? 0.55f : 0.14f) * (v - specSm[b]);
+                specPk[b] = std::max(specSm[b], specPk[b] - 0.35f);
+            }
+
+            const float bw = PW / (float) WH_BANDS;
+            // fill
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, PX, PY + PH);
+            for (int b = 0; b < WH_BANDS; ++b)
+                nvgLineTo(vg, PX + (b + 0.5f) * bw, yOf(specSm[b]));
+            nvgLineTo(vg, PX + PW, PY + PH);
+            nvgClosePath(vg);
+            nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY, 0, PY + PH, nvgRGBA(0x3d, 0xe0, 0xff, 120), nvgRGBA(0xb0, 0x5a, 0xff, 8)));
+            nvgFill(vg);
+            // peak hold
+            nvgBeginPath(vg);
+            for (int b = 0; b < WH_BANDS; ++b) {
+                float x = PX + (b + 0.5f) * bw, y = yOf(specPk[b]);
+                if (b == 0) nvgMoveTo(vg, x, y); else nvgLineTo(vg, x, y);
+            }
+            nvgStrokeColor(vg, withAlpha(colViolet(), 0.55f));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+            // curve (glow + core)
             for (int pass = 0; pass < 2; ++pass) {
                 nvgBeginPath(vg);
-                nvgArc(vg, cx, cy, r, a0, a0 + len, NVG_CW);
-                nvgStrokeColor(vg, pass == 0 ? withAlpha(col, 0.18f + 0.25f * a) : withAlpha(nvgLerpRGBA(col, nvgRGB(255, 255, 255), 0.45f), 0.5f + 0.5f * a));
-                nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.4f);
-                nvgLineCap(vg, NVG_ROUND);
+                for (int b = 0; b < WH_BANDS; ++b) {
+                    float x = PX + (b + 0.5f) * bw, y = yOf(specSm[b]);
+                    if (b == 0) nvgMoveTo(vg, x, y); else nvgLineTo(vg, x, y);
+                }
+                nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.25f) : nvgRGB(0x8a, 0xee, 0xff));
+                nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
+                nvgLineJoin(vg, NVG_ROUND);
                 nvgStroke(vg);
             }
-            float hx = cx + r * std::cos(a0 + len), hy = cy + r * std::sin(a0 + len);
-            nvgBeginPath(vg);
-            nvgCircle(vg, hx, hy, 3.5f + 2.f * a);
-            nvgFillColor(vg, withAlpha(col, 0.25f + 0.3f * a));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgCircle(vg, hx, hy, 1.7f);
-            nvgFillColor(vg, nvgRGB(255, 255, 255));
-            nvgFill(vg);
+
+            // axis labels
+            const char* fn[9] = {"50", "100", "200", "500", "1K", "2K", "5K", "10K", "20K"};
+            for (int i = 0; i < 9; ++i) {
+                if (fl[i] >= fMax) continue;
+                drawText(vg, xOf(fl[i]), PY + PH - 5.f, fn[i], 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+            }
+            char buf[16];
+            for (int d = -20; d >= -80; d -= 20) {
+                snprintf(buf, sizeof(buf), "%d", d);
+                drawText(vg, PX + 3.f, yOf((float) d) - 4.f, buf, 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
+            }
         }
-        // centre: the drain
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, 3.f);
-        nvgFillColor(vg, withAlpha(colAccent(), 0.35f + 0.5f * fade));
-        nvgFill(vg);
+
+        // clear flash across the plot
         if (fade < 0.99f) {
             nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, 4.f + (1.f - fade) * 34.f);
-            nvgStrokeColor(vg, withAlpha(colViolet(), 0.9f * (1.f - fade)));
-            nvgStrokeWidth(vg, 1.5f);
-            nvgStroke(vg);
-        }
-
-        // ---- parameter bars ----
-        const char* nm[5] = {"REPL", "BRGT", "DTUN", "BIG", "MIX"};
-        char buf[32];
-        for (int i = 0; i < 5; ++i) {
-            float y = 16.f + i * 11.f;
-            drawText(vg, 112.f, y, nm[i], 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 144.f, y - 2.f, 60.f, 4.f, 2.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
+            nvgRect(vg, PX, PY, PW, PH);
+            nvgFillColor(vg, withAlpha(colViolet(), 0.28f * (1.f - fade)));
             nvgFill(vg);
-            float v = std::min(std::max(pv[i], 0.f), 1.f);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 144.f, y - 2.f, std::max(60.f * v, 2.f), 4.f, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 144.f, 0, 204.f, 0, colAccent(), colViolet()));
-            nvgFill(vg);
-            snprintf(buf, sizeof(buf), "%3.0f%%", v * 100.f);
-            drawText(vg, 232.f, y, buf, 6.5f, nvgRGBA(0x3d, 0xe0, 0xff, 200), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
         }
+        nvgResetScissor(vg);
+        nvgRestore(vg);
 
-        // ---- meters ----
-        auto hbar = [&](float y, const char* txt, float v) {
-            drawText(vg, 112.f, y, txt, 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        // ---------- stereo output meters ----------
+        for (int c = 0; c < 2; ++c) {
+            float lv = std::min(std::max((c == 0 ? mL : mR) / 5.f, 0.f), 1.f);
+            float x = PX + PW + 8.f + c * 9.f;
             nvgBeginPath(vg);
-            nvgRect(vg, 132.f, y - 2.f, 68.f, 4.f);
+            nvgRect(vg, x, PY, 6.f, PH);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
             nvgFill(vg);
-            float lv = std::min(v / 5.f, 1.f);
             if (lv > 0.01f) {
+                float h = lv * PH;
                 nvgBeginPath(vg);
-                nvgRect(vg, 132.f, y - 2.f, 68.f * lv, 4.f);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 132.f, 0, 200.f, 0, colAccent(), colViolet()));
+                nvgRect(vg, x, PY + PH - h, 6.f, h);
+                nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY + PH, 0, PY, colAccent(), colViolet()));
                 nvgFill(vg);
             }
-        };
-        hbar(72.f, "IN", mIn);
-        hbar(81.f, "OUT", 0.5f * (mL + mR));
+        }
 
-        // ---- chips ----
-        auto chip = [&](float x, float y, const char* txt, bool on) {
+        screenFinish(vg, W, H);
+
+        // ---------- header: tabs + status ----------
+        const char* tn[3] = {"WAVE", "BARS", "SPECTRUM"};
+        for (int i = 0; i < 3; ++i) {
+            bool on = (i == mode);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, 30.f, 10.f, 3.f);
+            nvgRoundedRect(vg, WD_TABX[i], 3.f, WD_TABW[i], 11.f, 3.f);
             if (on) {
-                nvgFillColor(vg, withAlpha(colAccent(), 0.25f));
+                nvgFillColor(vg, withAlpha(colAccent(), 0.22f));
                 nvgFill(vg);
                 nvgStrokeColor(vg, withAlpha(colAccent(), 0.9f));
             } else {
@@ -714,17 +1070,27 @@ struct WHDisplay : TransparentWidget {
             }
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
-            drawText(vg, x + 15.f, y + 5.f, txt, 6.f, on ? colAccent() : colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-        };
-        chip(206.f, 67.f, "ST IN", sIn);
-        chip(206.f, 78.f, "ST OUT", sOut);
+            drawText(vg, WD_TABX[i] + WD_TABW[i] / 2.f, 8.5f, tn[i], 6.f, on ? colAccent() : colDim(),
+                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+        }
+        char buf[64];
+        if (fade < 0.99f) {
+            drawText(vg, W - 6.f, 8.f, "CLEARING", 7.f, withAlpha(colViolet(), 0.95f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        } else {
+            snprintf(buf, sizeof(buf), "%s%sCH %d  RT %.1fS", sIn ? "ST IN  " : "", sOut ? "ST OUT  " : "", ch, rt);
+            drawText(vg, W - 6.f, 8.f, buf, 6.5f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+        }
 
-        screenFinish(vg, W, H);
+        // ---------- footer: parameter readouts ----------
+        const char* nm[5] = {"REPL", "BRGT", "DTUN", "BIG", "MIX"};
+        const float cw = (W - 16.f) / 5.f;
+        for (int i = 0; i < 5; ++i) {
+            float x = 8.f + i * cw;
+            drawText(vg, x, H - 7.f, nm[i], 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+            snprintf(buf, sizeof(buf), "%.0f%%", rack::math::clamp(pv[i], 0.f, 1.f) * 100.f);
+            drawText(vg, x + cw - 4.f, H - 7.f, buf, 6.5f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+        }
 
-        snprintf(buf, sizeof(buf), "CH %d", ch);
-        drawText(vg, 6.f, 7.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        if (fade < 0.99f)
-            drawText(vg, W - 6.f, 7.f, "CLEARING", 7.f, withAlpha(colViolet(), 0.95f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
         Widget::drawLayer(args, layer);
     }
 };
@@ -753,10 +1119,11 @@ struct WhirlpoolWidget : ModuleWidget {
         }
 
         // ---- row B ----
-        addParam(createParamCentered<CKSS>(Vec(whCol(1), WH_RB + 21.f), module, Whirlpool::IN_STEREO_BUTTON_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(whCol(2), WH_RB + 21.f), module, Whirlpool::OUT_STEREO_BUTTON_PARAM));
-        addParam(createParamCentered<VCVButton>(Vec(whCol(3) - 3.f, WH_RB + 21.f), module, Whirlpool::CLEAR_BUTTON_PARAM));
-        addChild(createLightCentered<SmallLight<WHCyanLight>>(Vec(whCol(3) + 16.f, WH_RB + 12.f), module, Whirlpool::CLEAR_BUTTON_LIGHT));
+        const float by = WH_RB + WH_RBH / 2.f;
+        addParam(createParamCentered<CKSS>(Vec(whCol(1) - 14.f, by), module, Whirlpool::IN_STEREO_BUTTON_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(whCol(2) - 14.f, by), module, Whirlpool::OUT_STEREO_BUTTON_PARAM));
+        addParam(createParamCentered<VCVButton>(Vec(whCol(3) - 14.f, by), module, Whirlpool::CLEAR_BUTTON_PARAM));
+        addChild(createLightCentered<SmallLight<WHCyanLight>>(Vec(whCol(3) + 23.f, WH_RB + 6.f), module, Whirlpool::CLEAR_BUTTON_LIGHT));
 
         // ---- row C ----
         addInput(createInputCentered<DarkPJ301MPort>(Vec(whCol(0), WH_JY), module, Whirlpool::IN_L_INPUT));
@@ -764,6 +1131,19 @@ struct WhirlpoolWidget : ModuleWidget {
         addInput(createInputCentered<DarkPJ301MPort>(Vec(whCol(2), WH_JY), module, Whirlpool::CLEAR_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(whCol(3), WH_JY), module, Whirlpool::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(whCol(4), WH_JY), module, Whirlpool::OUT_R_OUTPUT));
+    }
+
+    void appendContextMenu(Menu* menu) override {
+        Whirlpool* module = dynamic_cast<Whirlpool*>(this->module);
+        if (!module) return;
+        menu->addChild(new MenuSeparator);
+        menu->addChild(createSubmenuItem("Display", "", [=](Menu* sub) {
+            const char* names[3] = {"Wave", "Bars", "Spectrum"};
+            for (int i = 0; i < 3; ++i)
+                sub->addChild(createCheckMenuItem(names[i], "",
+                    [=]() { return module->dispMode == i; },
+                    [=]() { module->dispMode = i; }));
+        }));
     }
 };
 

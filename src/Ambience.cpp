@@ -4,7 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
-
+// ANDREAS GOGOS
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
