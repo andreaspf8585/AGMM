@@ -1,0 +1,156 @@
+
+name: AGMM Cross-Platform Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows-x64
+            runner: windows-latest
+            os: windows
+
+          - platform: Linux-x64
+            runner: ubuntu-22.04
+            os: linux
+
+          - platform: macOS-Intel
+            runner: macos-15-intel
+            os: macos
+
+          - platform: macOS-ARM64
+            runner: macos-15
+            os: macos
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout AGMM
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Windows toolchain
+      - name: Setup MSYS2
+        if: matrix.os == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            git
+            tar
+            unzip
+            zip
+            jq
+            zstd
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            jq \
+            zstd \
+            unzip \
+            zip
+
+      # macOS dependencies
+      - name: Install macOS dependencies
+        if: matrix.os == 'macos'
+        run: |
+          brew install jq zstd
+
+      # Build on Windows
+      - name: Build Windows plugin
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        run: |
+          set -e
+
+          mkdir -p .ci
+          curl -fL --retry 3 \
+            https://vcvrack.com/downloads/Rack-SDK-latest-win-x64.zip \
+            -o .ci/rack-sdk.zip
+
+          unzip -q .ci/rack-sdk.zip -d .ci/sdk
+
+          SDK_DIR="$(dirname "$(find .ci/sdk -name arch.mk -print -quit)")"
+          test -f "$SDK_DIR/arch.mk"
+
+          export RACK_DIR="$SDK_DIR"
+
+          echo "Using SDK: $RACK_DIR"
+
+          make clean
+          make -j2
+          make dist
+
+          find dist -maxdepth 1 -name '*.vcvplugin'
+
+      # Build on Linux and macOS
+      - name: Build Unix plugin
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p .ci
+
+          case "${{ matrix.platform }}" in
+            Linux-x64)
+              SDK=lin-x64
+              ;;
+            macOS-Intel)
+              SDK=mac-x64
+              ;;
+            macOS-ARM64)
+              SDK=mac-arm64
+              ;;
+          esac
+
+          curl -fL --retry 3 \
+            "https://vcvrack.com/downloads/Rack-SDK-latest-${SDK}.zip" \
+            -o .ci/rack-sdk.zip
+
+          unzip -q .ci/rack-sdk.zip -d .ci/sdk
+
+          SDK_DIR="$(dirname "$(find .ci/sdk -name arch.mk -print -quit)")"
+          test -f "$SDK_DIR/arch.mk"
+
+          export RACK_DIR="$SDK_DIR"
+
+          echo "Using SDK: $RACK_DIR"
+
+          make clean
+          make -j2
+          make dist
+
+          find dist -maxdepth 1 -name '*.vcvplugin'
+
+      # Upload distributable
+      - name: Upload AGMM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGMM-${{ matrix.platform }}
+          path: dist/*.vcvplugin
+          if-no-files-found: error
+          retention-days: 30
