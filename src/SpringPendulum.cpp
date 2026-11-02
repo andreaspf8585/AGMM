@@ -6,6 +6,7 @@
 #include <random>
 #include <limits>
 #include <memory>
+#include <atomic>
 
 // ------------------------------------------------------------
 // Layout constants
@@ -21,8 +22,16 @@ static const float SP_DISP_H = 180.f;
 static const float SP_DISP_X = (SP_PANEL_W - SP_DISP_W) / 2.f;   // 90
 static const float SP_DISP_Y = 44.f;
 
-// Dial geometry inside the display (everything must stay inside DIAL_R)
+// Dial geometry inside the display
 static const float SP_DIAL_R = 78.f;
+// Max distance of the mass centre from the dial centre (bob radius <= ~9.3, so it never touches the rim)
+static const float SP_MAXPX  = 65.f;
+// Soft-limit knee (fraction of SP_MAXPX where compression starts)
+static const float SP_KNEE   = 0.85f;
+
+// Physical geometry: the four springs are anchored at distance SP_ANCHOR_D from the centre
+static const double SP_ANCHOR_D = 1.0;
+static const float  SP_REACH    = 1.1f;   // display range, in units of SP_ANCHOR_D
 
 // Side knob columns
 static const float SP_LKNOB_X = 32.f;
@@ -51,6 +60,9 @@ struct SpringPendulum : Module {
         RESET_BUTTON,
         PUSH_STRENGTH_PARAM,
         PUSH_BUTTON,
+        CHAOS_PARAM,
+        DAMP_PARAM,
+        GRAVITY_PARAM,
         PARAMS_LEN
     };
     enum InputId {
@@ -90,38 +102,46 @@ struct SpringPendulum : Module {
         GATE_200MS,
         NUM_GATE_DURS
     };
-    // Gravitational acceleration presets
-    enum GPreset {
-        G_EARTH,
-        G_2X,
-        G_4X,
-        G_ZERO,
-        NUM_GPRESETS
-    };
 
-    // State variables
+    struct State { double x, y, vx, vy; };
+
+    // State variables (origin = centre of the dial, +y = up)
     double x = 0.0, y = 0.0;
     double vx = 0.0, vy = 0.0;
     double mass = 1.0;
-    double restLen = 1.0;
+    double restLen = 0.5;
     double springK = 10.0;
     double speedFactor = 1.0;
-    double g = 9.81;
+    double damping = 0.3;
+    double chaos = 0.35;
+    double g = 0.0;
+
+    // Random force (Ornstein-Uhlenbeck noise, acceleration units)
+    double noiseAx = 0.0, noiseAy = 0.0;
+
+    // Mouse grab (written by the UI thread, read by the audio thread)
+    std::atomic<bool>   grabbed{false};
+    std::atomic<double> grabX{0.0};
+    std::atomic<double> grabY{0.0};
+    // Audio-thread copies used by the physics
+    bool   handOn = false;
+    double handX = 0.0, handY = 0.0;
+    double handWn = 25.0;
 
     // Voct & gate state
     double voctVoltage = 0.0;
-    double prevThetaSign = 1.0;
+    double prevXSign = 1.0;
     int gateTimer = 0;
 
     // User settings
     VoctRange voctRange = RANGE_N1_1;
     GateDuration gateDuration = GATE_5MS;
-    GPreset gPreset = G_EARTH;
 
     dsp::SchmittTrigger resetTrigger;
     dsp::SchmittTrigger pushTrigger;
     bool lastResetState = false;
     std::mt19937 rng;
+    std::normal_distribution<double> gauss{0.0, 1.0};
 
     // Display data
     float trailX[SP_TRAIL_N] = {};
@@ -134,54 +154,47 @@ struct SpringPendulum : Module {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(SPEED_PARAM, 0.f, 1.f, 0.5f, "Speed", " Hz", 0.f, 10.f, 0.1f);
         configParam(MASS_PARAM, 0.1f, 10.f, 1.f, "Mass", " kg");
-        configParam(LENGTH_PARAM, 0.2f, 3.f, 1.f, "Rest length", " m");
+        configParam(LENGTH_PARAM, 0.1f, 0.9f, 0.5f, "Spring rest length", " m");
         configParam(SPRING_K_PARAM, 1.f, 100.f, 10.f, "Spring constant", " N/m");
         configParam(RESET_BUTTON, 0.f, 1.f, 0.f, "Reset");
         configParam(PUSH_STRENGTH_PARAM, 0.f, 10.f, 2.f, "Push strength", " m/s");
         configParam(PUSH_BUTTON, 0.f, 1.f, 0.f, "Random push");
+        configParam(CHAOS_PARAM, 0.f, 1.f, 0.35f, "Chaos (random force)", "%", 0.f, 100.f);
+        configParam(DAMP_PARAM, 0.02f, 2.f, 0.3f, "Damping", " 1/s");
+        configParam(GRAVITY_PARAM, 0.f, 40.f, 0.f, "Gravity", " m/s²");
 
         configInput(RESET_CV_INPUT, "Reset gate");
         configInput(PUSH_CV_INPUT, "Random push gate");
 
         configOutput(X_OUTPUT, "Mass X");
         configOutput(Y_OUTPUT, "Mass Y");
-        configOutput(VOCT_OUTPUT, "V/Oct (random on theta=0)");
+        configOutput(VOCT_OUTPUT, "V/Oct (random on X = 0 crossing)");
         configOutput(GATE_OUTPUT, "Gate (trigger on Voct change)");
 
         std::random_device rd;
         rng.seed(rd());
         onReset();
         generateRandomVoct();
-        setGPreset();
     }
 
     void onReset() override {
         std::uniform_real_distribution<double> angleDist(-M_PI, M_PI);
-        std::uniform_real_distribution<double> lenOffset(0.8, 1.2);
+        std::uniform_real_distribution<double> radDist(0.15, 0.45);
         double angle = angleDist(rng);
-        double r = restLen * lenOffset(rng);
+        double r = SP_ANCHOR_D * radDist(rng);
         x = r * sin(angle);
-        y = -r * cos(angle);
+        y = r * cos(angle);
         vx = 0.0;
         vy = 0.0;
+        noiseAx = 0.0;
+        noiseAy = 0.0;
 
-        double theta = atan2(x, -y);
-        prevThetaSign = (theta >= 0) ? 1.0 : -1.0;
+        prevXSign = (x >= 0) ? 1.0 : -1.0;
         gateTimer = 0;
 
         trailHead = 0;
         trailCount = 0;
         trailTimer = 0.f;
-    }
-
-    void setGPreset() {
-        switch (gPreset) {
-            case G_EARTH: g = 9.81; break;
-            case G_2X:    g = 19.62; break;
-            case G_4X:    g = 39.24; break;
-            case G_ZERO:  g = 0.0; break;
-            default:      g = 9.81; break;
-        }
     }
 
     double scaleVoct(double raw, VoctRange range) {
@@ -220,65 +233,59 @@ struct SpringPendulum : Module {
         mass = params[MASS_PARAM].getValue();
         restLen = params[LENGTH_PARAM].getValue();
         springK = params[SPRING_K_PARAM].getValue();
+        chaos = params[CHAOS_PARAM].getValue();
+        damping = params[DAMP_PARAM].getValue();
+        g = params[GRAVITY_PARAM].getValue();
     }
 
-    void computeAcceleration(double px, double py, double& ax, double& ay) {
-        double r = sqrt(px*px + py*py);
-        if (r < 1e-6) r = 1e-6;
-        double springForceMag = springK * (r - restLen);
-        double fx_spring = -springForceMag * (px / r);
-        double fy_spring = -springForceMag * (py / r);
-        double fx = fx_spring;
-        double fy = fy_spring - mass * g;
-        ax = fx / mass;
-        ay = fy / mass;
+    // Four springs: anchors at N (0,D), E (D,0), S (0,-D), W (-D,0)
+    void deriv(const State& s, State& d) const {
+        const double D = SP_ANCHOR_D;
+        const double axs[4] = {0.0,  D, 0.0, -D};
+        const double ays[4] = {  D, 0.0,  -D, 0.0};
+
+        double fx = 0.0, fy = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            double dx = axs[i] - s.x;
+            double dy = ays[i] - s.y;
+            double r = std::sqrt(dx * dx + dy * dy);
+            if (r < 1e-6) continue;
+            double f = springK * (r - restLen) / r;
+            fx += f * dx;
+            fy += f * dy;
+        }
+        d.x  = s.vx;
+        d.y  = s.vy;
+        d.vx = fx / mass - damping * s.vx + noiseAx;
+        d.vy = fy / mass - damping * s.vy - g + noiseAy;
+
+        // Mouse "hand": critically damped pull towards the cursor
+        if (handOn) {
+            d.vx += handWn * handWn * (handX - s.x) - 2.0 * handWn * s.vx;
+            d.vy += handWn * handWn * (handY - s.y) - 2.0 * handWn * s.vy;
+        }
     }
 
     void rk4(double dt) {
-        double k1_x = vx;
-        double k1_y = vy;
-        double a1_x, a1_y;
-        computeAcceleration(x, y, a1_x, a1_y);
-        double k1_vx = a1_x;
-        double k1_vy = a1_y;
+        State s{x, y, vx, vy};
+        State k1, k2, k3, k4, t;
 
-        double x2 = x + 0.5*dt * k1_x;
-        double y2 = y + 0.5*dt * k1_y;
-        double vx2 = vx + 0.5*dt * k1_vx;
-        double vy2 = vy + 0.5*dt * k1_vy;
-        double a2_x, a2_y;
-        computeAcceleration(x2, y2, a2_x, a2_y);
-        double k2_x = vx2;
-        double k2_y = vy2;
-        double k2_vx = a2_x;
-        double k2_vy = a2_y;
+        auto advance = [&](const State& k, double h) {
+            t.x  = s.x  + h * k.x;
+            t.y  = s.y  + h * k.y;
+            t.vx = s.vx + h * k.vx;
+            t.vy = s.vy + h * k.vy;
+        };
 
-        double x3 = x + 0.5*dt * k2_x;
-        double y3 = y + 0.5*dt * k2_y;
-        double vx3 = vx + 0.5*dt * k2_vx;
-        double vy3 = vy + 0.5*dt * k2_vy;
-        double a3_x, a3_y;
-        computeAcceleration(x3, y3, a3_x, a3_y);
-        double k3_x = vx3;
-        double k3_y = vy3;
-        double k3_vx = a3_x;
-        double k3_vy = a3_y;
+        deriv(s, k1);
+        advance(k1, 0.5 * dt); deriv(t, k2);
+        advance(k2, 0.5 * dt); deriv(t, k3);
+        advance(k3, dt);       deriv(t, k4);
 
-        double x4 = x + dt * k3_x;
-        double y4 = y + dt * k3_y;
-        double vx4 = vx + dt * k3_vx;
-        double vy4 = vy + dt * k3_vy;
-        double a4_x, a4_y;
-        computeAcceleration(x4, y4, a4_x, a4_y);
-        double k4_x = vx4;
-        double k4_y = vy4;
-        double k4_vx = a4_x;
-        double k4_vy = a4_y;
-
-        x += dt * (k1_x + 2.0*k2_x + 2.0*k3_x + k4_x) / 6.0;
-        y += dt * (k1_y + 2.0*k2_y + 2.0*k3_y + k4_y) / 6.0;
-        vx += dt * (k1_vx + 2.0*k2_vx + 2.0*k3_vx + k4_vx) / 6.0;
-        vy += dt * (k1_vy + 2.0*k2_vy + 2.0*k3_vy + k4_vy) / 6.0;
+        x  += dt * (k1.x  + 2.0 * k2.x  + 2.0 * k3.x  + k4.x)  / 6.0;
+        y  += dt * (k1.y  + 2.0 * k2.y  + 2.0 * k3.y  + k4.y)  / 6.0;
+        vx += dt * (k1.vx + 2.0 * k2.vx + 2.0 * k3.vx + k4.vx) / 6.0;
+        vy += dt * (k1.vy + 2.0 * k2.vy + 2.0 * k3.vy + k4.vy) / 6.0;
     }
 
     void process(const ProcessArgs& args) override {
@@ -295,34 +302,70 @@ struct SpringPendulum : Module {
             float strength = params[PUSH_STRENGTH_PARAM].getValue();
             std::uniform_real_distribution<double> angleDist(0.0, 2.0 * M_PI);
             double angle = angleDist(rng);
-            double dv = strength;
-            vx += dv * cos(angle);
-            vy += dv * sin(angle);
+            vx += strength * cos(angle);
+            vy += strength * sin(angle);
         }
 
         double dt = args.sampleTime * speedFactor;
         dt = std::min(dt, 0.001);
+
+        // Mouse grab: copy the target, and scale the hand stiffness with the
+        // simulation speed so the ball follows the cursor in real time
+        handOn = grabbed.load();
+        handX = grabX.load();
+        handY = grabY.load();
+        handWn = 25.0 * speedFactor;
+
+        // Random force: smooth (Ornstein-Uhlenbeck) noise on both axes
+        {
+            const double tau = 0.12;                 // correlation time (s)
+            const double sigma = chaos * 6.0;        // m/s^2
+            double a = std::exp(-dt / tau);
+            double b = sigma * std::sqrt(1.0 - a * a);
+            noiseAx = noiseAx * a + b * gauss(rng);
+            noiseAy = noiseAy * a + b * gauss(rng);
+        }
+
         rk4(dt);
 
-        if (std::abs(x) > 10.0 || std::abs(y) > 10.0) onReset();
+        // Safety: NaN guard
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(vx) || !std::isfinite(vy))
+            onReset();
 
-        double theta = atan2(x, -y);
-        double currentSign = (theta >= 0) ? 1.0 : -1.0;
-        if (currentSign != prevThetaSign && std::abs(theta) > 1e-6 && y < 0.0) {
+        // Soft wall: the sphere can't travel further than 2.5x the anchor distance
+        {
+            const double rMax = 2.5 * SP_ANCHOR_D;
+            double rr = std::sqrt(x * x + y * y);
+            if (rr > rMax) {
+                double nx = x / rr, ny = y / rr;
+                x = nx * rMax;
+                y = ny * rMax;
+                double vr = vx * nx + vy * ny;
+                if (vr > 0.0) {
+                    vx -= vr * nx;
+                    vy -= vr * ny;
+                }
+            }
+        }
+
+        // New random V/Oct + gate each time the sphere crosses x = 0
+        double currentSign = (x >= 0) ? 1.0 : -1.0;
+        if (currentSign != prevXSign && std::abs(x) > 1e-6) {
             generateRandomVoct();
             double durSec = getGateDurationSeconds(gateDuration);
             gateTimer = static_cast<int>(args.sampleRate * durSec);
         }
-        prevThetaSign = currentSign;
+        prevXSign = currentSign;
 
         if (gateTimer > 0) gateTimer--;
 
-        outputs[X_OUTPUT].setVoltage(rack::math::clamp((float)x, -5.0f, 5.0f));
-        outputs[Y_OUTPUT].setVoltage(rack::math::clamp((float)y, -5.0f, 5.0f));
+        // +-5 V corresponds to the anchor distance
+        outputs[X_OUTPUT].setVoltage(rack::math::clamp((float)(x / SP_ANCHOR_D * 5.0), -5.0f, 5.0f));
+        outputs[Y_OUTPUT].setVoltage(rack::math::clamp((float)(y / SP_ANCHOR_D * 5.0), -5.0f, 5.0f));
         outputs[VOCT_OUTPUT].setVoltage((float)voctVoltage);
         outputs[GATE_OUTPUT].setVoltage(gateTimer > 0 ? 10.0f : 0.0f);
 
-        float speed = std::sqrt(vx*vx + vy*vy);
+        float speed = std::sqrt((float)(vx * vx + vy * vy));
         float bright = std::min(1.0f, speed / 5.0f);
         lights[MASS_LIGHT].setBrightness(bright);
 
@@ -332,7 +375,7 @@ struct SpringPendulum : Module {
         if (trailTimer >= trailStep) {
             trailTimer -= trailStep;
             if (trailTimer > trailStep) trailTimer = 0.f;
-            float reach = (float)std::max(restLen * 1.6, 0.5);
+            float reach = (float)SP_ANCHOR_D * SP_REACH;
             trailX[trailHead] = (float)x / reach;
             trailY[trailHead] = (float)y / reach;
             trailHead = (trailHead + 1) % SP_TRAIL_N;
@@ -344,7 +387,6 @@ struct SpringPendulum : Module {
         json_t* root = json_object();
         json_object_set_new(root, "voctRange", json_integer(voctRange));
         json_object_set_new(root, "gateDuration", json_integer(gateDuration));
-        json_object_set_new(root, "gPreset", json_integer(gPreset));
         return root;
     }
 
@@ -354,11 +396,6 @@ struct SpringPendulum : Module {
         if (j) voctRange = (VoctRange)json_integer_value(j);
         j = json_object_get(root, "gateDuration");
         if (j) gateDuration = (GateDuration)json_integer_value(j);
-        j = json_object_get(root, "gPreset");
-        if (j) {
-            gPreset = (GPreset)json_integer_value(j);
-            setGPreset();
-        }
     }
 };
 
@@ -373,7 +410,7 @@ NVGcolor colText()     { return nvgRGB(0xd6, 0xdc, 0xe6); }
 NVGcolor colDim()      { return nvgRGB(0x8a, 0x95, 0xa5); }
 NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
 NVGcolor colSpring()   { return nvgRGB(0x5a, 0xe6, 0xff); }
-//NVGcolor colWarm()     { return nvgRGB(0xff, 0x9c, 0x6a); }
+NVGcolor colWarm()     { return nvgRGB(0xff, 0x9c, 0x6a); }
 
 void setFont(NVGcontext* vg) {
     std::shared_ptr<window::Font> font =
@@ -391,7 +428,7 @@ void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGco
     nvgText(vg, x, y, s, NULL);
 }
 
-// Custom light for the mass LED
+// Custom light for the energy LED
 template <typename TBase = GrayModuleLightWidget>
 struct TSPCyanLight : TBase {
     TSPCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
@@ -404,11 +441,17 @@ using SPCyanLight = TSPCyanLight<>;
 void mapToDial(float ux, float uy, float maxPx, float& sx, float& sy) {
     float r = std::sqrt(ux * ux + uy * uy);
     if (r < 1e-6f) { sx = 0.f; sy = 0.f; return; }
-    const float knee = 0.72f;
-    float f = (r <= knee) ? r : knee + (1.f - knee) * std::tanh((r - knee) / (1.f - knee));
+    float f = (r <= SP_KNEE) ? r : SP_KNEE + (1.f - SP_KNEE) * std::tanh((r - SP_KNEE) / (1.f - SP_KNEE));
     float k = f / r * maxPx;
     sx = ux * k;
     sy = uy * k;
+}
+
+// Inverse of the radial part of mapToDial: f = screen radius / maxPx (0..1) -> normalised radius
+float unmapRadius(float f) {
+    if (f <= SP_KNEE) return f;
+    float t = std::min((f - SP_KNEE) / (1.f - SP_KNEE), 0.97f);
+    return SP_KNEE + (1.f - SP_KNEE) * std::atanh(t);
 }
 
 void drawLogo(NVGcontext* vg, float cx, float cy) {
@@ -447,7 +490,7 @@ void drawLogo(NVGcontext* vg, float cx, float cy) {
 // Spring physics drawings
 // ------------------------------------------------------------
 
-// Coil spring: dark border, steel core, bright highlight, soft glow
+// Coil spring: glow, dark outline, coloured core, bright highlight
 void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
                 int coils, float amp, NVGcolor steel) {
     float dx = x1 - x0, dy = y1 - y0;
@@ -457,8 +500,8 @@ void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
     float ux = dx / len, uy = dy / len;
     float nx = -uy, ny = ux;
 
-    // Leave a straight lead-in / lead-out so the coil looks mounted
-    const float lead = std::min(10.f, len * 0.18f);
+    // Straight lead-in / lead-out so the coil looks mounted
+    const float lead = std::min(8.f, len * 0.18f);
 
     auto zigzag = [&](float ampScale, float width, NVGcolor col) {
         nvgBeginPath(vg);
@@ -482,10 +525,10 @@ void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
         nvgStroke(vg);
     };
 
-    zigzag(1.0f, 7.0f, nvgRGBA(0x3d, 0xe0, 0xff, 24));      // glow
-    zigzag(1.0f, 4.4f, nvgRGB(0x0d, 0x10, 0x15));            // outline
-    zigzag(1.0f, 2.6f, steel);                               // core
-    zigzag(0.8f, 0.8f, nvgRGBA(255, 255, 255, 170));         // highlight
+    zigzag(1.0f, 6.5f, nvgRGBAf(steel.r, steel.g, steel.b, 0.10f));   // glow
+    zigzag(1.0f, 4.2f, nvgRGB(0x0d, 0x10, 0x15));                     // outline
+    zigzag(1.0f, 2.4f, steel);                                        // core
+    zigzag(0.8f, 0.7f, nvgRGBA(255, 255, 255, 170));                  // highlight
 }
 
 // Shaded sphere (mass) with highlight and rim
@@ -515,46 +558,32 @@ void drawBob(NVGcontext* vg, float cx, float cy, float r,
     nvgFill(vg);
 }
 
-// Machined pivot: mounting disc, bearing ring, cap with screw slot
-void drawHub(NVGcontext* vg, float cx, float cy) {
+// Machined anchor post: dark base, steel cap, screw slot
+void drawAnchor(NVGcontext* vg, float cx, float cy) {
     nvgBeginPath(vg);
-    nvgCircle(vg, cx + 1.5f, cy + 2.5f, 11.f);
+    nvgCircle(vg, cx + 1.2f, cy + 2.f, 6.5f);
     nvgFillColor(vg, nvgRGBA(0, 0, 0, 100));
     nvgFill(vg);
 
     nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 11.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, cx, cy - 11.f, cx, cy + 11.f,
+    nvgCircle(vg, cx, cy, 6.5f);
+    nvgFillPaint(vg, nvgLinearGradient(vg, cx, cy - 6.5f, cx, cy + 6.5f,
                                        nvgRGB(0x4a, 0x52, 0x5e), nvgRGB(0x12, 0x15, 0x1a)));
     nvgFill(vg);
     nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 60));
     nvgStrokeWidth(vg, 1.f);
     nvgStroke(vg);
 
-    for (int i = 0; i < 4; ++i) {
-        float a = (float)M_PI * 0.25f + i * (float)M_PI * 0.5f;
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx + std::cos(a) * 8.2f, cy + std::sin(a) * 8.2f, 1.0f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 100));
-        nvgFill(vg);
-    }
-
     nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 6.0f);
-    nvgFillPaint(vg, nvgRadialGradient(vg, cx - 2.f, cy - 2.f, 1.f, 8.f,
-                                       nvgRGB(0xe4, 0xea, 0xf2), nvgRGB(0x4b, 0x54, 0x62)));
-    nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 3.3f);
+    nvgCircle(vg, cx, cy, 3.6f);
     nvgFillPaint(vg, nvgRadialGradient(vg, cx - 1.f, cy - 1.f, 0.5f, 4.5f,
                                        nvgRGB(0xf6, 0xf9, 0xfd), nvgRGB(0x6b, 0x75, 0x84)));
     nvgFill(vg);
 
     nvgBeginPath(vg);
-    nvgMoveTo(vg, cx - 2.2f, cy + 0.6f);
-    nvgLineTo(vg, cx + 2.2f, cy - 0.6f);
-    nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 160));
+    nvgMoveTo(vg, cx - 2.2f, cy + 0.5f);
+    nvgLineTo(vg, cx + 2.2f, cy - 0.5f);
+    nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 170));
     nvgStrokeWidth(vg, 0.9f);
     nvgStroke(vg);
 }
@@ -753,20 +782,25 @@ struct SPPanelBackground : TransparentWidget {
 
         label(vg, SP_LKNOB_X, SP_KNOB_Y1 + 33.f, "SPEED");
         label(vg, SP_LKNOB_X, SP_KNOB_Y2 + 33.f, "MASS");
-        label(vg, SP_RKNOB_X, SP_KNOB_Y1 + 33.f, "LENGTH");
+        label(vg, SP_RKNOB_X, SP_KNOB_Y1 + 33.f, "REST LEN");
         label(vg, SP_RKNOB_X, SP_KNOB_Y2 + 33.f, "SPRING K");
 
         // ---- Control section ----
         section(vg, SP_CTRL_SECTION_Y, "CONTROL");
-        ring(vg, 60.f, SP_CTRL_Y, 17.f);
-        drawKnobTicks(vg, 60.f, SP_CTRL_Y, 21.f, 24.f);
-        label(vg, 60.f,  SP_CTRL_LBL_Y + 3.f, "PUSH STR");
-        ring(vg, 140.f, SP_CTRL_Y, 13.f);
-        label(vg, 140.f, SP_CTRL_LBL_Y + 3.f, "PUSH");
-        ring(vg, 220.f, SP_CTRL_Y, 13.f);
-        label(vg, 220.f, SP_CTRL_LBL_Y + 3.f, "RESET");
-        ring(vg, 290.f, SP_CTRL_Y, 13.f);
-        label(vg, 290.f, SP_CTRL_LBL_Y + 3.f, "ENERGY");
+
+        const float cKnobX[4] = {30.f, 82.f, 134.f, 186.f};
+        const char* cKnobL[4] = {"PUSH STR", "CHAOS", "DAMP", "GRAVITY"};
+        for (int i = 0; i < 4; ++i) {
+            ring(vg, cKnobX[i], SP_CTRL_Y, 17.f);
+            drawKnobTicks(vg, cKnobX[i], SP_CTRL_Y, 21.f, 24.f);
+            label(vg, cKnobX[i], SP_CTRL_LBL_Y + 3.f, cKnobL[i]);
+        }
+        ring(vg, 232.f, SP_CTRL_Y, 13.f);
+        label(vg, 232.f, SP_CTRL_LBL_Y + 3.f, "PUSH");
+        ring(vg, 272.f, SP_CTRL_Y, 13.f);
+        label(vg, 272.f, SP_CTRL_LBL_Y + 3.f, "RESET");
+        ring(vg, 316.f, SP_CTRL_Y, 13.f);
+        label(vg, 316.f, SP_CTRL_LBL_Y + 3.f, "ENERGY");
 
         // ---- I/O section ----
         section(vg, SP_IO_SECTION_Y, "I / O");
@@ -780,16 +814,89 @@ struct SPPanelBackground : TransparentWidget {
 };
 
 // ------------------------------------------------------------
-// Spring display widget
+// Spring display widget (also handles mouse grabbing)
 // ------------------------------------------------------------
 struct SPDisplayWidget : TransparentWidget {
     SpringPendulum* module = nullptr;
+
+    // Mouse interaction state
+    bool dragging = false;
+    Vec  dragPos;     // pointer position in display-local pixels
+    Vec  dragOff;     // offset from pointer to ball centre at grab time
 
     SPDisplayWidget(SpringPendulum* m) : module(m) {
         box.pos = Vec(SP_DISP_X, SP_DISP_Y);
         box.size = Vec(SP_DISP_W, SP_DISP_H);
     }
 
+    // ---- helpers ----
+    static float reachUnits() { return (float)SP_ANCHOR_D * SP_REACH; }
+
+    float bobRadius() const {
+        return 4.5f + 2.2f * std::cbrt((float)(module ? module->mass : 1.5));
+    }
+
+    Vec ballPixel() const {
+        float sx, sy;
+        float reach = reachUnits();
+        mapToDial((float)(module->x) / reach, (float)(module->y) / reach, SP_MAXPX, sx, sy);
+        return Vec(SP_DISP_W / 2.f + sx, SP_DISP_H / 2.f - sy);
+    }
+
+    // Convert the pointer (plus grab offset) to a physical target and hand it to the module
+    void updateGrab() {
+        if (!module) return;
+        Vec p = dragPos.plus(dragOff);
+        float sx = p.x - SP_DISP_W / 2.f;
+        float sy = -(p.y - SP_DISP_H / 2.f);
+        float rs = std::sqrt(sx * sx + sy * sy);
+        float ux = 0.f, uy = 0.f;
+        if (rs > 1e-4f) {
+            float f = std::min(rs / SP_MAXPX, 0.98f);
+            float r = unmapRadius(f);
+            ux = sx / rs * r;
+            uy = sy / rs * r;
+        }
+        module->grabX = (double)(ux * reachUnits());
+        module->grabY = (double)(uy * reachUnits());
+    }
+
+    // ---- mouse events ----
+    void onButton(const ButtonEvent& e) override {
+        if (module && e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
+            Vec ball = ballPixel();
+            float dBall = e.pos.minus(ball).norm();
+            float dCentre = e.pos.minus(Vec(SP_DISP_W / 2.f, SP_DISP_H / 2.f)).norm();
+            bool onBall = dBall <= bobRadius() + 12.f;
+
+            // Click on / near the ball: grab it where it is.
+            // Click elsewhere inside the dial: the ball is pulled to the cursor.
+            if (onBall || dCentre <= SP_DIAL_R + 4.f) {
+                dragging = true;
+                dragPos = e.pos;
+                dragOff = onBall ? ball.minus(e.pos) : Vec(0.f, 0.f);
+                updateGrab();
+                module->grabbed = true;
+                e.consume(this);
+                return;
+            }
+        }
+        TransparentWidget::onButton(e);
+    }
+
+    void onDragMove(const DragMoveEvent& e) override {
+        if (!dragging || !module) return;
+        dragPos = dragPos.plus(e.mouseDelta.div(getAbsoluteZoom()));
+        updateGrab();
+    }
+
+    void onDragEnd(const DragEndEvent& e) override {
+        dragging = false;
+        if (module) module->grabbed = false;   // ball is released and keeps its velocity
+        TransparentWidget::onDragEnd(e);
+    }
+
+    // ---- drawing ----
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
         const float cx = SP_DISP_W / 2.f;
@@ -866,27 +973,24 @@ struct SPDisplayWidget : TransparentWidget {
         const float cy = SP_DISP_H / 2.f;
 
         // Read state
-        double px = 0, py = -1, vx = 0, vy = 0, m = 1, K = 10, L = 1, g = 9.81;
+        double px = 0, py = 0, vx = 0, vy = 0, m = 1, K = 10, L = 0.5, g = 0.0;
+        bool grabbedNow = false;
         if (module) {
             px = module->x;      py = module->y;
             vx = module->vx;     vy = module->vy;
             m = module->mass;    K = module->springK;
             L = module->restLen; g = module->g;
+            grabbedNow = module->grabbed.load();
         } else {
-            px = 0.6 * std::sin(1.3);
-            py = -1.0 * std::cos(1.3);
-            vx = 2.0; vy = 0.5;
-            m = 1.5; K = 20; L = 1.0; g = 9.81;
+            px = 0.30; py = -0.18;
+            vx = 1.5;  vy = 0.6;
+            m = 1.5;   K = 20;  L = 0.5;  g = 0.0;
         }
 
-        float reach = (float)std::max(L * 1.6, 0.5);
+        const float reach = reachUnits();
 
-        // Mass radius (proportional to cube root of mass), kept modest
+        // Mass radius (cube root of mass); max ~9.2 px, always fits in SP_MAXPX margin
         float bobR = 4.5f + 2.2f * std::cbrt((float)m);
-
-        // Maximum distance of the mass CENTRE from the pivot, so the whole
-        // sphere always stays inside the dial.
-        const float maxPx = SP_DIAL_R - bobR - 3.f;
 
         // Everything below is clipped to the display as a safety net
         nvgSave(vg);
@@ -894,9 +998,46 @@ struct SPDisplayWidget : TransparentWidget {
 
         // Mass position on screen (soft-limited into the dial)
         float sx, sy;
-        mapToDial((float)px / reach, (float)py / reach, maxPx, sx, sy);
+        mapToDial((float)px / reach, (float)py / reach, SP_MAXPX, sx, sy);
         float mx = cx + sx;
-        float my = cy - sy;      // y negative -> below pivot
+        float my = cy - sy;      // +y physical = up on screen
+
+        // Anchor positions: N, E, S, W (same mapping, so springs end on the posts)
+        const float dirX[4] = {0.f, 1.f, 0.f, -1.f};
+        const float dirY[4] = {1.f, 0.f, -1.f, 0.f};
+        float aX[4], aY[4];
+        for (int i = 0; i < 4; ++i) {
+            float ax, ay;
+            mapToDial(dirX[i] * (float)SP_ANCHOR_D / reach,
+                      dirY[i] * (float)SP_ANCHOR_D / reach, SP_MAXPX, ax, ay);
+            aX[i] = cx + ax;
+            aY[i] = cy - ay;
+        }
+
+        // Struts from the anchor posts out to the rim
+        nvgLineCap(vg, NVG_ROUND);
+        for (int i = 0; i < 4; ++i) {
+            float ex = cx + dirX[i] * (SP_DIAL_R + 1.f);
+            float ey = cy - dirY[i] * (SP_DIAL_R + 1.f);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, aX[i], aY[i]);
+            nvgLineTo(vg, ex, ey);
+            nvgStrokeColor(vg, nvgRGB(0x1a, 0x1e, 0x25));
+            nvgStrokeWidth(vg, 5.f);
+            nvgStroke(vg);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, aX[i], aY[i]);
+            nvgLineTo(vg, ex, ey);
+            nvgStrokeColor(vg, nvgRGB(0x4a, 0x52, 0x5e));
+            nvgStrokeWidth(vg, 2.6f);
+            nvgStroke(vg);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, aX[i], aY[i]);
+            nvgLineTo(vg, ex, ey);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 70));
+            nvgStrokeWidth(vg, 0.7f);
+            nvgStroke(vg);
+        }
 
         // Trail (same mapping)
         int tn = 0;
@@ -906,17 +1047,18 @@ struct SPDisplayWidget : TransparentWidget {
             for (int i = 0; i < tn; ++i) {
                 int idx = ((module->trailHead - tn + i) % SP_TRAIL_N + SP_TRAIL_N) % SP_TRAIL_N;
                 float ax, ay;
-                mapToDial(module->trailX[idx], module->trailY[idx], maxPx, ax, ay);
+                mapToDial(module->trailX[idx], module->trailY[idx], SP_MAXPX, ax, ay);
                 tx[i] = cx + ax;
                 ty[i] = cy - ay;
             }
         } else {
             tn = 90;
             for (int i = 0; i < tn; ++i) {
-                float k = (float)(i - (tn - 1)) * 0.04f;
-                float a1 = 1.3f + k * 0.7f;
+                float k = (float)i / (float)(tn - 1);
+                float a1 = 6.0f * k;
+                float rr = 0.18f + 0.12f * std::sin(3.f * a1);
                 float ax, ay;
-                mapToDial(0.62f * std::sin(a1), 0.62f * std::cos(a1) * -1.f, maxPx, ax, ay);
+                mapToDial(rr * std::cos(a1), rr * std::sin(a1), SP_MAXPX, ax, ay);
                 tx[i] = cx + ax;
                 ty[i] = cy - ay;
             }
@@ -925,27 +1067,28 @@ struct SPDisplayWidget : TransparentWidget {
         drawTrail(vg, tx, ty, tn, colSpring(), 4.5f, 0.10f);
         drawTrail(vg, tx, ty, tn, colSpring(), 1.2f, 0.45f);
 
-        // Spring shadow (offset downward)
-        nvgLineCap(vg, NVG_ROUND);
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + 2.f, cy + 3.f);
-        nvgLineTo(vg, mx + 2.f, my + 3.f);
-        nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 70));
-        nvgStrokeWidth(vg, 5.f);
-        nvgStroke(vg);
+        // Four springs (colour shifts cyan -> orange with tension)
+        for (int i = 0; i < 4; ++i) {
+            double ddx = dirX[i] * SP_ANCHOR_D - px;
+            double ddy = dirY[i] * SP_ANCHOR_D - py;
+            float rr = (float)std::sqrt(ddx * ddx + ddy * ddy);
+            float tension = std::min(1.f, std::fabs(rr - (float)L) / 0.6f);
+            NVGcolor col = nvgLerpRGBA(colSpring(), colWarm(), tension);
 
-        // Spring coil: coil density reflects stretch
-        float curLen = (float)std::sqrt(px*px + py*py);
-        float stretch = curLen / std::max((float)L, 0.1f);
-        int coils = (int)(10 + 4 * std::min(stretch, 1.6f));
-        float coilAmp = 4.6f;
-        drawSpring(vg, cx, cy, mx, my, coils, coilAmp, colSpring());
+            // shadow
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, aX[i] + 2.f, aY[i] + 3.f);
+            nvgLineTo(vg, mx + 2.f, my + 3.f);
+            nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 70));
+            nvgStrokeWidth(vg, 4.5f);
+            nvgStroke(vg);
 
-        // Mass soft ground shadow
-        nvgBeginPath(vg);
-        nvgEllipse(vg, mx + 2.5f, my + bobR * 0.7f + 2.f, bobR * 0.95f, bobR * 0.4f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-        nvgFill(vg);
+            drawSpring(vg, aX[i], aY[i], mx, my, 11, 3.6f, col);
+        }
+
+        // Anchor posts on top of the spring ends
+        for (int i = 0; i < 4; ++i)
+            drawAnchor(vg, aX[i], aY[i]);
 
         // Energy glow (bright when moving fast)
         float speed = (float)std::sqrt(vx*vx + vy*vy);
@@ -963,8 +1106,19 @@ struct SPDisplayWidget : TransparentWidget {
                 nvgRGB(0xd0, 0x50, 0x1a),
                 nvgRGB(0x4a, 0x14, 0x04));
 
-        // Pivot
-        drawHub(vg, cx, cy);
+        // Grab indicator: bright ring around the ball while the mouse holds it
+        if (grabbedNow) {
+            nvgBeginPath(vg);
+            nvgCircle(vg, mx, my, bobR + 4.f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 220));
+            nvgStrokeWidth(vg, 1.5f);
+            nvgStroke(vg);
+            nvgBeginPath(vg);
+            nvgCircle(vg, mx, my, bobR + 7.f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+        }
 
         // Scanlines
         nvgBeginPath(vg);
@@ -1010,6 +1164,10 @@ struct SPDisplayWidget : TransparentWidget {
         drawText(vg, SP_DISP_W - 5.f, SP_DISP_H - 8.f, buf, 7.f, cd,
                  NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
 
+        if (grabbedNow)
+            drawText(vg, cx, SP_DISP_H - 8.f, "GRAB", 7.f, c1,
+                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
+
         nvgRestore(vg);
 
         Widget::drawLayer(args, layer);
@@ -1047,13 +1205,19 @@ struct SpringPendulumWidget : ModuleWidget {
 
         // Control row
         addParam(createParamCentered<RoundSmallBlackKnob>(
-            Vec(60.f, SP_CTRL_Y), module, SpringPendulum::PUSH_STRENGTH_PARAM));
+            Vec(30.f, SP_CTRL_Y), module, SpringPendulum::PUSH_STRENGTH_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(
+            Vec(82.f, SP_CTRL_Y), module, SpringPendulum::CHAOS_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(
+            Vec(134.f, SP_CTRL_Y), module, SpringPendulum::DAMP_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(
+            Vec(186.f, SP_CTRL_Y), module, SpringPendulum::GRAVITY_PARAM));
         addParam(createParamCentered<LEDButton>(
-            Vec(140.f, SP_CTRL_Y), module, SpringPendulum::PUSH_BUTTON));
+            Vec(232.f, SP_CTRL_Y), module, SpringPendulum::PUSH_BUTTON));
         addParam(createParamCentered<LEDButton>(
-            Vec(220.f, SP_CTRL_Y), module, SpringPendulum::RESET_BUTTON));
+            Vec(272.f, SP_CTRL_Y), module, SpringPendulum::RESET_BUTTON));
         addChild(createLightCentered<MediumLight<SPCyanLight>>(
-            Vec(290.f, SP_CTRL_Y), module, SpringPendulum::MASS_LIGHT));
+            Vec(316.f, SP_CTRL_Y), module, SpringPendulum::MASS_LIGHT));
 
         // I/O row
         const float ioX[6] = {40.f, 96.f, 152.f, 208.f, 264.f, 320.f};
@@ -1099,20 +1263,6 @@ struct SpringPendulumWidget : ModuleWidget {
                         (module->gateDuration == i) ? "✔" : "",
                         [=]() {
                             module->gateDuration = (SpringPendulum::GateDuration)i;
-                        }));
-                }
-            }
-        ));
-
-        menu->addChild(createSubmenuItem("Gravitational acceleration", "",
-            [=](ui::Menu* submenu) {
-                const char* gNames[] = {"9.81 m/s² (Earth)", "2×g (19.62)", "4×g (39.24)", "0 (zero gravity)"};
-                for (int i = 0; i < SpringPendulum::NUM_GPRESETS; ++i) {
-                    submenu->addChild(createMenuItem(gNames[i],
-                        (module->gPreset == i) ? "✔" : "",
-                        [=]() {
-                            module->gPreset = (SpringPendulum::GPreset)i;
-                            module->setGPreset();
                         }));
                 }
             }
