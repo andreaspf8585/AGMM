@@ -45,6 +45,9 @@ void init(Plugin *p)
 	p->addModel(modelSpikes);
 	p->addModel(modelGates);
 	p->addModel(modelBastion);
+	p->addModel(modelMerger);
+	p->addModel(modelSplitter);
+	p->addModel(modelPhasmal);
 
 
 

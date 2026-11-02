@@ -48,3 +48,6 @@ extern Model* modelLifeform;
 extern Model* modelSpikes;
 extern Model* modelGates;
 extern Model* modelBastion;
+extern Model* modelMerger;
+extern Model* modelSplitter;
+extern Model* modelPhasmal;

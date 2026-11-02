@@ -348,6 +348,32 @@
       "tags": [
         "filter"
       ]
+    },
+    {
+      "slug": "Merger",
+      "name": "Merger",
+      "description": "Merge",
+      "tags": [
+        "merge",
+        "polyphonic"
+      ]
+    },
+    {
+      "slug": "Splitter",
+      "name": "Splitter",
+      "description": "split",
+      "tags": [
+        "split",
+        "polyphonic"
+      ]
+    },
+    {
+      "slug": "Phasmal",
+      "name": "Phasmal",
+      "description": "phaser",
+      "tags": [
+        "phaser"
+      ]
     }
   ]
 }
