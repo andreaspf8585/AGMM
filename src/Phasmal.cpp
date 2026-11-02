@@ -871,7 +871,7 @@ struct PhasmalWidget : ModuleWidget {
                 }
             }
         ));
-    }
+    }   
 };
 
 Model* modelPhasmal = createModel<Phasmal, PhasmalWidget>("Phasmal");
