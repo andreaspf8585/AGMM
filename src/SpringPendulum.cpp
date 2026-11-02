@@ -21,9 +21,14 @@ static const float SP_DISP_H = 180.f;
 static const float SP_DISP_X = (SP_PANEL_W - SP_DISP_W) / 2.f;   // 90
 static const float SP_DISP_Y = 44.f;
 
+// Dial geometry inside the display (everything must stay inside DIAL_R)
+static const float SP_DIAL_R = 78.f;
+
 // Side knob columns
 static const float SP_LKNOB_X = 32.f;
 static const float SP_RKNOB_X = 328.f;
+static const float SP_KNOB_Y1 = 95.f;
+static const float SP_KNOB_Y2 = 158.f;
 
 // Control row
 static const float SP_CTRL_SECTION_Y = 228.f;
@@ -32,7 +37,6 @@ static const float SP_CTRL_LBL_Y     = 282.f;
 
 // I/O row
 static const float SP_IO_SECTION_Y   = 302.f;
-static const float SP_IO_LBL_Y       = 324.f;
 static const float SP_IO_Y           = 346.f;
 
 // ------------------------------------------------------------
@@ -322,7 +326,7 @@ struct SpringPendulum : Module {
         float bright = std::min(1.0f, speed / 5.0f);
         lights[MASS_LIGHT].setBrightness(bright);
 
-        // ---- display trail ----
+        // ---- display trail (stored normalised by display reach) ----
         const float trailStep = 1.f / SP_TRAIL_HZ;
         trailTimer += args.sampleTime;
         if (trailTimer >= trailStep) {
@@ -363,13 +367,13 @@ struct SpringPendulum : Module {
 // ------------------------------------------------------------
 namespace {
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
+NVGcolor colBgTop()    { return nvgRGB(0x25, 0x28, 0x30); }
+NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
+NVGcolor colText()     { return nvgRGB(0xd6, 0xdc, 0xe6); }
+NVGcolor colDim()      { return nvgRGB(0x8a, 0x95, 0xa5); }
 NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colSpring()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-//NVGcolor colMass()     { return nvgRGB(0xff, 0x9c, 0x6a); }
+NVGcolor colSpring()   { return nvgRGB(0x5a, 0xe6, 0xff); }
+//NVGcolor colWarm()     { return nvgRGB(0xff, 0x9c, 0x6a); }
 
 void setFont(NVGcontext* vg) {
     std::shared_ptr<window::Font> font =
@@ -387,12 +391,25 @@ void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGco
     nvgText(vg, x, y, s, NULL);
 }
 
-// Custom light for the mass LED — cyan-ish like the rest of the family
+// Custom light for the mass LED
 template <typename TBase = GrayModuleLightWidget>
 struct TSPCyanLight : TBase {
     TSPCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
 };
 using SPCyanLight = TSPCyanLight<>;
+
+// Soft-limit: maps a normalised position (units of display reach) onto the dial so the
+// result ALWAYS lies within a circle of radius maxPx. 1:1 near the centre, smoothly
+// compressed near the rim, never crosses it.
+void mapToDial(float ux, float uy, float maxPx, float& sx, float& sy) {
+    float r = std::sqrt(ux * ux + uy * uy);
+    if (r < 1e-6f) { sx = 0.f; sy = 0.f; return; }
+    const float knee = 0.72f;
+    float f = (r <= knee) ? r : knee + (1.f - knee) * std::tanh((r - knee) / (1.f - knee));
+    float k = f / r * maxPx;
+    sx = ux * k;
+    sy = uy * k;
+}
 
 void drawLogo(NVGcontext* vg, float cx, float cy) {
     const float w = 64.f, h = 18.f;
@@ -430,7 +447,7 @@ void drawLogo(NVGcontext* vg, float cx, float cy) {
 // Spring physics drawings
 // ------------------------------------------------------------
 
-// Coil spring: zigzag with dark border, steel core, white highlight
+// Coil spring: dark border, steel core, bright highlight, soft glow
 void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
                 int coils, float amp, NVGcolor steel) {
     float dx = x1 - x0, dy = y1 - y0;
@@ -440,17 +457,23 @@ void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
     float ux = dx / len, uy = dy / len;
     float nx = -uy, ny = ux;
 
+    // Leave a straight lead-in / lead-out so the coil looks mounted
+    const float lead = std::min(10.f, len * 0.18f);
+
     auto zigzag = [&](float ampScale, float width, NVGcolor col) {
         nvgBeginPath(vg);
         nvgMoveTo(vg, x0, y0);
+        nvgLineTo(vg, x0 + ux * lead, y0 + uy * lead);
         int steps = coils * 2;
+        float body = len - 2.f * lead;
         for (int i = 1; i < steps; ++i) {
             float t = (float)i / steps;
             float side = (i % 2 == 0) ? -1.f : 1.f;
-            float px = x0 + ux * len * t + nx * amp * side * ampScale;
-            float py = y0 + uy * len * t + ny * amp * side * ampScale;
+            float px = x0 + ux * (lead + body * t) + nx * amp * side * ampScale;
+            float py = y0 + uy * (lead + body * t) + ny * amp * side * ampScale;
             nvgLineTo(vg, px, py);
         }
+        nvgLineTo(vg, x1 - ux * lead, y1 - uy * lead);
         nvgLineTo(vg, x1, y1);
         nvgStrokeColor(vg, col);
         nvgStrokeWidth(vg, width);
@@ -459,9 +482,10 @@ void drawSpring(NVGcontext* vg, float x0, float y0, float x1, float y1,
         nvgStroke(vg);
     };
 
-    zigzag(1.0f, 4.6f, nvgRGB(0x14, 0x17, 0x1d));
-    zigzag(1.0f, 2.6f, steel);
-    zigzag(0.75f, 0.8f, nvgRGBA(255, 255, 255, 150));
+    zigzag(1.0f, 7.0f, nvgRGBA(0x3d, 0xe0, 0xff, 24));      // glow
+    zigzag(1.0f, 4.4f, nvgRGB(0x0d, 0x10, 0x15));            // outline
+    zigzag(1.0f, 2.6f, steel);                               // core
+    zigzag(0.8f, 0.8f, nvgRGBA(255, 255, 255, 170));         // highlight
 }
 
 // Shaded sphere (mass) with highlight and rim
@@ -478,11 +502,13 @@ void drawBob(NVGcontext* vg, float cx, float cy, float r,
     nvgStrokeWidth(vg, 1.3f);
     nvgStroke(vg);
 
+    // bounce light
     nvgBeginPath(vg);
     nvgCircle(vg, cx + r * 0.38f, cy + r * 0.42f, r * 0.3f);
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
     nvgFill(vg);
 
+    // specular
     nvgBeginPath(vg);
     nvgCircle(vg, cx - r * 0.38f, cy - r * 0.42f, r * 0.2f);
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 210));
@@ -492,42 +518,42 @@ void drawBob(NVGcontext* vg, float cx, float cy, float r,
 // Machined pivot: mounting disc, bearing ring, cap with screw slot
 void drawHub(NVGcontext* vg, float cx, float cy) {
     nvgBeginPath(vg);
-    nvgCircle(vg, cx + 2.f, cy + 3.f, 12.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+    nvgCircle(vg, cx + 1.5f, cy + 2.5f, 11.f);
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 100));
     nvgFill(vg);
 
     nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 12.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, cx, cy - 12.f, cx, cy + 12.f,
-                                       nvgRGB(0x3a, 0x41, 0x4c), nvgRGB(0x12, 0x15, 0x1a)));
+    nvgCircle(vg, cx, cy, 11.f);
+    nvgFillPaint(vg, nvgLinearGradient(vg, cx, cy - 11.f, cx, cy + 11.f,
+                                       nvgRGB(0x4a, 0x52, 0x5e), nvgRGB(0x12, 0x15, 0x1a)));
     nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 50));
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 60));
     nvgStrokeWidth(vg, 1.f);
     nvgStroke(vg);
 
     for (int i = 0; i < 4; ++i) {
         float a = (float)M_PI * 0.25f + i * (float)M_PI * 0.5f;
         nvgBeginPath(vg);
-        nvgCircle(vg, cx + std::cos(a) * 9.f, cy + std::sin(a) * 9.f, 1.1f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 90));
+        nvgCircle(vg, cx + std::cos(a) * 8.2f, cy + std::sin(a) * 8.2f, 1.0f);
+        nvgFillColor(vg, nvgRGBA(255, 255, 255, 100));
         nvgFill(vg);
     }
 
     nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 6.5f);
+    nvgCircle(vg, cx, cy, 6.0f);
     nvgFillPaint(vg, nvgRadialGradient(vg, cx - 2.f, cy - 2.f, 1.f, 8.f,
                                        nvgRGB(0xe4, 0xea, 0xf2), nvgRGB(0x4b, 0x54, 0x62)));
     nvgFill(vg);
 
     nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, 3.6f);
+    nvgCircle(vg, cx, cy, 3.3f);
     nvgFillPaint(vg, nvgRadialGradient(vg, cx - 1.f, cy - 1.f, 0.5f, 4.5f,
                                        nvgRGB(0xf6, 0xf9, 0xfd), nvgRGB(0x6b, 0x75, 0x84)));
     nvgFill(vg);
 
     nvgBeginPath(vg);
-    nvgMoveTo(vg, cx - 2.4f, cy + 0.6f);
-    nvgLineTo(vg, cx + 2.4f, cy - 0.6f);
+    nvgMoveTo(vg, cx - 2.2f, cy + 0.6f);
+    nvgLineTo(vg, cx + 2.2f, cy - 0.6f);
     nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 160));
     nvgStrokeWidth(vg, 0.9f);
     nvgStroke(vg);
@@ -553,6 +579,22 @@ void drawTrail(NVGcontext* vg, const float* xs, const float* ys, int n,
     }
 }
 
+// Small tick arc around a knob (11 ticks across the knob's 270 degree sweep)
+void drawKnobTicks(NVGcontext* vg, float cx, float cy, float r0, float r1) {
+    nvgLineCap(vg, NVG_ROUND);
+    for (int i = 0; i <= 10; ++i) {
+        float a = (-0.75f + 1.5f * (float)i / 10.f) * (float)M_PI;
+        bool major = (i == 0 || i == 5 || i == 10);
+        float ra = major ? r0 - 1.5f : r0;
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
+        nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
+        nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
+        nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
+        nvgStroke(vg);
+    }
+}
+
 // ------------------------------------------------------------
 // Panel background
 // ------------------------------------------------------------
@@ -560,46 +602,72 @@ struct SPPanelBackground : TransparentWidget {
     SPPanelBackground() { box.size = Vec(SP_PANEL_W, SP_PANEL_H); }
 
     void label(NVGcontext* vg, float x, float y, const char* txt) {
-        drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+        drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
     }
 
     void plate(NVGcontext* vg, float x, float y, float w, float h) {
+        // soft drop
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
+        nvgFill(vg);
+
         nvgBeginPath(vg);
         nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
+        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
+                                           nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
     void ring(NVGcontext* vg, float cx, float cy, float r) {
+        // recessed well
         nvgBeginPath(vg);
         nvgCircle(vg, cx, cy, r);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
+        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
+                                           nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
     void section(NVGcontext* vg, float y, const char* txt) {
         float x1 = 14.f, x2 = SP_PANEL_W - 14.f, cx = SP_PANEL_W / 2.f;
-        float w = 10.f + (float) strlen(txt) * 7.f;
+        float w = 14.f + (float) strlen(txt) * 7.f;
         drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
+
         nvgBeginPath(vg);
         nvgMoveTo(vg, x1, y);
         nvgLineTo(vg, cx - w / 2.f, y);
+        nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
+                                             nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+
+        nvgBeginPath(vg);
         nvgMoveTo(vg, cx + w / 2.f, y);
         nvgLineTo(vg, x2, y);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
+        nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
+                                             nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
-    void jackCell(NVGcontext* vg, float cx, float cy, const char* txt) {
-        plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-        label(vg, cx, cy - 19.f, txt);
+    void jackCell(NVGcontext* vg, float cx, float cy, const char* txt, bool isOutput) {
+        float x = cx - 17.f, y = cy - 27.f, w = 34.f, h = 44.f;
+        plate(vg, x, y, w, h);
+
+        // colour-coded top bar: cyan = output, orange = input
+        NVGcolor c = isOutput ? nvgRGBA(0x3d, 0xe0, 0xff, 170) : nvgRGBA(0xff, 0x9c, 0x6a, 170);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
+        nvgFillColor(vg, c);
+        nvgFill(vg);
+
+        label(vg, cx, cy - 18.f, txt);
     }
 
     void draw(const DrawArgs& args) override {
@@ -621,54 +689,91 @@ struct SPPanelBackground : TransparentWidget {
             nvgStroke(vg);
         }
 
+        // Corner vignette
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, SP_PANEL_W, SP_PANEL_H);
+        nvgFillPaint(vg, nvgRadialGradient(vg, SP_PANEL_W / 2.f, SP_PANEL_H * 0.4f,
+                                           SP_PANEL_H * 0.35f, SP_PANEL_H * 0.85f,
+                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
+        nvgFill(vg);
+
         // Edge highlight
         nvgBeginPath(vg);
         nvgRect(vg, 0.5f, 0.5f, SP_PANEL_W - 1.f, SP_PANEL_H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
 
+        // Top accent line
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, SP_PANEL_W, 2.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, SP_PANEL_W, 0,
+                                           nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+        nvgFill(vg);
+
         // Logo + title
-        drawLogo(vg, SP_PANEL_W / 2.f, 13.f);
-        drawText(vg, SP_PANEL_W / 2.f, 31.f, "SPRING PENDULUM", 13.f, colText(),
+        drawLogo(vg, SP_PANEL_W / 2.f, 15.f);
+        drawText(vg, SP_PANEL_W / 2.f, 32.f, "SPRING PENDULUM", 12.f, colText(),
                  NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
 
-        // Display bezel
+        // ---- Display bezel (metallic, recessed) ----
         float bx = SP_DISP_X - 5.f, by = SP_DISP_Y - 5.f;
         float bw = SP_DISP_W + 10.f, bh = SP_DISP_H + 10.f;
+
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+        nvgFill(vg);
+
         nvgBeginPath(vg);
         nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
         nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                           nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
+                                           nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
         nvgFill(vg);
+
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+
         nvgBeginPath(vg);
         nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
         nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
         nvgFill(vg);
 
-        // Side knob rings + labels
-        ring(vg, SP_LKNOB_X, 95.f, 18.f);
-        ring(vg, SP_LKNOB_X, 158.f, 18.f);
-        ring(vg, SP_RKNOB_X, 95.f, 18.f);
-        ring(vg, SP_RKNOB_X, 158.f, 18.f);
+        // ---- Side knobs: wells, tick scales, labels ----
+        const float kx[2] = {SP_LKNOB_X, SP_RKNOB_X};
+        const float ky[2] = {SP_KNOB_Y1, SP_KNOB_Y2};
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 2; ++j) {
+                ring(vg, kx[i], ky[j], 17.f);
+                drawKnobTicks(vg, kx[i], ky[j], 21.f, 24.f);
+            }
 
-        label(vg, SP_LKNOB_X, 95.f + 27.f, "SPEED");
-        label(vg, SP_LKNOB_X, 158.f + 27.f, "MASS");
-        label(vg, SP_RKNOB_X, 95.f + 27.f, "LENGTH");
-        label(vg, SP_RKNOB_X, 158.f + 27.f, "SPRING K");
+        label(vg, SP_LKNOB_X, SP_KNOB_Y1 + 33.f, "SPEED");
+        label(vg, SP_LKNOB_X, SP_KNOB_Y2 + 33.f, "MASS");
+        label(vg, SP_RKNOB_X, SP_KNOB_Y1 + 33.f, "LENGTH");
+        label(vg, SP_RKNOB_X, SP_KNOB_Y2 + 33.f, "SPRING K");
 
-        // Control section
+        // ---- Control section ----
         section(vg, SP_CTRL_SECTION_Y, "CONTROL");
         ring(vg, 60.f, SP_CTRL_Y, 17.f);
-        label(vg, 60.f, SP_CTRL_LBL_Y, "PUSH STR");
+        drawKnobTicks(vg, 60.f, SP_CTRL_Y, 21.f, 24.f);
+        label(vg, 60.f,  SP_CTRL_LBL_Y + 3.f, "PUSH STR");
+        ring(vg, 140.f, SP_CTRL_Y, 13.f);
+        label(vg, 140.f, SP_CTRL_LBL_Y + 3.f, "PUSH");
+        ring(vg, 220.f, SP_CTRL_Y, 13.f);
+        label(vg, 220.f, SP_CTRL_LBL_Y + 3.f, "RESET");
+        ring(vg, 290.f, SP_CTRL_Y, 13.f);
+        label(vg, 290.f, SP_CTRL_LBL_Y + 3.f, "ENERGY");
 
-        // I/O section
+        // ---- I/O section ----
         section(vg, SP_IO_SECTION_Y, "I / O");
         const char* io[6] = {"X", "Y", "V/OCT", "GATE", "RST IN", "PSH IN"};
         const float ioX[6] = {40.f, 96.f, 152.f, 208.f, 264.f, 320.f};
-        for (int i = 0; i < 6; ++i) {
-            jackCell(vg, ioX[i], SP_IO_Y, io[i]);
-        }
+        for (int i = 0; i < 6; ++i)
+            jackCell(vg, ioX[i], SP_IO_Y, io[i], i < 4);
 
         Widget::draw(args);
     }
@@ -697,31 +802,54 @@ struct SPDisplayWidget : TransparentWidget {
 
         // Dial face (radial glow)
         nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, SP_DISP_W / 2.f - 2.f);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, 10.f, SP_DISP_W * 0.55f,
-                                           nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x09)));
+        nvgCircle(vg, cx, cy, SP_DIAL_R);
+        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, 8.f, SP_DIAL_R,
+                                           nvgRGB(0x10, 0x20, 0x2c), nvgRGB(0x03, 0x06, 0x09)));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 46));
+
+        // Dial rim (double line)
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, SP_DIAL_R);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 90));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, SP_DIAL_R + 3.f);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
 
-        // Range rings
-        float rMax = SP_DISP_W / 2.f - 12.f;
-        for (int k = 1; k <= 2; ++k) {
+        // Tick scale around the dial (every 5 deg, major every 30 deg)
+        nvgLineCap(vg, NVG_BUTT);
+        for (int i = 0; i < 72; ++i) {
+            float a = (float)i * (float)M_PI / 36.f;
+            bool major = (i % 6 == 0);
+            float r0 = SP_DIAL_R + 5.f;
+            float r1 = SP_DIAL_R + (major ? 10.f : 7.5f);
             nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, rMax * (float)k / 2.f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, k == 2 ? 26 : 14));
+            nvgMoveTo(vg, cx + std::sin(a) * r0, cy - std::cos(a) * r0);
+            nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
+            nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 130) : nvgRGBA(255, 255, 255, 40));
+            nvgStrokeWidth(vg, major ? 1.2f : 0.8f);
+            nvgStroke(vg);
+        }
+
+        // Range rings
+        for (int k = 1; k <= 3; ++k) {
+            nvgBeginPath(vg);
+            nvgCircle(vg, cx, cy, SP_DIAL_R * (float)k / 4.f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, k % 2 ? 14 : 22));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
         }
 
         // Cross hair
         nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + 0.5f, cy - rMax + 4.f);
-        nvgLineTo(vg, cx + 0.5f, cy + rMax - 4.f);
-        nvgMoveTo(vg, cx - rMax + 4.f, cy + 0.5f);
-        nvgLineTo(vg, cx + rMax - 4.f, cy + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 12));
+        nvgMoveTo(vg, cx + 0.5f, cy - SP_DIAL_R + 2.f);
+        nvgLineTo(vg, cx + 0.5f, cy + SP_DIAL_R - 2.f);
+        nvgMoveTo(vg, cx - SP_DIAL_R + 2.f, cy + 0.5f);
+        nvgLineTo(vg, cx + SP_DIAL_R - 2.f, cy + 0.5f);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
 
@@ -736,7 +864,6 @@ struct SPDisplayWidget : TransparentWidget {
         NVGcontext* vg = args.vg;
         const float cx = SP_DISP_W / 2.f;
         const float cy = SP_DISP_H / 2.f;
-        const float Rpx = SP_DISP_W / 2.f - 12.f;
 
         // Read state
         double px = 0, py = -1, vx = 0, vy = 0, m = 1, K = 10, L = 1, g = 9.81;
@@ -753,61 +880,72 @@ struct SPDisplayWidget : TransparentWidget {
         }
 
         float reach = (float)std::max(L * 1.6, 0.5);
-        float scale = Rpx / reach;
 
-        // Mass position on screen
-        float mx = cx + (float)px * scale;
-        float my = cy + (float)py * scale * -1.f;  // y negative → below pivot
+        // Mass radius (proportional to cube root of mass), kept modest
+        float bobR = 4.5f + 2.2f * std::cbrt((float)m);
 
-        // Trail
+        // Maximum distance of the mass CENTRE from the pivot, so the whole
+        // sphere always stays inside the dial.
+        const float maxPx = SP_DIAL_R - bobR - 3.f;
+
+        // Everything below is clipped to the display as a safety net
+        nvgSave(vg);
+        nvgScissor(vg, 0, 0, SP_DISP_W, SP_DISP_H);
+
+        // Mass position on screen (soft-limited into the dial)
+        float sx, sy;
+        mapToDial((float)px / reach, (float)py / reach, maxPx, sx, sy);
+        float mx = cx + sx;
+        float my = cy - sy;      // y negative -> below pivot
+
+        // Trail (same mapping)
         int tn = 0;
         float tx[SP_TRAIL_N], ty[SP_TRAIL_N];
         if (module) {
             tn = std::min(std::max(module->trailCount, 0), SP_TRAIL_N);
             for (int i = 0; i < tn; ++i) {
                 int idx = ((module->trailHead - tn + i) % SP_TRAIL_N + SP_TRAIL_N) % SP_TRAIL_N;
-                tx[i] = cx + module->trailX[idx] * Rpx;
-                ty[i] = cy - module->trailY[idx] * Rpx;
+                float ax, ay;
+                mapToDial(module->trailX[idx], module->trailY[idx], maxPx, ax, ay);
+                tx[i] = cx + ax;
+                ty[i] = cy - ay;
             }
         } else {
             tn = 90;
             for (int i = 0; i < tn; ++i) {
                 float k = (float)(i - (tn - 1)) * 0.04f;
                 float a1 = 1.3f + k * 0.7f;
-                tx[i] = cx + (float)(L * std::sin(a1)) * scale * 1.4f;
-                ty[i] = cy + (float)(L * std::cos(a1)) * scale * 1.4f;
+                float ax, ay;
+                mapToDial(0.62f * std::sin(a1), 0.62f * std::cos(a1) * -1.f, maxPx, ax, ay);
+                tx[i] = cx + ax;
+                ty[i] = cy - ay;
             }
         }
 
-        // Trail rendering (both wide halo and crisp inner line)
-        drawTrail(vg, tx, ty, tn, colSpring(), 4.f, 0.10f);
-        drawTrail(vg, tx, ty, tn, colSpring(), 1.1f, 0.4f);
+        drawTrail(vg, tx, ty, tn, colSpring(), 4.5f, 0.10f);
+        drawTrail(vg, tx, ty, tn, colSpring(), 1.2f, 0.45f);
 
-        // Shadow of the spring (offset downward)
+        // Spring shadow (offset downward)
         nvgLineCap(vg, NVG_ROUND);
         nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + 2.5f, cy + 3.5f);
-        nvgLineTo(vg, mx + 2.5f, my + 3.5f);
-        nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 80));
+        nvgMoveTo(vg, cx + 2.f, cy + 3.f);
+        nvgLineTo(vg, mx + 2.f, my + 3.f);
+        nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 70));
         nvgStrokeWidth(vg, 5.f);
         nvgStroke(vg);
 
-        // Spring coil — visual compression based on stretch
-        float restLen = (float)L;
+        // Spring coil: coil density reflects stretch
         float curLen = (float)std::sqrt(px*px + py*py);
-        float stretch = curLen / std::max(restLen, 0.1f);
+        float stretch = curLen / std::max((float)L, 0.1f);
         int coils = (int)(10 + 4 * std::min(stretch, 1.6f));
-        float coilAmp = 5.f;
+        float coilAmp = 4.6f;
         drawSpring(vg, cx, cy, mx, my, coils, coilAmp, colSpring());
 
-        // Mass shadow on the ground (subtle)
+        // Mass soft ground shadow
         nvgBeginPath(vg);
-        nvgEllipse(vg, mx + 3.f, my + 5.f, 9.f, 4.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 100));
+        nvgEllipse(vg, mx + 2.5f, my + bobR * 0.7f + 2.f, bobR * 0.95f, bobR * 0.4f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
         nvgFill(vg);
-
-        // Mass radius proportional to cube root of mass
-        float bobR = 6.f + 3.f * std::cbrt((float)m);
 
         // Energy glow (bright when moving fast)
         float speed = (float)std::sqrt(vx*vx + vy*vy);
@@ -815,13 +953,13 @@ struct SPDisplayWidget : TransparentWidget {
         nvgBeginPath(vg);
         nvgCircle(vg, mx, my, bobR * 3.f);
         nvgFillPaint(vg, nvgRadialGradient(vg, mx, my, bobR * 0.6f, bobR * 3.f,
-                                           nvgRGBA(0xff, 0x9c, 0x6a, (int)(10 + 40 * energy)),
+                                           nvgRGBA(0xff, 0x9c, 0x6a, (int)(10 + 45 * energy)),
                                            nvgRGBA(0xff, 0x9c, 0x6a, 0)));
         nvgFill(vg);
 
         // Mass sphere
         drawBob(vg, mx, my, bobR,
-                nvgRGB(0xff, 0xe4, 0xcc),
+                nvgRGB(0xff, 0xe8, 0xd2),
                 nvgRGB(0xd0, 0x50, 0x1a),
                 nvgRGB(0x4a, 0x14, 0x04));
 
@@ -832,38 +970,47 @@ struct SPDisplayWidget : TransparentWidget {
         nvgBeginPath(vg);
         for (int y = 0; y < (int) SP_DISP_H; y += 3)
             nvgRect(vg, 0, y + 1, SP_DISP_W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
+        nvgFill(vg);
+
+        // Edge vignette
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, SP_DISP_W, SP_DISP_H);
+        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, SP_DISP_W * 0.40f, SP_DISP_W * 0.78f,
+                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 150)));
         nvgFill(vg);
 
         // Glass reflection
         nvgBeginPath(vg);
         nvgRect(vg, 0, 0, SP_DISP_W, SP_DISP_H * 0.35f);
         nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, SP_DISP_H * 0.35f,
-                                           nvgRGBA(255, 255, 255, 14),
+                                           nvgRGBA(255, 255, 255, 16),
                                            nvgRGBA(255, 255, 255, 0)));
         nvgFill(vg);
 
-        // Readouts
+        // Readouts (in the display corners, outside the dial)
         char buf[32];
-        NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-        NVGcolor cm = nvgRGBA(0xff, 0x9c, 0x6a, 220);
-        NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 220);
+        NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
+        NVGcolor cm = nvgRGBA(0xff, 0x9c, 0x6a, 230);
+        NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 230);
 
         snprintf(buf, sizeof(buf), "X %+.2f", (float)px);
-        drawText(vg, 4.f, 8.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        drawText(vg, 5.f, 8.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
         snprintf(buf, sizeof(buf), "Y %+.2f", (float)py);
-        drawText(vg, 4.f, 17.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        drawText(vg, 5.f, 17.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
 
         snprintf(buf, sizeof(buf), "VX %+.1f", (float)vx);
-        drawText(vg, SP_DISP_W - 4.f, 8.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        drawText(vg, SP_DISP_W - 5.f, 8.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
         snprintf(buf, sizeof(buf), "VY %+.1f", (float)vy);
-        drawText(vg, SP_DISP_W - 4.f, 17.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        drawText(vg, SP_DISP_W - 5.f, 17.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
 
         snprintf(buf, sizeof(buf), "K %.0f", (float)K);
-        drawText(vg, 4.f, SP_DISP_H - 8.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        drawText(vg, 5.f, SP_DISP_H - 8.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
         snprintf(buf, sizeof(buf), "G %.1f", (float)g);
-        drawText(vg, SP_DISP_W - 4.f, SP_DISP_H - 8.f, buf, 7.f, cd,
+        drawText(vg, SP_DISP_W - 5.f, SP_DISP_H - 8.f, buf, 7.f, cd,
                  NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+
+        nvgRestore(vg);
 
         Widget::drawLayer(args, layer);
     }
@@ -890,13 +1037,13 @@ struct SpringPendulumWidget : ModuleWidget {
 
         // Side knobs
         addParam(createParamCentered<RoundSmallBlackKnob>(
-            Vec(SP_LKNOB_X, 95.f), module, SpringPendulum::SPEED_PARAM));
+            Vec(SP_LKNOB_X, SP_KNOB_Y1), module, SpringPendulum::SPEED_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(
-            Vec(SP_LKNOB_X, 158.f), module, SpringPendulum::MASS_PARAM));
+            Vec(SP_LKNOB_X, SP_KNOB_Y2), module, SpringPendulum::MASS_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(
-            Vec(SP_RKNOB_X, 95.f), module, SpringPendulum::LENGTH_PARAM));
+            Vec(SP_RKNOB_X, SP_KNOB_Y1), module, SpringPendulum::LENGTH_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(
-            Vec(SP_RKNOB_X, 158.f), module, SpringPendulum::SPRING_K_PARAM));
+            Vec(SP_RKNOB_X, SP_KNOB_Y2), module, SpringPendulum::SPRING_K_PARAM));
 
         // Control row
         addParam(createParamCentered<RoundSmallBlackKnob>(
