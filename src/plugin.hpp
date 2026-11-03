@@ -51,3 +51,4 @@ extern Model* modelBastion;
 extern Model* modelMerger;
 extern Model* modelSplitter;
 extern Model* modelPhasmal;
+extern Model* modelStasis;

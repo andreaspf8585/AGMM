@@ -48,7 +48,7 @@ void init(Plugin *p)
 	p->addModel(modelMerger);
 	p->addModel(modelSplitter);
 	p->addModel(modelPhasmal);
-
+	p->addModel(modelStasis);
 
 
 

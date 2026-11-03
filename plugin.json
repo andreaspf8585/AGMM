@@ -374,6 +374,30 @@
       "tags": [
         "phaser"
       ]
+    },
+    {
+      "slug": "Stasis",
+      "name": "Stasis",
+      "description": "sample and hold",
+      "tags": [
+        "sample and hold"
+      ]
+    },
+    {
+      "slug": "SwitchLines8to1",
+      "name": "SwitchLines8to1",
+      "description": "switch channel 8 to 1",
+      "tags": [
+        "switch 8 lines to 1"
+      ]
+    },
+    {
+      "slug": "SwitchLines1to8",
+      "name": "SwitchLines1to8",
+      "description": "switch 1 to 8",
+      "tags": [
+        "switch 1 channel to 8"
+      ]
     }
   ]
 }
