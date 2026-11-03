@@ -1671,5 +1671,5 @@ struct ExpressArpeggiatorWidget : ModuleWidget
         }));
     }
 };
-
+//...
 Model *modelExpressArpeggiator = createModel<ExpressArpeggiator, ExpressArpeggiatorWidget>("ExpressArpeggiator");
