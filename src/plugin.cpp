@@ -49,7 +49,9 @@ void init(Plugin *p)
 	p->addModel(modelSplitter);
 	p->addModel(modelPhasmal);
 	p->addModel(modelStasis);
-
+	p->addModel(modelSwitchLines8to1);
+	p->addModel(modelSwitchLines1to8);
+	p->addModel(modelQuantara);
 
 
 

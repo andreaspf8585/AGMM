@@ -52,3 +52,6 @@ extern Model* modelMerger;
 extern Model* modelSplitter;
 extern Model* modelPhasmal;
 extern Model* modelStasis;
+extern Model* modelSwitchLines8to1;
+extern Model* modelSwitchLines1to8;
+extern Model* modelQuantara;

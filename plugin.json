@@ -398,6 +398,14 @@
       "tags": [
         "switch 1 channel to 8"
       ]
+    },
+    {
+      "slug": "Quantara",
+      "name": "Quantara",
+      "description": "quantizer",
+      "tags": [
+        "quantizer"
+      ]
     }
   ]
 }
