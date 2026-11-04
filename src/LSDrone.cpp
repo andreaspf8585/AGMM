@@ -112,13 +112,16 @@ struct LSDroneEngine
     void process(float cvA, float cvB, float &leftOut, float &rightOut)
     {
         lfoPhase += lfoRate / sampleRate;
-        if (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+        if (lfoPhase >= 1.0f)
+            lfoPhase -= 1.0f;
         float lfoMod = std::sin(lfoPhase * 2.0f * float(M_PI)) * lfoDepth;
 
         driftState += (rand() / (float)RAND_MAX - 0.5f) * 0.008f;
         driftState *= 0.998f;
-        if (driftState > 0.2f) driftState = 0.2f;
-        if (driftState < -0.2f) driftState = -0.2f;
+        if (driftState > 0.2f)
+            driftState = 0.2f;
+        if (driftState < -0.2f)
+            driftState = -0.2f;
         float driftMod = driftState * drift;
         float totalMod = lfoMod + driftMod;
 
@@ -141,13 +144,16 @@ struct LSDroneEngine
         float filtered = filterState;
 
         modPhase += modRate / sampleRate;
-        if (modPhase >= 1.0f) modPhase -= 1.0f;
+        if (modPhase >= 1.0f)
+            modPhase -= 1.0f;
         float modTime = modDepth * (std::sin(modPhase * 2.0f * float(M_PI)) * 0.5f + 0.5f);
         float currentDelaySec = delayTime + modTime * 0.1f;
         int delaySamps = (int)(currentDelaySec * sampleRate);
-        if (delaySamps < 1) delaySamps = 1;
+        if (delaySamps < 1)
+            delaySamps = 1;
         int readIdx = delayIdx - delaySamps;
-        if (readIdx < 0) readIdx += delayLength;
+        if (readIdx < 0)
+            readIdx += delayLength;
         float delayedL = delayBufferL[readIdx];
         float delayedR = delayBufferR[readIdx];
 
@@ -168,7 +174,8 @@ struct LSDroneEngine
 
         int revSamps = (int)(0.8f * sampleRate);
         int revRead = revIdx - revSamps;
-        if (revRead < 0) revRead += revLength;
+        if (revRead < 0)
+            revRead += revLength;
         float revOut = revBuffer[revRead];
         float revIn = delayedL * 0.5f + delayedR * 0.5f;
         float damped = revOut * (1.0f - revDamping * 0.9f);
@@ -177,7 +184,8 @@ struct LSDroneEngine
 
         static float shimmerPhase = 0.0f;
         shimmerPhase += 440.0f / sampleRate;
-        if (shimmerPhase >= 1.0f) shimmerPhase -= 1.0f;
+        if (shimmerPhase >= 1.0f)
+            shimmerPhase -= 1.0f;
         float shimmered = revOut * std::sin(shimmerPhase * 2.0f * float(M_PI)) * shimmer;
 
         float wet = delayedL * 0.5f + delayedR * 0.5f + revOut * 0.7f + shimmered * 0.5f;
@@ -187,9 +195,11 @@ struct LSDroneEngine
         wet = washState * washMix + dry * (1.0f - washMix);
 
         int echoSamps = (int)(echoTime * sampleRate);
-        if (echoSamps < 1) echoSamps = 1;
+        if (echoSamps < 1)
+            echoSamps = 1;
         int echoRead = echoIdx - echoSamps;
-        if (echoRead < 0) echoRead += echoLength;
+        if (echoRead < 0)
+            echoRead += echoLength;
         float echoL = echoBufferL[echoRead];
         float echoR = echoBufferR[echoRead];
         echoBufferL[echoIdx] = wet + echoL * echoFeedback;
@@ -214,13 +224,17 @@ struct LSDroneEngine
 
         float inL = echoMixedL;
         float outL = (b0 * inL + b1 * lpfX1L + b2 * lpfX2L - a1 * lpfY1L - a2 * lpfY2L) / a0;
-        lpfX2L = lpfX1L; lpfX1L = inL;
-        lpfY2L = lpfY1L; lpfY1L = outL;
+        lpfX2L = lpfX1L;
+        lpfX1L = inL;
+        lpfY2L = lpfY1L;
+        lpfY1L = outL;
 
         float inR = echoMixedR;
         float outR = (b0 * inR + b1 * lpfX1R + b2 * lpfX2R - a1 * lpfY1R - a2 * lpfY2R) / a0;
-        lpfX2R = lpfX1R; lpfX1R = inR;
-        lpfY2R = lpfY1R; lpfY1R = outR;
+        lpfX2R = lpfX1R;
+        lpfX1R = inR;
+        lpfY2R = lpfY1R;
+        lpfY1R = outR;
 
         leftOut = std::tanh(outL * 0.8f);
         rightOut = std::tanh(outR * 0.8f);
@@ -230,13 +244,13 @@ struct LSDroneEngine
 // ============================================================
 // Display resolution / analyzer constants
 // ============================================================
-static const int   LS_SCOPE_N   = 160;     // waveform columns
-static const int   LS_FFT_N     = 4096;    // analyzer window (power of 2)
-static const int   LS_BARS      = 48;      // bar analyzer bands
-static const int   LS_SPEC_PTS  = 232;     // spectrum curve points
-static const float LS_DB_MIN    = -80.f;   // bottom of analyzer display
+static const int LS_SCOPE_N = 160;    // waveform columns
+static const int LS_FFT_N = 4096;     // analyzer window (power of 2)
+static const int LS_BARS = 48;        // bar analyzer bands
+static const int LS_SPEC_PTS = 232;   // spectrum curve points
+static const float LS_DB_MIN = -80.f; // bottom of analyzer display
 static const float LS_SPEC_FMIN = 30.f;
-static const float LS_BAR_FMIN  = 40.f;
+static const float LS_BAR_FMIN = 40.f;
 
 // ============================================================
 // Module – engine + CV handling + scope tracking
@@ -245,47 +259,107 @@ struct LSDrone : Module
 {
     enum ParamId
     {
-        PARAM_FINE_A, PARAM_FINE_B, PARAM_DETUNE, PARAM_MIX,
-        PARAM_CUTOFF, PARAM_RESO,
-        PARAM_LFO_RATE, PARAM_LFO_DEPTH, PARAM_DRIFT,
-        PARAM_DELAY_TIME, PARAM_DELAY_FEED, PARAM_DELAY_DIFF,
-        PARAM_REV_DECAY, PARAM_REV_DAMP,
-        PARAM_WASH, PARAM_SHIMMER,
-        PARAM_MOD_RATE, PARAM_MOD_DEPTH,
-        PARAM_ECHO_TIME, PARAM_ECHO_FEED, PARAM_ECHO_MIX,
-        PARAM_LPF_CUTOFF, PARAM_LPF_RESO,
-        PARAM_ATTEN_FINE_A, PARAM_ATTEN_FINE_B, PARAM_ATTEN_DETUNE, PARAM_ATTEN_MIX,
-        PARAM_ATTEN_CUTOFF, PARAM_ATTEN_RESO,
-        PARAM_ATTEN_LFO_RATE, PARAM_ATTEN_LFO_DEPTH, PARAM_ATTEN_DRIFT,
-        PARAM_ATTEN_DELAY_TIME, PARAM_ATTEN_DELAY_FEED, PARAM_ATTEN_DELAY_DIFF,
-        PARAM_ATTEN_REV_DECAY, PARAM_ATTEN_REV_DAMP,
-        PARAM_ATTEN_WASH, PARAM_ATTEN_SHIMMER,
-        PARAM_ATTEN_MOD_RATE, PARAM_ATTEN_MOD_DEPTH,
-        PARAM_ATTEN_ECHO_TIME, PARAM_ATTEN_ECHO_FEED, PARAM_ATTEN_ECHO_MIX,
-        PARAM_ATTEN_LPF_CUTOFF, PARAM_ATTEN_LPF_RESO,
+        PARAM_FINE_A,
+        PARAM_FINE_B,
+        PARAM_DETUNE,
+        PARAM_MIX,
+        PARAM_CUTOFF,
+        PARAM_RESO,
+        PARAM_LFO_RATE,
+        PARAM_LFO_DEPTH,
+        PARAM_DRIFT,
+        PARAM_DELAY_TIME,
+        PARAM_DELAY_FEED,
+        PARAM_DELAY_DIFF,
+        PARAM_REV_DECAY,
+        PARAM_REV_DAMP,
+        PARAM_WASH,
+        PARAM_SHIMMER,
+        PARAM_MOD_RATE,
+        PARAM_MOD_DEPTH,
+        PARAM_ECHO_TIME,
+        PARAM_ECHO_FEED,
+        PARAM_ECHO_MIX,
+        PARAM_LPF_CUTOFF,
+        PARAM_LPF_RESO,
+        PARAM_ATTEN_FINE_A,
+        PARAM_ATTEN_FINE_B,
+        PARAM_ATTEN_DETUNE,
+        PARAM_ATTEN_MIX,
+        PARAM_ATTEN_CUTOFF,
+        PARAM_ATTEN_RESO,
+        PARAM_ATTEN_LFO_RATE,
+        PARAM_ATTEN_LFO_DEPTH,
+        PARAM_ATTEN_DRIFT,
+        PARAM_ATTEN_DELAY_TIME,
+        PARAM_ATTEN_DELAY_FEED,
+        PARAM_ATTEN_DELAY_DIFF,
+        PARAM_ATTEN_REV_DECAY,
+        PARAM_ATTEN_REV_DAMP,
+        PARAM_ATTEN_WASH,
+        PARAM_ATTEN_SHIMMER,
+        PARAM_ATTEN_MOD_RATE,
+        PARAM_ATTEN_MOD_DEPTH,
+        PARAM_ATTEN_ECHO_TIME,
+        PARAM_ATTEN_ECHO_FEED,
+        PARAM_ATTEN_ECHO_MIX,
+        PARAM_ATTEN_LPF_CUTOFF,
+        PARAM_ATTEN_LPF_RESO,
         PARAMS_LEN
     };
     enum InputId
     {
-        CV_FINE_A, CV_FINE_B, CV_DETUNE, CV_MIX,
-        CV_CUTOFF, CV_RESO,
-        CV_LFO_RATE, CV_LFO_DEPTH, CV_DRIFT,
-        CV_DELAY_TIME, CV_DELAY_FEED, CV_DELAY_DIFF,
-        CV_REV_DECAY, CV_REV_DAMP,
-        CV_WASH, CV_SHIMMER,
-        CV_MOD_RATE, CV_MOD_DEPTH,
-        CV_ECHO_TIME, CV_ECHO_FEED, CV_ECHO_MIX,
-        CV_LPF_CUTOFF, CV_LPF_RESO,
-        CV_A, CV_B,
+        CV_FINE_A,
+        CV_FINE_B,
+        CV_DETUNE,
+        CV_MIX,
+        CV_CUTOFF,
+        CV_RESO,
+        CV_LFO_RATE,
+        CV_LFO_DEPTH,
+        CV_DRIFT,
+        CV_DELAY_TIME,
+        CV_DELAY_FEED,
+        CV_DELAY_DIFF,
+        CV_REV_DECAY,
+        CV_REV_DAMP,
+        CV_WASH,
+        CV_SHIMMER,
+        CV_MOD_RATE,
+        CV_MOD_DEPTH,
+        CV_ECHO_TIME,
+        CV_ECHO_FEED,
+        CV_ECHO_MIX,
+        CV_LPF_CUTOFF,
+        CV_LPF_RESO,
+        CV_A,
+        CV_B,
         INPUTS_LEN
     };
-    enum OutputId { OUTPUT_LEFT, OUTPUT_RIGHT, OUTPUTS_LEN };
-    enum LightId  { LIGHTS_LEN };
+    enum OutputId
+    {
+        OUTPUT_LEFT,
+        OUTPUT_RIGHT,
+        OUTPUTS_LEN
+    };
+    enum LightId
+    {
+        LIGHTS_LEN
+    };
 
-    enum CVRange { BIPOLAR_M5_5, UNIPOLAR_0_10 };
+    enum CVRange
+    {
+        BIPOLAR_M5_5,
+        UNIPOLAR_0_10
+    };
     CVRange cvRangeMode = BIPOLAR_M5_5;
 
-    enum ViewMode { VIEW_WAVE, VIEW_BARS, VIEW_SPECTRUM };
+    enum ViewMode
+    {
+        VIEW_WAVE,
+        VIEW_BARS,
+        VIEW_SPECTRUM
+    };
     ViewMode viewMode = VIEW_WAVE;
 
     LSDroneEngine engine;
@@ -293,14 +367,14 @@ struct LSDrone : Module
     // Scope / meter state (written by audio thread, read by UI)
     float scopeMin[LS_SCOPE_N] = {};
     float scopeMax[LS_SCOPE_N] = {};
-    int   scopeHead = 0;
-    int   scopeCount = 0;
+    int scopeHead = 0;
+    int scopeCount = 0;
     float scopeBMin = 0.f, scopeBMax = 0.f;
     float peakL = 0.f, peakR = 0.f;
 
     // Analyzer ring buffer (mono, normalised to +/-1)
     float fftBuf[LS_FFT_N] = {};
-    int   fftHead = 0;
+    int fftHead = 0;
     float dispSampleRate = 44100.f;
 
     LSDrone()
@@ -399,10 +473,13 @@ struct LSDrone : Module
             cvRangeMode = (CVRange)json_integer_value(mode);
 
         json_t *view = json_object_get(root, "viewMode");
-        if (view) {
+        if (view)
+        {
             int v = (int)json_integer_value(view);
-            if (v < 0) v = 0;
-            if (v > 2) v = 2;
+            if (v < 0)
+                v = 0;
+            if (v > 2)
+                v = 2;
             viewMode = (ViewMode)v;
         }
     }
@@ -455,13 +532,16 @@ struct LSDrone : Module
         fftBuf[fftHead] = mono * 0.2f;
         fftHead = (fftHead + 1) & (LS_FFT_N - 1);
 
-        if (scopeCount == 0) scopeBMin = scopeBMax = mono;
-        else {
+        if (scopeCount == 0)
+            scopeBMin = scopeBMax = mono;
+        else
+        {
             scopeBMin = std::min(scopeBMin, mono);
             scopeBMax = std::max(scopeBMax, mono);
         }
         int bucket = std::max(1, (int)(args.sampleRate * 0.0025f));
-        if (++scopeCount >= bucket) {
+        if (++scopeCount >= bucket)
+        {
             scopeCount = 0;
             scopeMin[scopeHead] = scopeBMin;
             scopeMax[scopeHead] = scopeBMax;
@@ -473,188 +553,213 @@ struct LSDrone : Module
 // ============================================================
 // Theme + panel helpers (anonymous namespace – no link clashes)
 // ============================================================
-namespace {
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colAccent2()  { return nvgRGB(0xb0, 0x5a, 0xff); }
+    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
+    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    NVGcolor colAccent2() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font)
-        nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                       nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                         nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s,       ty,            s, s);
-    nvgRect(vg, tx,           ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-// ------------------------------------------------------------
-// Small FFT analyzer used by the BARS / SPECTRUM display modes
-// ------------------------------------------------------------
-struct LSAnalyzer {
-    float re[LS_FFT_N];
-    float im[LS_FFT_N];
-    float win[LS_FFT_N];
-    float cosT[LS_FFT_N / 2];
-    float sinT[LS_FFT_N / 2];
-    float db[LS_FFT_N / 2];
-
-    LSAnalyzer() {
-        for (int n = 0; n < LS_FFT_N; ++n) {
-            win[n] = 0.5f * (1.f - std::cos(2.f * float(M_PI) * n / (LS_FFT_N - 1)));
-            re[n] = 0.f;
-            im[n] = 0.f;
-        }
-        for (int k = 0; k < LS_FFT_N / 2; ++k) {
-            cosT[k] = std::cos(2.f * float(M_PI) * k / LS_FFT_N);
-            sinT[k] = -std::sin(2.f * float(M_PI) * k / LS_FFT_N);
-            db[k] = -90.f;
-        }
+    void setFont(NVGcontext *vg)
+    {
+        std::shared_ptr<window::Font> font =
+            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+        if (font)
+            nvgFontFaceId(vg, font->handle);
     }
 
-    void update(const float* ring, int head) {
-        const int N = LS_FFT_N;
-        for (int n = 0; n < N; ++n) {
-            int idx = (head + n) & (N - 1);   // oldest -> newest
-            re[n] = ring[idx] * win[n];
-            im[n] = 0.f;
-        }
+    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
+                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
+    {
+        setFont(vg);
+        nvgFontSize(vg, size);
+        nvgTextLetterSpacing(vg, spacing);
+        nvgTextAlign(vg, align);
+        nvgFillColor(vg, col);
+        nvgText(vg, x, y, s, NULL);
+    }
 
-        // bit reversal
-        for (int i = 1, j = 0; i < N; ++i) {
-            int bit = N >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) {
-                std::swap(re[i], re[j]);
-                std::swap(im[i], im[j]);
+    void drawLogo(NVGcontext *vg, float cx, float cy)
+    {
+        const float w = 64.f, h = 18.f;
+        float x = cx - w / 2.f, y = cy - h / 2.f;
+
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
+        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
+        nvgFill(vg);
+
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 7.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
+                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
+        nvgFill(vg);
+        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
+                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+
+        const float s = 2.2f;
+        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
+        nvgBeginPath(vg);
+        nvgRect(vg, tx + s, ty, s, s);
+        nvgRect(vg, tx, ty + s * 1.4f, s, s);
+        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
+        nvgFillColor(vg, colAccent());
+        nvgFill(vg);
+
+        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
+                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+    }
+
+    // ------------------------------------------------------------
+    // Small FFT analyzer used by the BARS / SPECTRUM display modes
+    // ------------------------------------------------------------
+    struct LSAnalyzer
+    {
+        float re[LS_FFT_N];
+        float im[LS_FFT_N];
+        float win[LS_FFT_N];
+        float cosT[LS_FFT_N / 2];
+        float sinT[LS_FFT_N / 2];
+        float db[LS_FFT_N / 2];
+
+        LSAnalyzer()
+        {
+            for (int n = 0; n < LS_FFT_N; ++n)
+            {
+                win[n] = 0.5f * (1.f - std::cos(2.f * float(M_PI) * n / (LS_FFT_N - 1)));
+                re[n] = 0.f;
+                im[n] = 0.f;
+            }
+            for (int k = 0; k < LS_FFT_N / 2; ++k)
+            {
+                cosT[k] = std::cos(2.f * float(M_PI) * k / LS_FFT_N);
+                sinT[k] = -std::sin(2.f * float(M_PI) * k / LS_FFT_N);
+                db[k] = -90.f;
             }
         }
-        // butterflies
-        for (int len = 2; len <= N; len <<= 1) {
-            int half = len >> 1;
-            int stride = N / len;
-            for (int i = 0; i < N; i += len) {
-                for (int j = 0; j < half; ++j) {
-                    float wr = cosT[j * stride];
-                    float wi = sinT[j * stride];
-                    int a = i + j, b = i + j + half;
-                    float vr = re[b] * wr - im[b] * wi;
-                    float vi = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - vr;
-                    im[b] = im[a] - vi;
-                    re[a] += vr;
-                    im[a] += vi;
+
+        void update(const float *ring, int head)
+        {
+            const int N = LS_FFT_N;
+            for (int n = 0; n < N; ++n)
+            {
+                int idx = (head + n) & (N - 1); // oldest -> newest
+                re[n] = ring[idx] * win[n];
+                im[n] = 0.f;
+            }
+
+            // bit reversal
+            for (int i = 1, j = 0; i < N; ++i)
+            {
+                int bit = N >> 1;
+                for (; j & bit; bit >>= 1)
+                    j ^= bit;
+                j ^= bit;
+                if (i < j)
+                {
+                    std::swap(re[i], re[j]);
+                    std::swap(im[i], im[j]);
                 }
             }
+            // butterflies
+            for (int len = 2; len <= N; len <<= 1)
+            {
+                int half = len >> 1;
+                int stride = N / len;
+                for (int i = 0; i < N; i += len)
+                {
+                    for (int j = 0; j < half; ++j)
+                    {
+                        float wr = cosT[j * stride];
+                        float wi = sinT[j * stride];
+                        int a = i + j, b = i + j + half;
+                        float vr = re[b] * wr - im[b] * wi;
+                        float vi = re[b] * wi + im[b] * wr;
+                        re[b] = re[a] - vr;
+                        im[b] = im[a] - vi;
+                        re[a] += vr;
+                        im[a] += vi;
+                    }
+                }
+            }
+
+            // magnitude -> dB (0 dB = full-scale sine), with fast attack / slow release
+            const float norm = 4.f / (float)N;
+            for (int k = 0; k < N / 2; ++k)
+            {
+                float m = std::sqrt(re[k] * re[k] + im[k] * im[k]) * norm;
+                float d = 20.f * std::log10(m + 1e-7f);
+                if (d < -90.f)
+                    d = -90.f;
+                if (d > db[k])
+                    db[k] = d;
+                else
+                    db[k] += (d - db[k]) * 0.18f;
+            }
         }
 
-        // magnitude -> dB (0 dB = full-scale sine), with fast attack / slow release
-        const float norm = 4.f / (float) N;
-        for (int k = 0; k < N / 2; ++k) {
-            float m = std::sqrt(re[k] * re[k] + im[k] * im[k]) * norm;
-            float d = 20.f * std::log10(m + 1e-7f);
-            if (d < -90.f) d = -90.f;
-            if (d > db[k]) db[k] = d;
-            else db[k] += (d - db[k]) * 0.18f;
+        float dbAt(float pos) const
+        {
+            if (pos < 0.f)
+                pos = 0.f;
+            float maxPos = (float)(LS_FFT_N / 2 - 2);
+            if (pos > maxPos)
+                pos = maxPos;
+            int k = (int)pos;
+            float t = pos - (float)k;
+            return db[k] * (1.f - t) + db[k + 1] * t;
         }
-    }
 
-    float dbAt(float pos) const {
-        if (pos < 0.f) pos = 0.f;
-        float maxPos = (float)(LS_FFT_N / 2 - 2);
-        if (pos > maxPos) pos = maxPos;
-        int k = (int) pos;
-        float t = pos - (float) k;
-        return db[k] * (1.f - t) + db[k + 1] * t;
-    }
+        // level of a frequency band; interpolates for narrow bands, takes the max for wide ones
+        float bandDb(float f0, float f1, float binHz) const
+        {
+            float b0 = f0 / binHz, b1 = f1 / binHz;
+            if (b1 - b0 <= 1.f)
+                return dbAt(0.5f * (b0 + b1));
+            int k0 = std::max(1, (int)std::ceil(b0));
+            int k1 = std::min(LS_FFT_N / 2 - 1, (int)std::floor(b1));
+            float m = -90.f;
+            for (int k = k0; k <= k1; ++k)
+                m = std::max(m, db[k]);
+            return m;
+        }
+    };
 
-    // level of a frequency band; interpolates for narrow bands, takes the max for wide ones
-    float bandDb(float f0, float f1, float binHz) const {
-        float b0 = f0 / binHz, b1 = f1 / binHz;
-        if (b1 - b0 <= 1.f)
-            return dbAt(0.5f * (b0 + b1));
-        int k0 = std::max(1, (int) std::ceil(b0));
-        int k1 = std::min(LS_FFT_N / 2 - 1, (int) std::floor(b1));
-        float m = -90.f;
-        for (int k = k0; k <= k1; ++k)
-            m = std::max(m, db[k]);
-        return m;
+    float dbToNorm(float d)
+    {
+        float n = (d - LS_DB_MIN) / (0.f - LS_DB_MIN);
+        return std::min(std::max(n, 0.f), 1.f);
     }
-};
-
-float dbToNorm(float d) {
-    float n = (d - LS_DB_MIN) / (0.f - LS_DB_MIN);
-    return std::min(std::max(n, 0.f), 1.f);
-}
 
 } // namespace
 
 // ============================================================
 // Layout constants  (36 HP panel)
 // ============================================================
-static const float LS_PANEL_W = RACK_GRID_WIDTH * 36;   // 540 (36 HP)
-static const float LS_PANEL_H = RACK_GRID_HEIGHT;       // 380
+static const float LS_PANEL_W = RACK_GRID_WIDTH * 36; // 540 (36 HP)
+static const float LS_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
 static const float LS_DISP_W = 480.f;
 static const float LS_DISP_H = 38.f;
 static const float LS_DISP_X = (LS_PANEL_W - LS_DISP_W) / 2.f;
 static const float LS_DISP_Y = 46.f;
 
-static const float LS_CELL_W   = 86.f;
-static const float LS_CELL_H   = 54.f;
-static const float LS_CELL_TOP = 23.f;                  // plate top = row - 23
-static const float LS_ROW[4]   = {120.f, 178.f, 236.f, 294.f};
-static const float LS_PORT_Y   = 358.f;
+static const float LS_CELL_W = 86.f;
+static const float LS_CELL_H = 54.f;
+static const float LS_CELL_TOP = 23.f; // plate top = row - 23
+static const float LS_ROW[4] = {120.f, 178.f, 236.f, 294.f};
+static const float LS_PORT_Y = 358.f;
 
-static const float LS_GAUGE_R   = 18.f;                 // gauge ring radius
-static const float LS_JACK_DX   = 30.f;                 // CV jack / attenuverter offset
-static const float LS_JACK_DY   = 9.f;
+static const float LS_GAUGE_R = 18.f; // gauge ring radius
+static const float LS_JACK_DX = 30.f; // CV jack / attenuverter offset
+static const float LS_JACK_DY = 9.f;
 
-static const float LS_VIEW_W = 150.f;                   // display-mode switch width
+static const float LS_VIEW_W = 150.f; // display-mode switch width
 
 static float lsColX(int col) { return LS_PANEL_W / 12.f * (2 * col + 1); }
 // 540/12=45 → 45, 135, 225, 315, 405, 495
@@ -662,55 +767,66 @@ static float lsColX(int col) { return LS_PANEL_W / 12.f * (2 * col + 1); }
 // ============================================================
 // Control table (label + ids)
 // ============================================================
-namespace {
-struct LSCellDef { const char* name; int param, attn, cv; };
+namespace
+{
+    struct LSCellDef
+    {
+        const char *name;
+        int param, attn, cv;
+    };
 }
 
 static const LSCellDef LS_CELLS[23] = {
-    {"FINE A",    LSDrone::PARAM_FINE_A,     LSDrone::PARAM_ATTEN_FINE_A,     LSDrone::CV_FINE_A},
-    {"FINE B",    LSDrone::PARAM_FINE_B,     LSDrone::PARAM_ATTEN_FINE_B,     LSDrone::CV_FINE_B},
-    {"DETUNE",    LSDrone::PARAM_DETUNE,     LSDrone::PARAM_ATTEN_DETUNE,     LSDrone::CV_DETUNE},
-    {"MIX",       LSDrone::PARAM_MIX,        LSDrone::PARAM_ATTEN_MIX,        LSDrone::CV_MIX},
-    {"CUTOFF",    LSDrone::PARAM_CUTOFF,     LSDrone::PARAM_ATTEN_CUTOFF,     LSDrone::CV_CUTOFF},
-    {"RESO",      LSDrone::PARAM_RESO,       LSDrone::PARAM_ATTEN_RESO,       LSDrone::CV_RESO},
-    {"LFO RATE",  LSDrone::PARAM_LFO_RATE,   LSDrone::PARAM_ATTEN_LFO_RATE,   LSDrone::CV_LFO_RATE},
-    {"LFO DEPTH", LSDrone::PARAM_LFO_DEPTH,  LSDrone::PARAM_ATTEN_LFO_DEPTH,  LSDrone::CV_LFO_DEPTH},
-    {"DRIFT",     LSDrone::PARAM_DRIFT,      LSDrone::PARAM_ATTEN_DRIFT,      LSDrone::CV_DRIFT},
-    {"DELAY T",   LSDrone::PARAM_DELAY_TIME, LSDrone::PARAM_ATTEN_DELAY_TIME, LSDrone::CV_DELAY_TIME},
-    {"DELAY FB",  LSDrone::PARAM_DELAY_FEED, LSDrone::PARAM_ATTEN_DELAY_FEED, LSDrone::CV_DELAY_FEED},
+    {"FINE A", LSDrone::PARAM_FINE_A, LSDrone::PARAM_ATTEN_FINE_A, LSDrone::CV_FINE_A},
+    {"FINE B", LSDrone::PARAM_FINE_B, LSDrone::PARAM_ATTEN_FINE_B, LSDrone::CV_FINE_B},
+    {"DETUNE", LSDrone::PARAM_DETUNE, LSDrone::PARAM_ATTEN_DETUNE, LSDrone::CV_DETUNE},
+    {"MIX", LSDrone::PARAM_MIX, LSDrone::PARAM_ATTEN_MIX, LSDrone::CV_MIX},
+    {"CUTOFF", LSDrone::PARAM_CUTOFF, LSDrone::PARAM_ATTEN_CUTOFF, LSDrone::CV_CUTOFF},
+    {"RESO", LSDrone::PARAM_RESO, LSDrone::PARAM_ATTEN_RESO, LSDrone::CV_RESO},
+    {"LFO RATE", LSDrone::PARAM_LFO_RATE, LSDrone::PARAM_ATTEN_LFO_RATE, LSDrone::CV_LFO_RATE},
+    {"LFO DEPTH", LSDrone::PARAM_LFO_DEPTH, LSDrone::PARAM_ATTEN_LFO_DEPTH, LSDrone::CV_LFO_DEPTH},
+    {"DRIFT", LSDrone::PARAM_DRIFT, LSDrone::PARAM_ATTEN_DRIFT, LSDrone::CV_DRIFT},
+    {"DELAY T", LSDrone::PARAM_DELAY_TIME, LSDrone::PARAM_ATTEN_DELAY_TIME, LSDrone::CV_DELAY_TIME},
+    {"DELAY FB", LSDrone::PARAM_DELAY_FEED, LSDrone::PARAM_ATTEN_DELAY_FEED, LSDrone::CV_DELAY_FEED},
     {"DELAY DIF", LSDrone::PARAM_DELAY_DIFF, LSDrone::PARAM_ATTEN_DELAY_DIFF, LSDrone::CV_DELAY_DIFF},
-    {"REV DECAY", LSDrone::PARAM_REV_DECAY,  LSDrone::PARAM_ATTEN_REV_DECAY,  LSDrone::CV_REV_DECAY},
-    {"REV DAMP",  LSDrone::PARAM_REV_DAMP,   LSDrone::PARAM_ATTEN_REV_DAMP,   LSDrone::CV_REV_DAMP},
-    {"WASH",      LSDrone::PARAM_WASH,       LSDrone::PARAM_ATTEN_WASH,       LSDrone::CV_WASH},
-    {"SHIMMER",   LSDrone::PARAM_SHIMMER,    LSDrone::PARAM_ATTEN_SHIMMER,    LSDrone::CV_SHIMMER},
-    {"MOD RATE",  LSDrone::PARAM_MOD_RATE,   LSDrone::PARAM_ATTEN_MOD_RATE,   LSDrone::CV_MOD_RATE},
-    {"MOD DEPTH", LSDrone::PARAM_MOD_DEPTH,  LSDrone::PARAM_ATTEN_MOD_DEPTH,  LSDrone::CV_MOD_DEPTH},
-    {"ECHO T",    LSDrone::PARAM_ECHO_TIME,  LSDrone::PARAM_ATTEN_ECHO_TIME,  LSDrone::CV_ECHO_TIME},
-    {"ECHO FB",   LSDrone::PARAM_ECHO_FEED,  LSDrone::PARAM_ATTEN_ECHO_FEED,  LSDrone::CV_ECHO_FEED},
-    {"ECHO MIX",  LSDrone::PARAM_ECHO_MIX,   LSDrone::PARAM_ATTEN_ECHO_MIX,   LSDrone::CV_ECHO_MIX},
-    {"LPF CUT",   LSDrone::PARAM_LPF_CUTOFF, LSDrone::PARAM_ATTEN_LPF_CUTOFF, LSDrone::CV_LPF_CUTOFF},
-    {"LPF RESO",  LSDrone::PARAM_LPF_RESO,   LSDrone::PARAM_ATTEN_LPF_RESO,   LSDrone::CV_LPF_RESO},
+    {"REV DECAY", LSDrone::PARAM_REV_DECAY, LSDrone::PARAM_ATTEN_REV_DECAY, LSDrone::CV_REV_DECAY},
+    {"REV DAMP", LSDrone::PARAM_REV_DAMP, LSDrone::PARAM_ATTEN_REV_DAMP, LSDrone::CV_REV_DAMP},
+    {"WASH", LSDrone::PARAM_WASH, LSDrone::PARAM_ATTEN_WASH, LSDrone::CV_WASH},
+    {"SHIMMER", LSDrone::PARAM_SHIMMER, LSDrone::PARAM_ATTEN_SHIMMER, LSDrone::CV_SHIMMER},
+    {"MOD RATE", LSDrone::PARAM_MOD_RATE, LSDrone::PARAM_ATTEN_MOD_RATE, LSDrone::CV_MOD_RATE},
+    {"MOD DEPTH", LSDrone::PARAM_MOD_DEPTH, LSDrone::PARAM_ATTEN_MOD_DEPTH, LSDrone::CV_MOD_DEPTH},
+    {"ECHO T", LSDrone::PARAM_ECHO_TIME, LSDrone::PARAM_ATTEN_ECHO_TIME, LSDrone::CV_ECHO_TIME},
+    {"ECHO FB", LSDrone::PARAM_ECHO_FEED, LSDrone::PARAM_ATTEN_ECHO_FEED, LSDrone::CV_ECHO_FEED},
+    {"ECHO MIX", LSDrone::PARAM_ECHO_MIX, LSDrone::PARAM_ATTEN_ECHO_MIX, LSDrone::CV_ECHO_MIX},
+    {"LPF CUT", LSDrone::PARAM_LPF_CUTOFF, LSDrone::PARAM_ATTEN_LPF_CUTOFF, LSDrone::CV_LPF_CUTOFF},
+    {"LPF RESO", LSDrone::PARAM_LPF_RESO, LSDrone::PARAM_ATTEN_LPF_RESO, LSDrone::CV_LPF_RESO},
 };
 
 // ============================================================
 // Knob with a gauge ring around it
 // ============================================================
-struct LSGaugeKnob : RoundSmallBlackKnob {
-    struct Geo {
+struct LSGaugeKnob : RoundSmallBlackKnob
+{
+    struct Geo
+    {
         float a0, a1;     // full track (nvg angles)
         float from, head; // value arc start / end
         bool bipolar;
     };
 
-    Geo geo() {
+    Geo geo()
+    {
         float t = 0.5f, tz = 0.f;
         bool bip = false;
-        engine::ParamQuantity* pq = getParamQuantity();
-        if (pq) {
+        engine::ParamQuantity *pq = getParamQuantity();
+        if (pq)
+        {
             float mn = pq->getMinValue(), mx = pq->getMaxValue();
-            if (mx > mn) {
+            if (mx > mn)
+            {
                 t = clamp((pq->getValue() - mn) / (mx - mn), 0.f, 1.f);
-                if (mn < 0.f && mx > 0.f) {
+                if (mn < 0.f && mx > 0.f)
+                {
                     bip = true;
                     tz = (0.f - mn) / (mx - mn);
                 }
@@ -726,8 +842,9 @@ struct LSGaugeKnob : RoundSmallBlackKnob {
     }
 
     // layer 0: dark track (+ zero mark for bipolar knobs)
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
+    void draw(const DrawArgs &args) override
+    {
+        NVGcontext *vg = args.vg;
         float cx = box.size.x / 2.f, cy = box.size.y / 2.f;
         Geo g = geo();
 
@@ -739,7 +856,8 @@ struct LSGaugeKnob : RoundSmallBlackKnob {
         nvgStrokeWidth(vg, 2.5f);
         nvgStroke(vg);
 
-        if (g.bipolar) {
+        if (g.bipolar)
+        {
             nvgBeginPath(vg);
             nvgCircle(vg, cx + LS_GAUGE_R * std::cos(g.from), cy + LS_GAUGE_R * std::sin(g.from), 1.3f);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 90));
@@ -751,9 +869,11 @@ struct LSGaugeKnob : RoundSmallBlackKnob {
     }
 
     // layer 1: glowing value arc + head dot
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer == 1) {
-            NVGcontext* vg = args.vg;
+    void drawLayer(const DrawArgs &args, int layer) override
+    {
+        if (layer == 1)
+        {
+            NVGcontext *vg = args.vg;
             float cx = box.size.x / 2.f, cy = box.size.y / 2.f;
             Geo g = geo();
             float lo = std::min(g.from, g.head);
@@ -761,7 +881,8 @@ struct LSGaugeKnob : RoundSmallBlackKnob {
 
             nvgSave(vg);
             nvgLineCap(vg, NVG_ROUND);
-            if (hi - lo > 0.002f) {
+            if (hi - lo > 0.002f)
+            {
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, LS_GAUGE_R, lo, hi, NVG_CW);
                 nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 45));
@@ -783,15 +904,17 @@ struct LSGaugeKnob : RoundSmallBlackKnob {
         RoundSmallBlackKnob::drawLayer(args, layer);
     }
 };
- // namespace
+// namespace
 
 // ============================================================
 // Panel background
 // ============================================================
-struct LSPanelBackground : TransparentWidget {
+struct LSPanelBackground : TransparentWidget
+{
     LSPanelBackground() { box.size = Vec(LS_PANEL_W, LS_PANEL_H); }
 
-    void plate(NVGcontext* vg, float cx, float ry) {
+    void plate(NVGcontext *vg, float cx, float ry)
+    {
         nvgBeginPath(vg);
         nvgRoundedRect(vg, cx - LS_CELL_W / 2.f, ry - LS_CELL_TOP, LS_CELL_W, LS_CELL_H, 7.f);
         nvgFillColor(vg, nvgRGBA(0, 0, 0, 55));
@@ -801,9 +924,10 @@ struct LSPanelBackground : TransparentWidget {
         nvgStroke(vg);
     }
 
-    void section(NVGcontext* vg, float y, const char* txt) {
+    void section(NVGcontext *vg, float y, const char *txt)
+    {
         float x1 = 14.f, x2 = LS_PANEL_W - 14.f, cx = LS_PANEL_W / 2.f;
-        float w = 10.f + (float) strlen(txt) * 7.f;
+        float w = 10.f + (float)strlen(txt) * 7.f;
         drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
         nvgBeginPath(vg);
         nvgMoveTo(vg, x1, y);
@@ -815,8 +939,9 @@ struct LSPanelBackground : TransparentWidget {
         nvgStroke(vg);
     }
 
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
+    void draw(const DrawArgs &args) override
+    {
+        NVGcontext *vg = args.vg;
 
         // Base gradient
         nvgBeginPath(vg);
@@ -826,7 +951,8 @@ struct LSPanelBackground : TransparentWidget {
 
         // Brushed texture
         nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int) LS_PANEL_H; y += 3) {
+        for (int y = 0; y < (int)LS_PANEL_H; y += 3)
+        {
             nvgBeginPath(vg);
             nvgMoveTo(vg, 0, y + 0.5f);
             nvgLineTo(vg, LS_PANEL_W, y + 0.5f);
@@ -860,7 +986,8 @@ struct LSPanelBackground : TransparentWidget {
         nvgFill(vg);
 
         // Control cells (23 cells + CV range cell)
-        for (int i = 0; i < 24; ++i) {
+        for (int i = 0; i < 24; ++i)
+        {
             int row = i / 6, col = i % 6;
             float cx = lsColX(col), ry = LS_ROW[row];
             plate(vg, cx, ry);
@@ -871,9 +998,10 @@ struct LSPanelBackground : TransparentWidget {
 
         // I/O section
         section(vg, 332.f, "I / O");
-        const char* io[4] = {"V/OCT A", "V/OCT B", "L OUT", "R OUT"};
-        int   ioCols[4]  = {0, 1, 4, 5};
-        for (int i = 0; i < 4; ++i) {
+        const char *io[4] = {"V/OCT A", "V/OCT B", "L OUT", "R OUT"};
+        int ioCols[4] = {0, 1, 4, 5};
+        for (int i = 0; i < 4; ++i)
+        {
             float cx = lsColX(ioCols[i]);
             nvgBeginPath(vg);
             nvgRoundedRect(vg, cx - 22.f, 340.f, 44.f, 40.f, 6.f);
@@ -907,13 +1035,15 @@ struct LSPanelBackground : TransparentWidget {
 // ============================================================
 // Scope display widget (WAVE / BARS / SPECTRUM)
 // ============================================================
-struct LSDisplayWidget : TransparentWidget {
-    LSDrone* module = nullptr;
+struct LSDisplayWidget : TransparentWidget
+{
+    LSDrone *module = nullptr;
     std::unique_ptr<LSAnalyzer> an;
     float barLvl[LS_BARS] = {};
     float barPeak[LS_BARS] = {};
 
-    LSDisplayWidget(LSDrone* m) : module(m) {
+    LSDisplayWidget(LSDrone *m) : module(m)
+    {
         box.pos = Vec(LS_DISP_X, LS_DISP_Y);
         box.size = Vec(LS_DISP_W, LS_DISP_H);
         an.reset(new LSAnalyzer());
@@ -921,25 +1051,30 @@ struct LSDisplayWidget : TransparentWidget {
 
     static float scopeW() { return LS_DISP_W - 16.f; }
 
-    int mode() const { return module ? (int) module->viewMode : (int) LSDrone::VIEW_WAVE; }
+    int mode() const { return module ? (int)module->viewMode : (int)LSDrone::VIEW_WAVE; }
     float sampleRate() const { return (module && module->dispSampleRate > 1000.f) ? module->dispSampleRate : 48000.f; }
     float fMax() const { return std::min(18000.f, sampleRate() * 0.45f); }
-    float binHz() const { return sampleRate() / (float) LS_FFT_N; }
+    float binHz() const { return sampleRate() / (float)LS_FFT_N; }
 
-    float freqToX(float f, float fmin) const {
+    float freqToX(float f, float fmin) const
+    {
         float fmax = fMax();
         return scopeW() * std::log(f / fmin) / std::log(fmax / fmin);
     }
 
-    void step() override {
-        if (module && module->viewMode != LSDrone::VIEW_WAVE) {
+    void step() override
+    {
+        if (module && module->viewMode != LSDrone::VIEW_WAVE)
+        {
             an->update(module->fftBuf, module->fftHead);
 
-            if (module->viewMode == LSDrone::VIEW_BARS) {
+            if (module->viewMode == LSDrone::VIEW_BARS)
+            {
                 float ratio = fMax() / LS_BAR_FMIN;
-                for (int i = 0; i < LS_BARS; ++i) {
-                    float f0 = LS_BAR_FMIN * std::pow(ratio, (float) i / LS_BARS);
-                    float f1 = LS_BAR_FMIN * std::pow(ratio, (float) (i + 1) / LS_BARS);
+                for (int i = 0; i < LS_BARS; ++i)
+                {
+                    float f0 = LS_BAR_FMIN * std::pow(ratio, (float)i / LS_BARS);
+                    float f1 = LS_BAR_FMIN * std::pow(ratio, (float)(i + 1) / LS_BARS);
                     float n = dbToNorm(an->bandDb(f0, f1, binHz()));
                     barLvl[i] = n;
                     barPeak[i] = std::max(n, barPeak[i] - 0.012f);
@@ -949,8 +1084,9 @@ struct LSDisplayWidget : TransparentWidget {
         Widget::step();
     }
 
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
+    void draw(const DrawArgs &args) override
+    {
+        NVGcontext *vg = args.vg;
         const float sw = scopeW();
 
         nvgBeginPath(vg);
@@ -960,24 +1096,31 @@ struct LSDisplayWidget : TransparentWidget {
         nvgFill(vg);
 
         nvgBeginPath(vg);
-        if (mode() == LSDrone::VIEW_WAVE) {
-            for (float x = 0.f; x <= sw; x += 28.f) {
+        if (mode() == LSDrone::VIEW_WAVE)
+        {
+            for (float x = 0.f; x <= sw; x += 28.f)
+            {
                 nvgMoveTo(vg, x + 0.5f, 0);
                 nvgLineTo(vg, x + 0.5f, LS_DISP_H);
             }
             nvgMoveTo(vg, 0, LS_DISP_H / 2.f + 0.5f);
             nvgLineTo(vg, sw, LS_DISP_H / 2.f + 0.5f);
-        } else {
+        }
+        else
+        {
             // horizontal dB lines
-            for (int i = 1; i < 4; ++i) {
+            for (int i = 1; i < 4; ++i)
+            {
                 float y = LS_DISP_H * i / 4.f + 0.5f;
                 nvgMoveTo(vg, 0, y);
                 nvgLineTo(vg, sw, y);
             }
             // log-frequency lines (spectrum only)
-            if (mode() == LSDrone::VIEW_SPECTRUM) {
+            if (mode() == LSDrone::VIEW_SPECTRUM)
+            {
                 const float fl[3] = {100.f, 1000.f, 10000.f};
-                for (int i = 0; i < 3; ++i) {
+                for (int i = 0; i < 3; ++i)
+                {
                     float x = freqToX(fl[i], LS_SPEC_FMIN) + 0.5f;
                     nvgMoveTo(vg, x, 0);
                     nvgLineTo(vg, x, LS_DISP_H);
@@ -992,22 +1135,28 @@ struct LSDisplayWidget : TransparentWidget {
     }
 
     // ---------- waveform ----------
-    void drawWave(NVGcontext* vg) {
+    void drawWave(NVGcontext *vg)
+    {
         const float mid = LS_DISP_H / 2.f;
         const float amp = mid - 2.f;
         const float sw = scopeW();
-        const float colW = sw / (float) LS_SCOPE_N;
+        const float colW = sw / (float)LS_SCOPE_N;
 
-        for (int pass = 0; pass < 2; ++pass) {
+        for (int pass = 0; pass < 2; ++pass)
+        {
             nvgBeginPath(vg);
-            for (int i = 0; i < LS_SCOPE_N; ++i) {
+            for (int i = 0; i < LS_SCOPE_N; ++i)
+            {
                 float vmin, vmax;
-                if (module) {
+                if (module)
+                {
                     int idx = (module->scopeHead + i) % LS_SCOPE_N;
                     vmin = module->scopeMin[idx];
                     vmax = module->scopeMax[idx];
-                } else {
-                    float t = (float) i / LS_SCOPE_N;
+                }
+                else
+                {
+                    float t = (float)i / LS_SCOPE_N;
                     float e = 3.5f * std::exp(-3.f * t) * (0.6f + 0.4f * std::sin(t * 90.f));
                     vmax = e;
                     vmin = -e;
@@ -1027,17 +1176,20 @@ struct LSDisplayWidget : TransparentWidget {
     }
 
     // ---------- bars ----------
-    void drawBars(NVGcontext* vg) {
+    void drawBars(NVGcontext *vg)
+    {
         const float sw = scopeW();
-        const float colW = sw / (float) LS_BARS;
+        const float colW = sw / (float)LS_BARS;
         const float base = LS_DISP_H - 1.f;
         const float span = LS_DISP_H - 3.f;
 
         // glow
         nvgBeginPath(vg);
-        for (int i = 0; i < LS_BARS; ++i) {
+        for (int i = 0; i < LS_BARS; ++i)
+        {
             float h = barLvl[i] * span;
-            if (h < 0.5f) continue;
+            if (h < 0.5f)
+                continue;
             nvgRect(vg, i * colW, base - h - 1.f, colW, h + 2.f);
         }
         nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 28));
@@ -1045,9 +1197,11 @@ struct LSDisplayWidget : TransparentWidget {
 
         // bars
         nvgBeginPath(vg);
-        for (int i = 0; i < LS_BARS; ++i) {
+        for (int i = 0; i < LS_BARS; ++i)
+        {
             float h = barLvl[i] * span;
-            if (h < 0.5f) continue;
+            if (h < 0.5f)
+                continue;
             nvgRect(vg, i * colW + 1.f, base - h, std::max(colW - 2.f, 1.f), h);
         }
         nvgFillPaint(vg, nvgLinearGradient(vg, 0, LS_DISP_H, 0, 0,
@@ -1056,8 +1210,10 @@ struct LSDisplayWidget : TransparentWidget {
 
         // peak holds
         nvgBeginPath(vg);
-        for (int i = 0; i < LS_BARS; ++i) {
-            if (barPeak[i] < 0.02f) continue;
+        for (int i = 0; i < LS_BARS; ++i)
+        {
+            if (barPeak[i] < 0.02f)
+                continue;
             nvgRect(vg, i * colW + 1.f, base - barPeak[i] * span - 1.5f, std::max(colW - 2.f, 1.f), 1.5f);
         }
         nvgFillColor(vg, nvgRGB(0x8a, 0xee, 0xff));
@@ -1065,16 +1221,18 @@ struct LSDisplayWidget : TransparentWidget {
     }
 
     // ---------- spectrum ----------
-    void drawSpectrum(NVGcontext* vg) {
+    void drawSpectrum(NVGcontext *vg)
+    {
         const float sw = scopeW();
         const float base = LS_DISP_H - 1.f;
         const float span = LS_DISP_H - 3.f;
         const float ratio = fMax() / LS_SPEC_FMIN;
 
         float ys[LS_SPEC_PTS + 1];
-        for (int i = 0; i <= LS_SPEC_PTS; ++i) {
-            float f0 = LS_SPEC_FMIN * std::pow(ratio, (float) i / LS_SPEC_PTS);
-            float f1 = LS_SPEC_FMIN * std::pow(ratio, (float) (i + 1) / LS_SPEC_PTS);
+        for (int i = 0; i <= LS_SPEC_PTS; ++i)
+        {
+            float f0 = LS_SPEC_FMIN * std::pow(ratio, (float)i / LS_SPEC_PTS);
+            float f1 = LS_SPEC_FMIN * std::pow(ratio, (float)(i + 1) / LS_SPEC_PTS);
             ys[i] = base - dbToNorm(an->bandDb(f0, f1, binHz())) * span;
         }
 
@@ -1090,12 +1248,16 @@ struct LSDisplayWidget : TransparentWidget {
         nvgFill(vg);
 
         // line (glow + core)
-        for (int pass = 0; pass < 2; ++pass) {
+        for (int pass = 0; pass < 2; ++pass)
+        {
             nvgBeginPath(vg);
-            for (int i = 0; i <= LS_SPEC_PTS; ++i) {
+            for (int i = 0; i <= LS_SPEC_PTS; ++i)
+            {
                 float x = sw * i / LS_SPEC_PTS;
-                if (i == 0) nvgMoveTo(vg, x, ys[i]);
-                else        nvgLineTo(vg, x, ys[i]);
+                if (i == 0)
+                    nvgMoveTo(vg, x, ys[i]);
+                else
+                    nvgLineTo(vg, x, ys[i]);
             }
             nvgLineJoin(vg, NVG_ROUND);
             nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 40) : nvgRGB(0x8a, 0xee, 0xff));
@@ -1104,31 +1266,42 @@ struct LSDisplayWidget : TransparentWidget {
         }
     }
 
-    void drawFreqLabels(NVGcontext* vg) {
+    void drawFreqLabels(NVGcontext *vg)
+    {
         const float fmin = (mode() == LSDrone::VIEW_BARS) ? LS_BAR_FMIN : LS_SPEC_FMIN;
-        const char* names[3] = {"100", "1K", "10K"};
+        const char *names[3] = {"100", "1K", "10K"};
         const float fl[3] = {100.f, 1000.f, 10000.f};
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 3; ++i)
+        {
             float x = freqToX(fl[i], fmin);
             drawText(vg, x + 2.f, LS_DISP_H - 5.f, names[i], 6.f, nvgRGBA(0x7a, 0x85, 0x94, 170),
                      NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.5f);
         }
     }
 
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) {
+    void drawLayer(const DrawArgs &args, int layer) override
+    {
+        if (layer != 1)
+        {
             Widget::drawLayer(args, layer);
             return;
         }
-        NVGcontext* vg = args.vg;
+        NVGcontext *vg = args.vg;
         const float sw = scopeW();
 
         nvgSave(vg);
         nvgScissor(vg, 0, 0, sw, LS_DISP_H);
-        switch (mode()) {
-            case LSDrone::VIEW_BARS:     drawBars(vg);     break;
-            case LSDrone::VIEW_SPECTRUM: drawSpectrum(vg); break;
-            default:                     drawWave(vg);     break;
+        switch (mode())
+        {
+        case LSDrone::VIEW_BARS:
+            drawBars(vg);
+            break;
+        case LSDrone::VIEW_SPECTRUM:
+            drawSpectrum(vg);
+            break;
+        default:
+            drawWave(vg);
+            break;
         }
         nvgResetScissor(vg);
         nvgRestore(vg);
@@ -1137,7 +1310,8 @@ struct LSDisplayWidget : TransparentWidget {
             drawFreqLabels(vg);
 
         // Level meters (L/R)
-        for (int ch = 0; ch < 2; ++ch) {
+        for (int ch = 0; ch < 2; ++ch)
+        {
             float peak = module ? (ch == 0 ? module->peakL : module->peakR) : (ch == 0 ? 3.f : 2.4f);
             float lvl = std::min(peak / 10.f, 1.f);
             float x = sw + 3.f + ch * 6.f;
@@ -1145,7 +1319,8 @@ struct LSDisplayWidget : TransparentWidget {
             nvgRect(vg, x, 1.f, 4.f, LS_DISP_H - 2.f);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
             nvgFill(vg);
-            if (lvl > 0.01f) {
+            if (lvl > 0.01f)
+            {
                 float h = lvl * (LS_DISP_H - 2.f);
                 nvgBeginPath(vg);
                 nvgRect(vg, x, LS_DISP_H - 1.f - h, 4.f, h);
@@ -1157,7 +1332,7 @@ struct LSDisplayWidget : TransparentWidget {
 
         // Scanlines
         nvgBeginPath(vg);
-        for (int y = 0; y < (int) LS_DISP_H; y += 2)
+        for (int y = 0; y < (int)LS_DISP_H; y += 2)
             nvgRect(vg, 0, y + 1, LS_DISP_W, 1);
         nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
         nvgFill(vg);
@@ -1187,16 +1362,20 @@ struct LSDisplayWidget : TransparentWidget {
 // ============================================================
 // CV range cell (click to toggle)
 // ============================================================
-struct LSCvRangeWidget : TransparentWidget {
-    LSDrone* module = nullptr;
+struct LSCvRangeWidget : TransparentWidget
+{
+    LSDrone *module = nullptr;
 
-    LSCvRangeWidget(LSDrone* m, float cx, float ry) : module(m) {
+    LSCvRangeWidget(LSDrone *m, float cx, float ry) : module(m)
+    {
         box.pos = Vec(cx - LS_CELL_W / 2.f, ry - LS_CELL_TOP);
         box.size = Vec(LS_CELL_W, LS_CELL_H);
     }
 
-    void onButton(const ButtonEvent& e) override {
-        if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
+    void onButton(const ButtonEvent &e) override
+    {
+        if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
+        {
             module->cvRangeMode = (module->cvRangeMode == LSDrone::BIPOLAR_M5_5)
                                       ? LSDrone::UNIPOLAR_0_10
                                       : LSDrone::BIPOLAR_M5_5;
@@ -1204,12 +1383,14 @@ struct LSCvRangeWidget : TransparentWidget {
         }
     }
 
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) {
+    void drawLayer(const DrawArgs &args, int layer) override
+    {
+        if (layer != 1)
+        {
             Widget::drawLayer(args, layer);
             return;
         }
-        NVGcontext* vg = args.vg;
+        NVGcontext *vg = args.vg;
         bool bipolar = module ? (module->cvRangeMode == LSDrone::BIPOLAR_M5_5) : true;
 
         drawText(vg, box.size.x / 2.f, LS_CELL_H - 6.f, "CV RANGE", 7.5f, colDim(),
@@ -1249,10 +1430,12 @@ struct LSCvRangeWidget : TransparentWidget {
 // ============================================================
 // Display-mode switch (WAVE | BARS | SPEC) – click a segment
 // ============================================================
-struct LSViewWidget : TransparentWidget {
-    LSDrone* module = nullptr;
+struct LSViewWidget : TransparentWidget
+{
+    LSDrone *module = nullptr;
 
-    LSViewWidget(LSDrone* m, float cx) : module(m) {
+    LSViewWidget(LSDrone *m, float cx) : module(m)
+    {
         box.pos = Vec(cx - LS_VIEW_W / 2.f, 340.f);
         box.size = Vec(LS_VIEW_W, 40.f);
     }
@@ -1260,23 +1443,27 @@ struct LSViewWidget : TransparentWidget {
     static float segX() { return 8.f; }
     static float segW() { return (LS_VIEW_W - 16.f) / 3.f; }
 
-    void onButton(const ButtonEvent& e) override {
-        if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT) {
-            int s = (int) std::floor((e.pos.x - segX()) / segW());
+    void onButton(const ButtonEvent &e) override
+    {
+        if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
+        {
+            int s = (int)std::floor((e.pos.x - segX()) / segW());
             s = std::max(0, std::min(2, s));
-            module->viewMode = (LSDrone::ViewMode) s;
+            module->viewMode = (LSDrone::ViewMode)s;
             e.consume(this);
         }
     }
 
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) {
+    void drawLayer(const DrawArgs &args, int layer) override
+    {
+        if (layer != 1)
+        {
             Widget::drawLayer(args, layer);
             return;
         }
-        NVGcontext* vg = args.vg;
-        int cur = module ? (int) module->viewMode : 0;
-        const char* names[3] = {"WAVE", "BARS", "SPEC"};
+        NVGcontext *vg = args.vg;
+        int cur = module ? (int)module->viewMode : 0;
+        const char *names[3] = {"WAVE", "BARS", "SPEC"};
 
         const float x0 = segX(), y0 = 15.f, w = LS_VIEW_W - 16.f, h = 19.f, sw = segW();
 
@@ -1299,8 +1486,10 @@ struct LSViewWidget : TransparentWidget {
 
         // separators
         nvgBeginPath(vg);
-        for (int i = 1; i < 3; ++i) {
-            if (i == cur || i == cur + 1) continue;
+        for (int i = 1; i < 3; ++i)
+        {
+            if (i == cur || i == cur + 1)
+                continue;
             nvgMoveTo(vg, x0 + sw * i, y0 + 4.f);
             nvgLineTo(vg, x0 + sw * i, y0 + h - 4.f);
         }
@@ -1320,8 +1509,10 @@ struct LSViewWidget : TransparentWidget {
 // ============================================================
 // Module widget
 // ============================================================
-struct LSDroneWidget : ModuleWidget {
-    LSDroneWidget(LSDrone* module) {
+struct LSDroneWidget : ModuleWidget
+{
+    LSDroneWidget(LSDrone *module)
+    {
         setModule(module);
         box.size = Vec(LS_PANEL_W, LS_PANEL_H);
 
@@ -1337,10 +1528,11 @@ struct LSDroneWidget : ModuleWidget {
         addChild(new LSViewWidget(module, LS_PANEL_W / 2.f));
 
         // 23 gauge knobs with CV jack (left) + attenuverter (right)
-        for (int i = 0; i < 23; ++i) {
+        for (int i = 0; i < 23; ++i)
+        {
             int row = i / 6, col = i % 6;
             float cx = lsColX(col), ry = LS_ROW[row];
-            const LSCellDef& c = LS_CELLS[i];
+            const LSCellDef &c = LS_CELLS[i];
             addParam(createParamCentered<LSGaugeKnob>(Vec(cx, ry), module, c.param));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - LS_JACK_DX, ry + LS_JACK_DY), module, c.cv));
             addParam(createParamCentered<Trimpot>(Vec(cx + LS_JACK_DX, ry + LS_JACK_DY), module, c.attn));
@@ -1353,32 +1545,37 @@ struct LSDroneWidget : ModuleWidget {
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(lsColX(5), LS_PORT_Y), module, LSDrone::OUTPUT_RIGHT));
     }
 
-    void appendContextMenu(Menu* menu) override {
-        LSDrone* module = dynamic_cast<LSDrone*>(this->module);
-        if (!module) return;
+    void appendContextMenu(Menu *menu) override
+    {
+        LSDrone *module = dynamic_cast<LSDrone *>(this->module);
+        if (!module)
+            return;
 
         // ---- CV range ----
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("CV Range"));
 
-        struct CVRangeItem : MenuItem {
-            LSDrone* module;
+        struct CVRangeItem : MenuItem
+        {
+            LSDrone *module;
             LSDrone::CVRange range;
-            void onAction(const ActionEvent& e) override {
+            void onAction(const ActionEvent &e) override
+            {
                 module->cvRangeMode = range;
             }
-            void step() override {
+            void step() override
+            {
                 rightText = (module->cvRangeMode == range) ? "✔" : "";
                 MenuItem::step();
             }
         };
 
-        CVRangeItem* bipolarItem = createMenuItem<CVRangeItem>("-5V to +5V (bipolar)");
+        CVRangeItem *bipolarItem = createMenuItem<CVRangeItem>("-5V to +5V (bipolar)");
         bipolarItem->module = module;
         bipolarItem->range = LSDrone::BIPOLAR_M5_5;
         menu->addChild(bipolarItem);
 
-        CVRangeItem* unipolarItem = createMenuItem<CVRangeItem>("0V to +10V (unipolar)");
+        CVRangeItem *unipolarItem = createMenuItem<CVRangeItem>("0V to +10V (unipolar)");
         unipolarItem->module = module;
         unipolarItem->range = LSDrone::UNIPOLAR_0_10;
         menu->addChild(unipolarItem);
@@ -1387,23 +1584,27 @@ struct LSDroneWidget : ModuleWidget {
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("Display"));
 
-        struct ViewItem : MenuItem {
-            LSDrone* module;
+        struct ViewItem : MenuItem
+        {
+            LSDrone *module;
             LSDrone::ViewMode mode;
-            void onAction(const ActionEvent& e) override {
+            void onAction(const ActionEvent &e) override
+            {
                 module->viewMode = mode;
             }
-            void step() override {
+            void step() override
+            {
                 rightText = (module->viewMode == mode) ? "✔" : "";
                 MenuItem::step();
             }
         };
 
-        const char* viewNames[3] = {"Waveform", "Bars", "Spectrum"};
-        for (int i = 0; i < 3; ++i) {
-            ViewItem* item = createMenuItem<ViewItem>(viewNames[i]);
+        const char *viewNames[3] = {"Waveform", "Bars", "Spectrum"};
+        for (int i = 0; i < 3; ++i)
+        {
+            ViewItem *item = createMenuItem<ViewItem>(viewNames[i]);
             item->module = module;
-            item->mode = (LSDrone::ViewMode) i;
+            item->mode = (LSDrone::ViewMode)i;
             menu->addChild(item);
         }
     }
