@@ -52,9 +52,8 @@ void init(Plugin *p)
 	p->addModel(modelSwitchLines8to1);
 	p->addModel(modelSwitchLines1to8);
 	p->addModel(modelQuantara);
-
-
-
+	p->addModel(modelMagicBox);
+	p->addModel(modelOscillator);
 
 	// Any other plugin initialization may go here.
 	// As an alternative, consider lazy-loading assets and lookup tables when your module is created to reduce startup times of Rack.

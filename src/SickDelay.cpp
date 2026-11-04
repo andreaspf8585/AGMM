@@ -7,28 +7,28 @@
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
-static const int   SD_BINS = 82;                          // 2 px per bin
-static const float SD_W = RACK_GRID_WIDTH * 16;           // 240
-static const float SD_H = RACK_GRID_HEIGHT;               // 380
+static const int SD_BINS = 82;                  // 2 px per bin
+static const float SD_W = RACK_GRID_WIDTH * 16; // 240
+static const float SD_H = RACK_GRID_HEIGHT;     // 380
 static const float SD_DX = 20.f, SD_DY = 46.f, SD_DW = 200.f, SD_DH = 84.f;
 static const float SD_KCOL[4] = {30.f, 90.f, 150.f, 210.f};
 static const float SD_KROW[2] = {166.f, 220.f};
 static const float SD_SWY = 282.f;
 static const float SD_JY = 346.f;
-static float sdJx(int i) { return 30.f + 30.f * i; }     // 7 jacks, 30 px apart
+static float sdJx(int i) { return 30.f + 30.f * i; } // 7 jacks, 30 px apart
 
 // Clock sync: the clock input is treated as one pulse per quarter note (beat).
 // The time knobs select one of these divisions when a clock is patched.
-static const int   SD_NDIV = 10;
+static const int SD_NDIV = 10;
 static const float SD_DIV_MULT[SD_NDIV] = {0.25f, 1.f / 3.f, 0.5f, 2.f / 3.f, 0.75f, 1.f, 1.5f, 2.f, 3.f, 4.f};
-static const char* SD_DIV_NAME[SD_NDIV] = {"1/16", "1/8T", "1/8", "1/4T", "1/8.", "1/4", "1/4.", "1/2", "1/2.", "1/1"};
+static const char *SD_DIV_NAME[SD_NDIV] = {"1/16", "1/8T", "1/8", "1/4T", "1/8.", "1/4", "1/4.", "1/2", "1/2.", "1/1"};
 
 struct SickDelay : Module
 {
     // New items are appended at the end of each enum so old patches keep loading.
     enum ParamId
     {
-        TIME_PARAM,          // left delay time
+        TIME_PARAM, // left delay time
         FEEDBACK_PARAM,
         MIX_PARAM,
         COLOR_PARAM,
@@ -37,8 +37,8 @@ struct SickDelay : Module
         PINGPONG_SWITCH,
         BITCRUSH_SWITCH,
         FREEZE_SWITCH,
-        TIME_R_PARAM,        // right delay time
-        LINK_SWITCH,         // right time follows left time
+        TIME_R_PARAM, // right delay time
+        LINK_SWITCH,  // right time follows left time
         PARAMS_LEN
     };
     enum InputId
@@ -76,8 +76,8 @@ struct SickDelay : Module
 
     // Clock tracking
     dsp::SchmittTrigger clockTrigger;
-    float clockTimer = 0.f;      // seconds since the last clock edge
-    float clockPeriod = 0.5f;    // measured seconds per clock pulse (beat)
+    float clockTimer = 0.f;   // seconds since the last clock edge
+    float clockPeriod = 0.5f; // measured seconds per clock pulse (beat)
     bool clockHasEdge = false;
     bool clockValid = false;
 
@@ -86,9 +86,9 @@ struct SickDelay : Module
     float peakBins[SD_BINS] = {};
     int peakWriteBin = 0;
     int lastBin = -1;
-    float dispAgeL = 0.25f, dispAgeR = 0.25f;   // tap positions: 0 = now, 1 = oldest
+    float dispAgeL = 0.25f, dispAgeR = 0.25f; // tap positions: 0 = now, 1 = oldest
     float dispMsL = 0.f, dispMsR = 0.f;
-    int dispDivL = -1, dispDivR = -1;           // -1 = free running
+    int dispDivL = -1, dispDivR = -1; // -1 = free running
     bool dispSync = false;
     float dispMod = 0.f;
     float meterL = 0.f, meterR = 0.f;
@@ -274,13 +274,16 @@ struct SickDelay : Module
         // Display overview of what is stored in the delay line
         {
             int bin = (int)((long long)writePosL * SD_BINS / (long long)BUFFER_SIZE);
-            if (bin >= SD_BINS) bin = SD_BINS - 1;
-            if (bin != lastBin) {
+            if (bin >= SD_BINS)
+                bin = SD_BINS - 1;
+            if (bin != lastBin)
+            {
                 peakBins[bin] = 0.f;
                 lastBin = bin;
             }
             float wv = 0.5f * (std::fabs(bufferL[writePosL]) + std::fabs(bufferR[writePosR]));
-            if (wv > peakBins[bin]) peakBins[bin] = wv;
+            if (wv > peakBins[bin])
+                peakBins[bin] = wv;
             peakWriteBin = bin;
         }
 
@@ -314,385 +317,438 @@ struct SickDelay : Module
     }
 };
 
-namespace {
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
-NVGcolor withAlpha(NVGcolor c, float a) { c.a = a; return c; }
+    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
+    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
+    NVGcolor withAlpha(NVGcolor c, float a)
+    {
+        c.a = a;
+        return c;
+    }
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
+    void setFont(NVGcontext *vg)
+    {
+        std::shared_ptr<window::Font> font =
+            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+        if (font)
+            nvgFontFaceId(vg, font->handle);
+    }
 
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
+    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
+                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
+    {
+        setFont(vg);
+        nvgFontSize(vg, size);
+        nvgTextLetterSpacing(vg, spacing);
+        nvgTextAlign(vg, align);
+        nvgFillColor(vg, col);
+        nvgText(vg, x, y, s, NULL);
+    }
 
-template <typename TBase = GrayModuleLightWidget>
-struct TSDCyanLight : TBase {
-    TSDCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using SDCyanLight = TSDCyanLight<>;
+    template <typename TBase = GrayModuleLightWidget>
+    struct TSDCyanLight : TBase
+    {
+        TSDCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
+    };
+    using SDCyanLight = TSDCyanLight<>;
 
-template <typename TBase = GrayModuleLightWidget>
-struct TSDVioletLight : TBase {
-    TSDVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
-};
-using SDVioletLight = TSDVioletLight<>;
+    template <typename TBase = GrayModuleLightWidget>
+    struct TSDVioletLight : TBase
+    {
+        TSDVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
+    };
+    using SDVioletLight = TSDVioletLight<>;
 
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
+    void drawLogo(NVGcontext *vg, float cx, float cy)
+    {
+        const float w = 64.f, h = 18.f;
+        float x = cx - w / 2.f, y = cy - h / 2.f;
         nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
+        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
+        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
+        nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 7.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
+        nvgFill(vg);
+        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+        nvgStrokeWidth(vg, 1.2f);
         nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
-
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void label(NVGcontext* vg, float x, float y, const char* t, float size = 7.f) {
-    drawText(vg, x, y, t, size, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-}
-
-void topCell(NVGcontext* vg, float cx, float cy, const char* t) {
-    plate(vg, cx - 14.f, cy - 27.f, 28.f, 44.f);
-    label(vg, cx, cy - 19.f, t, 6.f);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenFinish(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
-struct SDPanel : TransparentWidget {
-    SDPanel() { box.size = Vec(SD_W, SD_H); }
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        drawPanelBase(vg, SD_W, SD_H, "SICKDELAY");
-        drawBezel(vg, SD_DX, SD_DY, SD_DW, SD_DH);
-
-        // 7 knobs in a 4 x 2 grid (last slot of row 2 is empty)
-        const char* names[7] = {"TIME L", "TIME R", "FEEDBACK", "MIX", "TONE", "DRIVE", "MOD"};
-        for (int i = 0; i < 7; ++i) {
-            float cx = SD_KCOL[i % 4], cy = SD_KROW[i / 4];
-            ring(vg, cx, cy, 18.f);
-            label(vg, cx, cy + 25.f, names[i]);
-        }
-
-        const char* sw[4] = {"PINGPONG", "CRUSH", "FREEZE", "LINK L/R"};
-        for (int i = 0; i < 4; ++i) {
-            plate(vg, SD_KCOL[i] - 17.f, SD_SWY - 20.f, 34.f, 40.f);
-            label(vg, SD_KCOL[i], SD_SWY + 25.f, sw[i]);
-        }
-
-        const char* io[7] = {"L IN", "R IN", "TIME CV", "CLOCK", "FREEZE", "OUT L", "OUT R"};
-        for (int i = 0; i < 7; ++i) topCell(vg, sdJx(i), SD_JY, io[i]);
-        Widget::draw(args);
-    }
-};
-
-// Display: the delay line as a timeline, with the read taps
-struct SDDisplay : TransparentWidget {
-    SickDelay* module = nullptr;
-    SDDisplay(SickDelay* m) : module(m) {
-        box.pos = Vec(SD_DX, SD_DY);
-        box.size = Vec(SD_DW, SD_DH);
-    }
-
-    static constexpr float X0 = 12.f, Y0 = 16.f, TW = 164.f, TH = 46.f;
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        screenBase(vg, SD_DW, SD_DH);
-        float mid = Y0 + TH / 2.f;
-
+        const float s = 2.2f;
+        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, X0 - 1.f, Y0 - 1.f, TW + 2.f, TH + 2.f, 2.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // grid every 0.5 s (the buffer holds about 2 s, "now" is on the right)
-        nvgBeginPath(vg);
-        for (int k = 1; k < 4; ++k) {
-            float x = X0 + TW - k * (TW / 4.f) + 0.5f;
-            nvgMoveTo(vg, x, Y0);
-            nvgLineTo(vg, x, Y0 + TH);
-        }
-        nvgMoveTo(vg, X0, mid + 0.5f);
-        nvgLineTo(vg, X0 + TW, mid + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
-        nvgStroke(vg);
-
-        const char* tl[5] = {"0", "0.5", "1.0", "1.5", "2.0S"};
-        for (int k = 0; k <= 4; ++k)
-            drawText(vg, X0 + TW - k * (TW / 4.f), Y0 + TH + 8.f, tl[k], 5.5f, colDim(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-        Widget::draw(args);
-    }
-
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) { Widget::drawLayer(args, layer); return; }
-        NVGcontext* vg = args.vg;
-        const float W = SD_DW, H = SD_DH;
-        const float mid = Y0 + TH / 2.f;
-
-        float ord[SD_BINS];
-        float ageL = 0.3f, ageR = 0.2f, msL = 600.f, msR = 400.f, mod = 0.3f, mL = 3.f, mR = 2.4f;
-        float fb = 0.5f, mixv = 0.5f, drive = 1.5f;
-        bool frz = false, png = false, crush = false, sync = false, link = false;
-        int divL = -1, divR = -1;
-
-        if (module) {
-            int wb = module->peakWriteBin;
-            for (int i = 0; i < SD_BINS; ++i)
-                ord[i] = module->peakBins[(wb + 1 + i) % SD_BINS];
-            ageL = module->dispAgeL; ageR = module->dispAgeR;
-            msL = module->dispMsL; msR = module->dispMsR;
-            divL = module->dispDivL; divR = module->dispDivR;
-            sync = module->dispSync;
-            mod = module->dispMod;
-            mL = module->meterL; mR = module->meterR;
-            fb = module->params[SickDelay::FEEDBACK_PARAM].getValue();
-            mixv = module->params[SickDelay::MIX_PARAM].getValue();
-            drive = module->params[SickDelay::DRIVE_PARAM].getValue() + 1.f;
-            frz = module->params[SickDelay::FREEZE_SWITCH].getValue() > 0.5f;
-            png = module->params[SickDelay::PINGPONG_SWITCH].getValue() > 0.5f;
-            crush = module->params[SickDelay::BITCRUSH_SWITCH].getValue() > 0.5f;
-            link = module->params[SickDelay::LINK_SWITCH].getValue() > 0.5f;
-        } else {
-            for (int i = 0; i < SD_BINS; ++i) {
-                float a = (float)(SD_BINS - 1 - i);
-                ord[i] = 4.f * std::exp(-a * 0.035f) * (0.35f + 0.65f * std::fabs(std::sin(a * 0.33f)));
-            }
-        }
-
-        // delay line contents (mirrored bars, newest on the right)
-        nvgSave(vg);
-        nvgScissor(vg, X0, Y0, TW, TH);
-        const float amp = TH / 2.f - 2.f;
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            for (int i = 0; i < SD_BINS; ++i) {
-                float h = std::min(ord[i] / 5.f, 1.f) * amp;
-                if (h < 0.4f) continue;
-                float x = X0 + i * 2.f;
-                if (pass == 0) nvgRect(vg, x - 0.5f, mid - h - 1.5f, 3.f, 2.f * h + 3.f);
-                else nvgRect(vg, x, mid - h, 1.6f, 2.f * h);
-            }
-            if (frz) nvgFillColor(vg, pass == 0 ? withAlpha(colViolet(), 0.16f) : nvgRGB(0xd8, 0xb0, 0xff));
-            else nvgFillColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 32) : nvgRGB(0x8a, 0xee, 0xff));
-            nvgFill(vg);
-        }
-        nvgResetScissor(vg);
-        nvgRestore(vg);
-
-        // tap regions and tap markers: left = violet (top triangle), right = cyan (bottom triangle)
-        float txL = X0 + (1.f - std::min(std::max(ageL, 0.f), 1.f)) * TW;
-        float txR = X0 + (1.f - std::min(std::max(ageR, 0.f), 1.f)) * TW;
-
-        nvgBeginPath(vg);
-        nvgRect(vg, txL, Y0, X0 + TW - txL, TH);
-        nvgFillColor(vg, withAlpha(colViolet(), 0.08f));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRect(vg, txR, Y0, X0 + TW - txR, TH);
-        nvgFillColor(vg, withAlpha(colAccent(), 0.06f));
-        nvgFill(vg);
-
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, txL + 0.5f, Y0);
-            nvgLineTo(vg, txL + 0.5f, Y0 + TH);
-            nvgStrokeColor(vg, pass == 0 ? withAlpha(colViolet(), 0.3f) : nvgRGBA(0xd8, 0xb0, 0xff, 240));
-            nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, txR + 0.5f, Y0);
-            nvgLineTo(vg, txR + 0.5f, Y0 + TH);
-            nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.3f) : nvgRGBA(0xc0, 0xf6, 0xff, 240));
-            nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
-            nvgStroke(vg);
-        }
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, txL - 3.5f, Y0 - 3.f);
-        nvgLineTo(vg, txL + 4.5f, Y0 - 3.f);
-        nvgLineTo(vg, txL + 0.5f, Y0 + 2.f);
-        nvgClosePath(vg);
-        nvgFillColor(vg, colViolet());
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, txR - 3.5f, Y0 + TH + 3.f);
-        nvgLineTo(vg, txR + 4.5f, Y0 + TH + 3.f);
-        nvgLineTo(vg, txR + 0.5f, Y0 + TH - 2.f);
-        nvgClosePath(vg);
+        nvgRect(vg, tx + s, ty, s, s);
+        nvgRect(vg, tx, ty + s * 1.4f, s, s);
+        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
         nvgFillColor(vg, colAccent());
         nvgFill(vg);
+        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+    }
 
-        // modulation wobble marker under the left tap
+    void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
+    {
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H);
+        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
+        nvgFill(vg);
+        nvgStrokeWidth(vg, 1.f);
+        for (int y = 0; y < (int)H; y += 3)
         {
-            float mx = txL + 0.5f + std::min(std::max(mod, -1.f), 1.f) * 8.f;
             nvgBeginPath(vg);
-            nvgCircle(vg, mx, Y0 + TH - 5.f, 2.f);
-            nvgFillColor(vg, withAlpha(colViolet(), 0.9f));
-            nvgFill(vg);
+            nvgMoveTo(vg, 0, y + 0.5f);
+            nvgLineTo(vg, W, y + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
+            nvgStroke(vg);
+        }
+        nvgBeginPath(vg);
+        nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+        nvgStroke(vg);
+        drawLogo(vg, W / 2.f, 13.f);
+        drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
+    }
+
+    void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
+    {
+        float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
+        nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
+        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
+        nvgFill(vg);
+    }
+
+    void plate(NVGcontext *vg, float x, float y, float w, float h)
+    {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 6.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
+
+    void ring(NVGcontext *vg, float cx, float cy, float r)
+    {
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, r);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
+
+    void label(NVGcontext *vg, float x, float y, const char *t, float size = 7.f)
+    {
+        drawText(vg, x, y, t, size, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
+    }
+
+    void topCell(NVGcontext *vg, float cx, float cy, const char *t)
+    {
+        plate(vg, cx - 14.f, cy - 27.f, 28.f, 44.f);
+        label(vg, cx, cy - 19.f, t, 6.f);
+    }
+
+    void screenBase(NVGcontext *vg, float W, float H)
+    {
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H);
+        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
+        nvgFill(vg);
+    }
+
+    void screenFinish(NVGcontext *vg, float W, float H)
+    {
+        nvgBeginPath(vg);
+        for (int y = 0; y < (int)H; y += 3)
+            nvgRect(vg, 0, y + 1, W, 1);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
+        nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H * 0.3f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
+        nvgFill(vg);
+    }
+
+    struct SDPanel : TransparentWidget
+    {
+        SDPanel() { box.size = Vec(SD_W, SD_H); }
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            drawPanelBase(vg, SD_W, SD_H, "SICKDELAY");
+            drawBezel(vg, SD_DX, SD_DY, SD_DW, SD_DH);
+
+            // 7 knobs in a 4 x 2 grid (last slot of row 2 is empty)
+            const char *names[7] = {"TIME L", "TIME R", "FEEDBACK", "MIX", "TONE", "DRIVE", "MOD"};
+            for (int i = 0; i < 7; ++i)
+            {
+                float cx = SD_KCOL[i % 4], cy = SD_KROW[i / 4];
+                ring(vg, cx, cy, 18.f);
+                label(vg, cx, cy + 25.f, names[i]);
+            }
+
+            const char *sw[4] = {"PINGPONG", "CRUSH", "FREEZE", "LINK L/R"};
+            for (int i = 0; i < 4; ++i)
+            {
+                plate(vg, SD_KCOL[i] - 17.f, SD_SWY - 20.f, 34.f, 40.f);
+                label(vg, SD_KCOL[i], SD_SWY + 25.f, sw[i]);
+            }
+
+            const char *io[7] = {"L IN", "R IN", "TIME CV", "CLOCK", "FREEZE", "OUT L", "OUT R"};
+            for (int i = 0; i < 7; ++i)
+                topCell(vg, sdJx(i), SD_JY, io[i]);
+            Widget::draw(args);
+        }
+    };
+
+    // Display: the delay line as a timeline, with the read taps
+    struct SDDisplay : TransparentWidget
+    {
+        SickDelay *module = nullptr;
+        SDDisplay(SickDelay *m) : module(m)
+        {
+            box.pos = Vec(SD_DX, SD_DY);
+            box.size = Vec(SD_DW, SD_DH);
         }
 
-        nvgBeginPath(vg);
-        nvgRect(vg, X0 + TW - 1.5f, Y0, 1.5f, TH);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 200));
-        nvgFill(vg);
+        static constexpr float X0 = 12.f, Y0 = 16.f, TW = 164.f, TH = 46.f;
 
-        if (frz)
-            drawText(vg, X0 + TW / 2.f, Y0 + 8.f, "FROZEN", 7.f, withAlpha(colViolet(), 0.9f),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            screenBase(vg, SD_DW, SD_DH);
+            float mid = Y0 + TH / 2.f;
 
-        // output meters
-        for (int ch = 0; ch < 2; ++ch) {
-            float lv = std::min((ch == 0 ? mL : mR) / 5.f, 1.f);
-            float x = X0 + TW + 6.f + ch * 6.f;
             nvgBeginPath(vg);
-            nvgRect(vg, x, Y0, 4.f, TH);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
+            nvgRoundedRect(vg, X0 - 1.f, Y0 - 1.f, TW + 2.f, TH + 2.f, 2.f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
             nvgFill(vg);
-            if (lv > 0.01f) {
-                float h = lv * TH;
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // grid every 0.5 s (the buffer holds about 2 s, "now" is on the right)
+            nvgBeginPath(vg);
+            for (int k = 1; k < 4; ++k)
+            {
+                float x = X0 + TW - k * (TW / 4.f) + 0.5f;
+                nvgMoveTo(vg, x, Y0);
+                nvgLineTo(vg, x, Y0 + TH);
+            }
+            nvgMoveTo(vg, X0, mid + 0.5f);
+            nvgLineTo(vg, X0 + TW, mid + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+            nvgStroke(vg);
+
+            const char *tl[5] = {"0", "0.5", "1.0", "1.5", "2.0S"};
+            for (int k = 0; k <= 4; ++k)
+                drawText(vg, X0 + TW - k * (TW / 4.f), Y0 + TH + 8.f, tl[k], 5.5f, colDim(),
+                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+            Widget::draw(args);
+        }
+
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
+                return;
+            }
+            NVGcontext *vg = args.vg;
+            const float W = SD_DW, H = SD_DH;
+            const float mid = Y0 + TH / 2.f;
+
+            float ord[SD_BINS];
+            float ageL = 0.3f, ageR = 0.2f, msL = 600.f, msR = 400.f, mod = 0.3f, mL = 3.f, mR = 2.4f;
+            float fb = 0.5f, mixv = 0.5f, drive = 1.5f;
+            bool frz = false, png = false, crush = false, sync = false, link = false;
+            int divL = -1, divR = -1;
+
+            if (module)
+            {
+                int wb = module->peakWriteBin;
+                for (int i = 0; i < SD_BINS; ++i)
+                    ord[i] = module->peakBins[(wb + 1 + i) % SD_BINS];
+                ageL = module->dispAgeL;
+                ageR = module->dispAgeR;
+                msL = module->dispMsL;
+                msR = module->dispMsR;
+                divL = module->dispDivL;
+                divR = module->dispDivR;
+                sync = module->dispSync;
+                mod = module->dispMod;
+                mL = module->meterL;
+                mR = module->meterR;
+                fb = module->params[SickDelay::FEEDBACK_PARAM].getValue();
+                mixv = module->params[SickDelay::MIX_PARAM].getValue();
+                drive = module->params[SickDelay::DRIVE_PARAM].getValue() + 1.f;
+                frz = module->params[SickDelay::FREEZE_SWITCH].getValue() > 0.5f;
+                png = module->params[SickDelay::PINGPONG_SWITCH].getValue() > 0.5f;
+                crush = module->params[SickDelay::BITCRUSH_SWITCH].getValue() > 0.5f;
+                link = module->params[SickDelay::LINK_SWITCH].getValue() > 0.5f;
+            }
+            else
+            {
+                for (int i = 0; i < SD_BINS; ++i)
+                {
+                    float a = (float)(SD_BINS - 1 - i);
+                    ord[i] = 4.f * std::exp(-a * 0.035f) * (0.35f + 0.65f * std::fabs(std::sin(a * 0.33f)));
+                }
+            }
+
+            // delay line contents (mirrored bars, newest on the right)
+            nvgSave(vg);
+            nvgScissor(vg, X0, Y0, TW, TH);
+            const float amp = TH / 2.f - 2.f;
+            for (int pass = 0; pass < 2; ++pass)
+            {
                 nvgBeginPath(vg);
-                nvgRect(vg, x, Y0 + TH - h, 4.f, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, Y0 + TH, 0, Y0, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+                for (int i = 0; i < SD_BINS; ++i)
+                {
+                    float h = std::min(ord[i] / 5.f, 1.f) * amp;
+                    if (h < 0.4f)
+                        continue;
+                    float x = X0 + i * 2.f;
+                    if (pass == 0)
+                        nvgRect(vg, x - 0.5f, mid - h - 1.5f, 3.f, 2.f * h + 3.f);
+                    else
+                        nvgRect(vg, x, mid - h, 1.6f, 2.f * h);
+                }
+                if (frz)
+                    nvgFillColor(vg, pass == 0 ? withAlpha(colViolet(), 0.16f) : nvgRGB(0xd8, 0xb0, 0xff));
+                else
+                    nvgFillColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 32) : nvgRGB(0x8a, 0xee, 0xff));
                 nvgFill(vg);
             }
+            nvgResetScissor(vg);
+            nvgRestore(vg);
+
+            // tap regions and tap markers: left = violet (top triangle), right = cyan (bottom triangle)
+            float txL = X0 + (1.f - std::min(std::max(ageL, 0.f), 1.f)) * TW;
+            float txR = X0 + (1.f - std::min(std::max(ageR, 0.f), 1.f)) * TW;
+
+            nvgBeginPath(vg);
+            nvgRect(vg, txL, Y0, X0 + TW - txL, TH);
+            nvgFillColor(vg, withAlpha(colViolet(), 0.08f));
+            nvgFill(vg);
+            nvgBeginPath(vg);
+            nvgRect(vg, txR, Y0, X0 + TW - txR, TH);
+            nvgFillColor(vg, withAlpha(colAccent(), 0.06f));
+            nvgFill(vg);
+
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, txL + 0.5f, Y0);
+                nvgLineTo(vg, txL + 0.5f, Y0 + TH);
+                nvgStrokeColor(vg, pass == 0 ? withAlpha(colViolet(), 0.3f) : nvgRGBA(0xd8, 0xb0, 0xff, 240));
+                nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
+                nvgStroke(vg);
+
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, txR + 0.5f, Y0);
+                nvgLineTo(vg, txR + 0.5f, Y0 + TH);
+                nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.3f) : nvgRGBA(0xc0, 0xf6, 0xff, 240));
+                nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
+                nvgStroke(vg);
+            }
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, txL - 3.5f, Y0 - 3.f);
+            nvgLineTo(vg, txL + 4.5f, Y0 - 3.f);
+            nvgLineTo(vg, txL + 0.5f, Y0 + 2.f);
+            nvgClosePath(vg);
+            nvgFillColor(vg, colViolet());
+            nvgFill(vg);
+
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, txR - 3.5f, Y0 + TH + 3.f);
+            nvgLineTo(vg, txR + 4.5f, Y0 + TH + 3.f);
+            nvgLineTo(vg, txR + 0.5f, Y0 + TH - 2.f);
+            nvgClosePath(vg);
+            nvgFillColor(vg, colAccent());
+            nvgFill(vg);
+
+            // modulation wobble marker under the left tap
+            {
+                float mx = txL + 0.5f + std::min(std::max(mod, -1.f), 1.f) * 8.f;
+                nvgBeginPath(vg);
+                nvgCircle(vg, mx, Y0 + TH - 5.f, 2.f);
+                nvgFillColor(vg, withAlpha(colViolet(), 0.9f));
+                nvgFill(vg);
+            }
+
+            nvgBeginPath(vg);
+            nvgRect(vg, X0 + TW - 1.5f, Y0, 1.5f, TH);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, 200));
+            nvgFill(vg);
+
+            if (frz)
+                drawText(vg, X0 + TW / 2.f, Y0 + 8.f, "FROZEN", 7.f, withAlpha(colViolet(), 0.9f),
+                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+
+            // output meters
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                float lv = std::min((ch == 0 ? mL : mR) / 5.f, 1.f);
+                float x = X0 + TW + 6.f + ch * 6.f;
+                nvgBeginPath(vg);
+                nvgRect(vg, x, Y0, 4.f, TH);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
+                nvgFill(vg);
+                if (lv > 0.01f)
+                {
+                    float h = lv * TH;
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, Y0 + TH - h, 4.f, h);
+                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, Y0 + TH, 0, Y0, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+                    nvgFill(vg);
+                }
+            }
+
+            screenFinish(vg, W, H);
+
+            char buf[64];
+            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
+            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 230);
+
+            // top row: L / R time (note division when synced), FB, MIX
+            if (sync && divL >= 0)
+                snprintf(buf, sizeof(buf), "L %s", SD_DIV_NAME[divL]);
+            else
+                snprintf(buf, sizeof(buf), "L %4.0fMS", msL);
+            drawText(vg, 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            if (sync && divR >= 0)
+                snprintf(buf, sizeof(buf), "R %s", SD_DIV_NAME[divR]);
+            else
+                snprintf(buf, sizeof(buf), "R %4.0fMS", msR);
+            drawText(vg, 62.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "FB %3.0f%%", fb * 100.f);
+            drawText(vg, 130.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "MIX %3.0f%%", mixv * 100.f);
+            drawText(vg, W - 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+
+            // bottom row: drive, sync / link state, ping-pong / crush
+            snprintf(buf, sizeof(buf), "DRV %.1fX", drive);
+            drawText(vg, 6.f, H - 6.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "%s%s", sync ? "SYNC " : "", link ? "LINK" : "");
+            drawText(vg, W / 2.f, H - 6.f, buf, 7.f, withAlpha(colViolet(), 0.85f), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "%s%s", png ? "PNG " : "", crush ? "CRSH" : "");
+            drawText(vg, W - 6.f, H - 6.f, buf, 7.f, withAlpha(colAccent(), 0.85f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            Widget::drawLayer(args, layer);
         }
-
-        screenFinish(vg, W, H);
-
-        char buf[64];
-        NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-        NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 230);
-
-        // top row: L / R time (note division when synced), FB, MIX
-        if (sync && divL >= 0)
-            snprintf(buf, sizeof(buf), "L %s", SD_DIV_NAME[divL]);
-        else
-            snprintf(buf, sizeof(buf), "L %4.0fMS", msL);
-        drawText(vg, 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        if (sync && divR >= 0)
-            snprintf(buf, sizeof(buf), "R %s", SD_DIV_NAME[divR]);
-        else
-            snprintf(buf, sizeof(buf), "R %4.0fMS", msR);
-        drawText(vg, 62.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "FB %3.0f%%", fb * 100.f);
-        drawText(vg, 130.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "MIX %3.0f%%", mixv * 100.f);
-        drawText(vg, W - 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-        // bottom row: drive, sync / link state, ping-pong / crush
-        snprintf(buf, sizeof(buf), "DRV %.1fX", drive);
-        drawText(vg, 6.f, H - 6.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "%s%s", sync ? "SYNC " : "", link ? "LINK" : "");
-        drawText(vg, W / 2.f, H - 6.f, buf, 7.f, withAlpha(colViolet(), 0.85f), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "%s%s", png ? "PNG " : "", crush ? "CRSH" : "");
-        drawText(vg, W - 6.f, H - 6.f, buf, 7.f, withAlpha(colAccent(), 0.85f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-        Widget::drawLayer(args, layer);
-    }
-};
+    };
 
 } // namespace
 
@@ -719,7 +775,8 @@ struct SickDelayWidget : ModuleWidget
 
         const int sw[4] = {SickDelay::PINGPONG_SWITCH, SickDelay::BITCRUSH_SWITCH, SickDelay::FREEZE_SWITCH, SickDelay::LINK_SWITCH};
         const int led[4] = {SickDelay::PINGPONG_LIGHT, SickDelay::BITCRUSH_LIGHT, SickDelay::FREEZE_LIGHT, SickDelay::LINK_LIGHT};
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4; ++i)
+        {
             float cx = SD_KCOL[i];
             addParam(createParamCentered<CKSS>(Vec(cx - 2.f, SD_SWY), module, sw[i]));
             if (i == 0 || i == 3)

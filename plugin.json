@@ -406,6 +406,24 @@
       "tags": [
         "quantizer"
       ]
+    },
+    {
+      "slug": "MagicBox",
+      "name": "MagicBox",
+      "description": "apply math functions in wave",
+      "tags": [
+        "math",
+        "transform"
+      ]
+    },
+    {
+      "slug": "Oscillator",
+      "name": "Oscillator",
+      "description": "VCO",
+      "tags": [
+        "VCO",
+        "polyphonic"
+      ]
     }
   ]
 }
