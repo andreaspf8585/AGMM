@@ -1229,5 +1229,8 @@ struct XBodyProblemWidget : ModuleWidget
 									  { module->doReset(); }));
 	}
 };
+//
+//
+//
 
 Model *modelXBodyProblem = createModel<XBodyProblem, XBodyProblemWidget>("XBodyProblem");

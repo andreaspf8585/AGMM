@@ -1166,7 +1166,7 @@ struct AmbienceWidget : ModuleWidget
     AmbienceWidget(Ambience *module)
     {
         setModule(module);
-        box.size = Vec(AM_PANEL_W, AM_PANEL_H);
+        box.size = Vec(AM_PANEL_W, AM_PANEL_H); 
 
         addChild(new AMPanelBackground());
 
