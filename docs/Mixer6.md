@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:23
 
 The `Mixer6` module is a stereo 6-channel audio mixer for VCV Rack. It accepts six stereo input channels (L/R), each with independent level control, CV-controlled attenuation, and optional CV input for dynamic level adjustment. The module provides a master gain control to scale the final mixed output. It also includes visual feedback through an oscilloscope-style display and peak meter indicators.
 
+## Module Screenshot
+
+![Mixer6 VCV Rack Module](images/mixer6.png)
+
 ## 2. Architecture
 
 ### Main Classes

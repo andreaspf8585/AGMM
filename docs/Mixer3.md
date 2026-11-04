@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:23
 
 The `Mixer3` module is a stereo 3-channel audio mixer for VCV Rack. It accepts three stereo input channels (L/R) and provides a single stereo output (L/R). Each channel has independent level control, CV-controlled attenuation, and a master gain stage. The module also includes a visual display showing the signal scope and peak meters.
 
+## Module Screenshot
+
+![Mixer3 VCV Rack Module](images/mixer3.png)
+
 ## 2. Architecture
 
 ### Main Classes

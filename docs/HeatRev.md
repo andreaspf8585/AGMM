@@ -19,7 +19,7 @@ The module is designed for artistic sound design, adding depth and warmth to aud
 
 ## Module Screenshot
 
-![Ambience VCV Rack Module](images/heatrev.png)
+![Heatrev VCV Rack Module](images/heatrev.png)
 
 ## 2. Architecture
 

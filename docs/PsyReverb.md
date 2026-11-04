@@ -18,6 +18,10 @@ Key features:
 - Visual metering for input and output signals
 - Real-time parameter updates via clock divider
 
+## Module Screenshot
+
+![PsyReverb VCV Rack Module](images/psyreverb.png)
+
 ## 2. Architecture
 
 ### Main Classes

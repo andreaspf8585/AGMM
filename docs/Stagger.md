@@ -19,6 +19,10 @@ Key features include:
 - Attenuverter controls for all CV inputs
 - CV range selection (±5V or ±10V)
 
+## Module Screenshot
+
+![Stagger VCV Rack Module](images/stagger.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:24
 
 This is a complex VCV Rack module implementation for a "Pharmakon" reverb/delay effect unit. Here's a breakdown of the key components:
 
+## Module Screenshot
+
+![Pharmakon VCV Rack Module](images/pharmakon.png)
+
 ## Module Structure
 
 The code defines a comprehensive audio effect module with:

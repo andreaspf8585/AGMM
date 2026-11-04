@@ -6,6 +6,11 @@ Generated: 2026-11-04 06:13
 
 The provided code defines a VCV Rack module named `BouncingBalls`, which simulates physics-based bouncing balls within a confined playfield. It includes both the core logic in the `BouncingBalls` class and its visual representation in the `BouncingBallsWidget`.
 
+## Module Screenshot
+
+![Bastion VCV Rack Module](images/bastion.png)
+
+
 Here's a breakdown of the key components:
 
 1.  **Module Logic (`BouncingBalls` class):**

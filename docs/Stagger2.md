@@ -6,6 +6,11 @@ Generated: 2026-11-04 06:34
 
 This code defines a VCV Rack module called `Stagger2`, which is a polyphonic synthesizer voice with built-in effects (delay and reverb). Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![Stagger2 VCV Rack Module](images/stagger2.png)
+
+
 1.  **Module Class (`Stagger2`)**:
     *   Inherits from `rack::Module`.
     *   Manages parameters, inputs, outputs, and the core audio processing logic for one voice.

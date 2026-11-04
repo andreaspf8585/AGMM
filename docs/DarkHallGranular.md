@@ -19,6 +19,10 @@ Key features include:
 - Visual display showing audio scope and level meters
 - Configurable CV range (bipolar/unipolar)
 
+## Module Screenshot
+
+![DarkHallGranular VCV Rack Module](images/darkhallgranular.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -17,6 +17,9 @@ The module features:
 - Visual display showing frequency response and LFO scope
 - CV inputs for real-time parameter modulation
 
+## Module Screenshot
+
+![Phasmal VCV Rack Module](images/phasmal.png)
 ## 2. Architecture
 
 ### Main Classes

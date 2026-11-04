@@ -18,6 +18,10 @@ Key features:
 - **Randomize** and **Reset** controls
 - Visual display of the automaton history with CRT-style effects
 
+## Module Screenshot
+
+![CellAutoGate VCV Rack Module](images/cellautogate.png)
+
 ## 2. Architecture
 
 ### Main Classes

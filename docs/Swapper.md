@@ -16,6 +16,10 @@ It features:
 - Visual feedback showing current swap levels and signal strength.
 - Stereo input/output routing with configurable mixing behavior.
 
+## Module Screenshot
+
+![Swapper VCV Rack Module](images/swapper.png)
+
 ## 2. Architecture
 
 ### Main Classes

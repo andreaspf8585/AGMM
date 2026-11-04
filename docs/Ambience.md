@@ -20,6 +20,10 @@ Key characteristics:
 - Offers CV control over decay, mix, and freeze
 - Includes visual display showing FDN topology, decay curve, and damping response
 
+## Module Screenshot
+
+![Ambience VCV Rack Module](images/ambience.png)
+
 ## 2. Architecture
 
 ### Main Classes

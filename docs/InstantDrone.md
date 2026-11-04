@@ -20,6 +20,10 @@ The `InstantDrone` module is a multi-oscillator drone generator designed for VCV
 - Stereo output with adjustable gain
 - Visual display showing signal scope and level meters
 
+## Module Screenshot
+
+![InstantDrone VCV Rack Module](images/instantdrone.png)
+
 ## 2. Architecture
 
 ### Main Classes

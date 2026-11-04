@@ -18,6 +18,9 @@ This module implements a **double pendulum simulation**, where two pendulums are
 - Context menu options to adjust Voct ranges and gate durations.
 
 ---
+## Module Screenshot
+
+![PsyLFO VCV Rack Module](images/psylfo.png)
 
 ### 🔧 Key Components
 

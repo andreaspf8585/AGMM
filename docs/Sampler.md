@@ -20,6 +20,10 @@ This is the source code for a **Sampler module** in VCV Rack (a modular synthesi
 - Visualize waveform data in real-time.
 - Adjust parameters via knobs, switches, and CV inputs.
 
+## Module Screenshot
+
+![Sampler VCV Rack Module](images/sampler.png)
+
 ---
 
 ### 🔧 Key Components

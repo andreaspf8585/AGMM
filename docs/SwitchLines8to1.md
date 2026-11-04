@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:37
 
 The `SwitchLines8to1` module is a multi-channel switch matrix that selects one of eight input signals to route to a single output. It features sequenced switching with configurable direction, length, and crossfade behavior. The module supports both automatic clocked stepping and manual step triggering, with visual feedback showing the current selection, history, and signal levels.
 
+## Module Screenshot
+
+![SwitchLines8to1 VCV Rack Module](images/switchlines8to1.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -17,6 +17,10 @@ The module features:
 - An output port for the scaled signal
 - Visual feedback through a retro-styled UI with gradient backgrounds, scanlines, and glowing elements
 
+## Module Screenshot
+
+![Range VCV Rack Module](images/range.png)
+
 ## 2. Architecture
 
 ### Main Classes

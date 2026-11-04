@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:17
 
 This code defines a VCV Rack module called `ExpressArpeggiator`, which is an arpeggiator with advanced features like pattern editing, muting, locking, direction control, and more. Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![ExpressArpeggiator VCV Rack Module](images/expressarp.png)
+
 1.  **Module Definition (`ExpressArpeggiator`)**:
     *   Inherits from `rack::Module`.
     *   Contains parameters for controlling the arpeggiator's behavior (e.g., length, root note, scale, direction, transpose, muting, etc.).

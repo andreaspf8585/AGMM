@@ -6,6 +6,11 @@ Generated: 2026-11-04 06:22
 
 This code defines a VCV Rack module called `MagicBox`, which is a versatile audio signal processor with multiple functions including various waveshaping and distortion algorithms, harmonic analysis, and real-time visualization of input/output signals.
 
+## Module Screenshot
+
+![MagicBox VCV Rack Module](images/magicbox.png)
+
+
 Key features of this module:
 
 1. **Multiple Processing Functions**: The module supports 8 different waveshaping functions (soft clip, hard clip, tanh, etc.) that can be selected via a parameter or CV input.

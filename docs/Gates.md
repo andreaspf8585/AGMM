@@ -18,6 +18,10 @@ The module features:
 - Visual indicators for active inputs/outputs
 - Multi-channel support for both inputs and outputs
 
+## Module Screenshot
+
+![Gates VCV Rack Module](images/gates.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -12,6 +12,9 @@ The `PsyDelay` module is a stereo delay effect for VCV Rack that provides advanc
 
 The module includes a visual display showing the contents of the delay buffer, read position, and various effect states. It supports both mono and stereo inputs with independent processing for left and right channels, and provides CV control for most parameters.
 
+## Module Screenshot
+
+![PsyDelay VCV Rack Module](images/psydelay.png)
 ## 2. Architecture
 
 ### Main Classes

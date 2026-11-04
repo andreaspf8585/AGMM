@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:36
 
 The `SwitchLines1to8` module is a sequencer-style signal switcher that routes an input signal to one of eight output channels based on configurable sequence parameters. It supports multiple sequencing directions (forward, reverse, pendulum, random) and allows for crossfading between outputs with adjustable fade time. The module includes visual feedback through a display showing the current routing, history, and signal levels.
 
+## Module Screenshot
+
+![SwitchLines1to8 VCV Rack Module](images/switchlines1to8.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -10,7 +10,7 @@ Generated: 2026-11-04 06:25
 
 The `AGMM` VCV Rack plugin is a collection of audio signal processing modules designed for modular synthesizer environments. It provides a wide variety of effects, oscillators, sequencers, and utility modules that enable users to create complex soundscapes and dynamic musical compositions.
 
-This plugin serves as an extension to the VCV Rack platform, offering both classic and experimental DSP algorithms in a modular format. The modules range from traditional reverb and delay effects to more abstract systems such as random walks, cellular automata, and chaotic oscillators.
+This plugin serves as an extension to the VCV Rack platform, offering both classic and experimental DSP algorithms in a modular format. The modules range from traditional reverb and delay effects to more abstract systems such as random walks, cellular automata, and chaotic oscillators.    
 
 ## 2. Architecture
 

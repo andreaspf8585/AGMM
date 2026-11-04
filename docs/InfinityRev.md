@@ -23,6 +23,10 @@ InfinityRev is a high-quality stereo reverb module for VCV Rack that implements 
 
 The module is designed as a professional-grade reverb with a focus on musicality and control over the reverb characteristics.
 
+## Module Screenshot
+
+![InfinityRev VCV Rack Module](images/infinityrev.png)
+
 ## 2. Architecture
 
 ### Main Classes

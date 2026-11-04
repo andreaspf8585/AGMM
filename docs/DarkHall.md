@@ -17,6 +17,10 @@ Key features include:
 - Level meters for left/right channels
 - Visual panel with control knobs and I/O jacks
 
+## Module Screenshot
+
+![DarkHall VCV Rack Module](images/darkhall.png)
+
 ## 2. Architecture
 
 ### Main Classes

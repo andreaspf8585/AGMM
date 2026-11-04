@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:29
 
 The provided code is a complete implementation of the `RandomWalk` module for the VCV Rack modular synthesizer framework. It defines both the core logic (`RandomWalk` class) and its visual representation (`RandomWalkWidget`, `RWDisplayWidget`, `RWBarsWidget`). Here's a breakdown of what this code does:
 
+## Module Screenshot
+
+![RandomWalk VCV Rack Module](images/randomwalk.png)
+
 ---
 
 ### 🧠 **Core Module Logic (`RandomWalk` Class)**

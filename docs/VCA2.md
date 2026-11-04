@@ -18,6 +18,10 @@ Each channel supports:
 
 The module includes a graphical user interface (GUI) that displays real-time information such as envelope percentage relative to the limit and output peak levels.
 
+## Module Screenshot
+
+![VCA2 VCV Rack Module](images/vca2.png)
+
 ## 2. Architecture
 
 ### Main Classes

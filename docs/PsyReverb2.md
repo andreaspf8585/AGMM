@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:27
 
 This code defines a VCV Rack module for a reverb effect called "PsyReverb2". Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![PsyReverb2 VCV Rack Module](images/psyreverb2.png)
+
 1.  **Module Structure (`PsyReverb2Module`)**:
     *   Manages the core reverb algorithm, including parameters (pre-delay, size, mix, low/high EQ, etc.), audio buffers, and state variables.
     *   Handles CV input processing for parameters.

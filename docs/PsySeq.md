@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:28
 
 PsySeq is a step sequencer module for VCV Rack that allows users to create and manipulate sequences of voltages over time. It features an 8x8 grid layout with 64 programmable steps, configurable sequence length, start position, and direction (forward, reverse, or random). The module supports both fixed voltage settings per step and random voltage generation per step. Additionally, it includes mutation capabilities that can randomly modify step voltages after complete cycle repetitions.
 
+## Module Screenshot
+
+![PsySeq VCV Rack Module](images/psyseq.png)
+
 ## 2. Architecture
 
 ### Main Classes

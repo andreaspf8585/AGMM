@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:29
 
 This code defines a VCV Rack module called **RainStorm**, which simulates an atmospheric sound environment with rain, wind, and thunder effects. Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![Rainstorm VCV Rack Module](images/rainstorm.png)
+
 ---
 
 ### 🧠 **Core Functionality**

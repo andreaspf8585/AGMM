@@ -19,6 +19,10 @@ Key features include:
 - Output gain control
 - Visual scope display showing signal amplitude over time
 
+## Module Screenshot
+
+![Reverb VCV Rack Module](images/reverb.png)
+
 ## 2. Architecture
 
 ### Main Classes

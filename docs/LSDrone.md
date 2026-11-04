@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:22
 
 This is a complex VCV Rack module implementation for an "LSDrone" plugin, featuring:
 
+## Module Screenshot
+
+![LSDrone VCV Rack Module](images/lsdrone.png)
+
 1. **Module Structure**:
    - `LSDrone` (core module with parameters, audio processing)
    - `LSDroneWidget` (panel layout and UI elements)

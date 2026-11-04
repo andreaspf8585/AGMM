@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:32
 
 The **Spikes** module is a VCV Rack plugin that generates chaotic attractor signals using the Lorenz and Rössler systems, with additional fractal noise modulation. It outputs three-dimensional coordinates (X, Y, Z) along with a mixed signal (MIX). The module features a 3D visualization display showing the trajectory of the attractor in real-time.
 
+## Module Screenshot
+
+![Spikes VCV Rack Module](images/spikes.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:38
 
 The `VCAPoly` module is a polyphonic voltage-controlled amplifier (VCA) designed for the VCV Rack platform. It provides per-channel gain control with envelope following and global or per-channel limit control. The module supports up to 16 voices and visualizes the current gain and output levels via an on-module display.
 
+## Module Screenshot
+
+![VCAPoly VCV Rack Module](images/vcapoly.png)
+
 ## 2. Architecture
 
 ### Main Classes

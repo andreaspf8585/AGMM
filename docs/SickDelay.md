@@ -21,6 +21,10 @@ The `SickDelay` module is a stereo delay effect for VCV Rack that provides flexi
 
 The module implements a classic analog-style delay with digital signal processing enhancements, including saturation and filtering.
 
+## Module Screenshot
+
+![SickDelay VCV Rack Module](images/sickdelay.png)
+
 ## 2. Architecture
 
 ### Main Classes

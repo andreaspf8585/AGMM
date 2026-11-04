@@ -18,6 +18,10 @@ Key features include:
 - Visual display showing current values, history, and system state
 - Polyphonic output capability
 
+## Module Screenshot
+
+![Stasis VCV Rack Module](images/stasis.png)
+
 ## 2. Architecture
 
 ### Main Classes

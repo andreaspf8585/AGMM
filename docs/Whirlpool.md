@@ -25,6 +25,10 @@ The provided C++ code defines a VCV Rack module named `Whirlpool`, which is a re
   - Computes spectrum for visualization.
   - Handles clear fade and meter updates.
 
+## Module Screenshot
+
+![Whirlpool VCV Rack Module](images/Whirlpool.png)
+
 ### 2. **Widget Definition (`WhirlpoolWidget`)**
 - Inherits from `rack::ModuleWidget`.
 - Sets up the module's UI:

@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:13
 
 The `BlackHoleReverb` module is a stereo reverb effect for VCV Rack that simulates a black hole's acoustic environment using a combination of delay lines, feedback, and modulation. It provides a dark, deep, and atmospheric reverb sound with parameters for mix, feedback, damping, and modulation.
 
+## Module Screenshot
+
+![BlackHoleReverb VCV Rack Module](images/blackhole.png)
+
 ## 2. Architecture
 
 ### Main Classes

@@ -6,6 +6,11 @@ Generated: 2026-11-04 06:21
 
 This code defines a VCV Rack module called "Lifeform" that simulates a complex, animated physical system with magnetic fields, fluid dynamics, and particle interactions. Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![Lifeform VCV Rack Module](images/lifeform.png)
+
+
 1.  **Core Simulation Logic (`stepPhysics`)**:
     *   **Drops**: Simulates the motion of droplets on a spherical surface using spring-damper physics (`d.dv`, `d.dist`) and magnetic forces (`magD`, `field`). Droplets are projected onto the screen for rendering.
     *   **Spikes**: Models dynamic spikes that grow and move based on magnetic field interactions, with visual properties like length (`hpx`), visibility (`vis`), and lighting (`spec`, `lit`).

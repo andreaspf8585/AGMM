@@ -22,6 +22,10 @@ It includes:
 - **Audio outputs** for position (`X`, `Y`) and voltage-controlled pitch (`V/OCT`), gate output, reset input, and push input.
 - A **context menu** for configuring Voct range and Gate duration.
 
+## Module Screenshot
+
+![SpringPendulum VCV Rack Module](images/springpendulum.png)
+
 ---
 
 ### 📦 **Key Components**

@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:28
 
 This code defines a VCV Rack module called `Quantara`, which is a polyphonic pitch quantizer with scale and mode selection, visual feedback, and interactive controls.
 
+## Module Screenshot
+
+![Quantara VCV Rack Module](images/quantara.png)
+
 Here's a breakdown of the key components:
 
 1.  **Module Definition (`Quantara` class):**

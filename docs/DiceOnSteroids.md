@@ -6,6 +6,11 @@ Generated: 2026-11-04 06:17
 
 The provided code is a complete implementation of the `DiceOnSteroids` module for the VCV Rack modular synthesizer framework. It defines both the core logic (`DiceOnSteroids` class) and its visual representation (`DiceOnSteroidsWidget`, `DSDisplayWidget`, etc.).
 
+## Module Screenshot
+
+![DiceOnSteroids VCV Rack Module](images/diceonsteroids.png)
+
+
 Here's a breakdown of what this code does:
 
 ### 1. **Module Logic (`DiceOnSteroids` Class)**

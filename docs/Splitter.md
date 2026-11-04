@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:33
 
 The **Splitter** module is a polyphonic signal distributor that takes a single polyphonic input and splits it into up to 16 individual mono outputs. It allows users to route multi-channel audio signals to separate output channels, making it useful for signal routing in modular synthesizer systems.
 
+## Module Screenshot
+
+![Splitter VCV Rack Module](images/splitter.png)
+
 ## 2. Architecture
 
 ### Main Classes

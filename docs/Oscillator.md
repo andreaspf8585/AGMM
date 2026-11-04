@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:24
 
 This code defines a VCV Rack module for an oscillator with advanced waveform visualization and filtering capabilities. Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![Oscillator VCV Rack Module](images/oscillator.png)
+
 ## Core Functionality
 
 **Oscillator Module**: 

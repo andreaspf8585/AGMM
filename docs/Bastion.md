@@ -6,6 +6,10 @@ Generated: 2026-11-04 06:12
 
 This code defines a VCV Rack module called **Bastion**, which is a multi-engine filter with various visualization features. Here's a breakdown of its key components:
 
+## Module Screenshot
+
+![Bastion VCV Rack Module](images/bastion.png)
+
 ### 1. **Module Structure**
 - **`Bastion`**: The main module class that handles parameters, processing, and state.
 - **`BastionWidget`**: The UI widget for the module, including panel drawing and controls.

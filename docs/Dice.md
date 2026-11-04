@@ -19,6 +19,10 @@ Key features:
 - Musical scale quantization with 64 predefined scales
 - Visual display showing current configuration and output voltages
 
+## Module Screenshot
+
+![Dice VCV Rack Module](images/dice.png)
+
 ## 2. Architecture
 
 ### Main Classes

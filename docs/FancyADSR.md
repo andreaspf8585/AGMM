@@ -19,6 +19,10 @@ The `FancyADSR` module is a VCV Rack 2 plugin that implements an advanced ADSR (
 
 The module provides a visual representation of the current envelope shape and allows users to observe real-time envelope behavior through an oscilloscope-style display.
 
+## Module Screenshot
+
+![FancyADSR VCV Rack Module](images/fancyadsr.png)
+
 ## 2. Architecture
 
 ### Main Classes

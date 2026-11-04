@@ -10,6 +10,10 @@ Generated: 2026-11-04 06:22
 
 The `Merger` module is a polyphonic signal combiner for VCV Rack. It accepts up to 16 mono audio inputs and merges them into a single polyphonic output. The module dynamically adjusts the number of channels in the output based on which input channels are connected, with unconnected inputs contributing 0V to the merged signal.
 
+## Module Screenshot
+
+![Merger VCV Rack Module](images/merger.png)
+
 ## 2. Architecture
 
 ### Main Classes
