@@ -27,7 +27,7 @@ The provided C++ code defines a VCV Rack module named `Whirlpool`, which is a re
 
 ## Module Screenshot
 
-![Whirlpool VCV Rack Module](images/Whirlpool.png)
+![Whirlpool VCV Rack Module](images/whirlpool.png)
 
 ### 2. **Widget Definition (`WhirlpoolWidget`)**
 - Inherits from `rack::ModuleWidget`.
