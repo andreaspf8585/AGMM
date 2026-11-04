@@ -424,6 +424,14 @@
         "VCO",
         "polyphonic"
       ]
+    },
+    {
+      "slug": "XBodyProblem",
+      "name": "XBodyProblem",
+      "description": "LFO based on 3 body problem",
+      "tags": [
+        "LFO"
+      ]
     }
   ]
 }

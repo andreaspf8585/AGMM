@@ -60,6 +60,7 @@ AGMM is a collection of custom VCV Rack modules implemented in C++.
 | [VCAPoly](VCAPoly.md) | The VCAPoly module is a polyphonic voltage-controlled amplifier (VCA) designed for the VCV Rack platform. It provides per-channel gain control with envelope following and global or per-channel limit control. The module s |
 | [Vortex](Vortex.md) | Technical documentation for this AGMM component. |
 | [Whirlpool](Whirlpool.md) | Technical documentation for this AGMM component. |
+| [XBodyProblem](XBodyProblem.md) | Technical documentation for this AGMM component. |
 
 ## Standalone Header Documentation
 

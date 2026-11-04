@@ -57,3 +57,4 @@ extern Model* modelSwitchLines1to8;
 extern Model* modelQuantara;
 extern Model* modelMagicBox;
 extern Model* modelOscillator;
+extern Model* modelXBodyProblem;
