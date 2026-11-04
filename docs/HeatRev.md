@@ -17,6 +17,10 @@ The HeatRev module is a stereo reverb and delay processor that combines a cathed
 
 The module is designed for artistic sound design, adding depth and warmth to audio signals through a combination of algorithmic reverb and organic simulation.
 
+## Module Screenshot
+
+![Ambience VCV Rack Module](images/heatrev.png)
+
 ## 2. Architecture
 
 ### Main Classes
