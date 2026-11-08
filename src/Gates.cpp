@@ -1,69 +1,118 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 
-// 1/11/2026
+// ------------------------------------------------------------
+// Layout (24 HP = 360 x 380)
+// Every control sits in a plate with its label ABOVE it.
+// ------------------------------------------------------------
+static const float GT_W = RACK_GRID_WIDTH * 24; // 360
+static const float GT_H = RACK_GRID_HEIGHT;     // 380
 
-static const float GT_W = RACK_GRID_WIDTH * 24;   // 360 (double width)
-static const float GT_H = RACK_GRID_HEIGHT;       // 380
+// Display (bezel is drawn 4 px around it). Rows, top to bottom:
+//   y  9      header (channel, time per screen)
+//   20..      9 trace rows, pitch 16, height 14:
+//             label column | trace | state dot
+static const float GT_DX = 30.f, GT_DY = 32.f, GT_DW = 300.f, GT_DH = 170.f;
+static const float GT_ROW0 = 20.f, GT_ROW_PITCH = 16.f, GT_ROW_H = 14.f;
+static const float GT_LABEL_W = 32.f; // label column inside a row
+static const float GT_DOT_W = 18.f;   // state dot column inside a row
 
-static const float GT_DX = 30.f, GT_DY = 46.f, GT_DW = 300.f, GT_DH = 180.f;
+// Control row: A, B inputs (with LEDs) and the TIME knob
+static const float GT_CTRL_HEAD_Y = 220.f;
+static const float GT_CTRL_TOP = 230.f, GT_CTRL_H = 52.f, GT_CTRL_W = 60.f;
+static const float GT_INX[2] = {75.f, 145.f};
+static const float GT_KNOBX = 285.f;
+static const float GT_IN_Y = GT_CTRL_TOP + 31.f;
+static const float GT_KNOBY = GT_CTRL_TOP + 32.f;
 
-// Inputs (row above display)
-static const float GT_IN_Y = 260.f;
-static float gtInJx(int i) { return GT_W / 2.f - 50.f + 100.f * i; }
-
-// Time knob (below display, left)
-static const float GT_KNOBX = 60.f;
-static const float GT_KNOBY = 260.f;
-
-// Outputs (row below the display / knob)
-static const float GT_OUT_Y = 330.f;
-static float gtOutJx(int i) { return 30.f + 46.f * i; }
+// Output row: 7 jacks, each with its LED next to the label
+static const float GT_OUT_HEAD_Y = 296.f;
+static const float GT_OUT_TOP = 306.f, GT_OUT_H = 46.f, GT_OUT_W = 42.f;
+static const float GT_OUT_Y = GT_OUT_TOP + 31.f;
+static const float GT_OUT_LED_Y = GT_OUT_TOP + 10.f;
+static float gtOutJx(int i) { return 42.f + 46.f * i; }
 
 // Log mapping helper: knob t (0..1) -> ms/screen in [5, 50000]
 //   t=0   -> 50000 ms
 //   t=0.5 ->   500 ms  (default)
 //   t=1   ->     5 ms
-static inline float timeKnobToMs(float t) {
+static inline float timeKnobToMs(float t)
+{
     t = clamp(t, 0.f, 1.f);
     return 50000.f * std::pow(5.f / 50000.f, t);
 }
-static inline float msToTimeKnob(float ms) {
-    if (ms <= 0.f) return 0.f;
+static inline float msToTimeKnob(float ms)
+{
+    if (ms <= 0.f)
+        return 0.f;
     float t = std::log(ms / 50000.f) / std::log(5.f / 50000.f);
     return clamp(t, 0.f, 1.f);
 }
 
-struct TimeQuantity : ParamQuantity {
-    float getDisplayValue() override {
+struct TimeQuantity : ParamQuantity
+{
+    float getDisplayValue() override
+    {
         return timeKnobToMs(getValue());
     }
-    void setDisplayValue(float v) override {
+    void setDisplayValue(float v) override
+    {
         setValue(msToTimeKnob(v));
     }
-    std::string getDisplayValueString() override {
+    std::string getDisplayValueString() override
+    {
         float ms = getDisplayValue();
         char buf[32];
-        if (ms >= 1000.f) snprintf(buf, sizeof(buf), "%.2f s/screen", ms / 1000.f);
-        else              snprintf(buf, sizeof(buf), "%.1f ms/screen", ms);
+        if (ms >= 1000.f)
+            snprintf(buf, sizeof(buf), "%.2f s/screen", ms / 1000.f);
+        else
+            snprintf(buf, sizeof(buf), "%.1f ms/screen", ms);
         return std::string(buf);
     }
 };
 
-struct Gates : Module {
-    enum ParamId { PARAM_TIME, PARAMS_LEN };
-    enum InputId { INPUT_A, INPUT_B, INPUTS_LEN };
-    enum OutputId {
-        OUTPUT_AND, OUTPUT_OR, OUTPUT_NOT, OUTPUT_NAND,
-        OUTPUT_NOR, OUTPUT_XOR, OUTPUT_XNOR, OUTPUTS_LEN
+// ------------------------------------------------------------
+// Module (logic unchanged)
+// ------------------------------------------------------------
+struct Gates : Module
+{
+    enum ParamId
+    {
+        PARAM_TIME,
+        PARAMS_LEN
     };
-    enum LightId {
-        LIGHT_A, LIGHT_B,
-        LIGHT_AND, LIGHT_OR, LIGHT_NOT, LIGHT_NAND,
-        LIGHT_NOR, LIGHT_XOR, LIGHT_XNOR,
+    enum InputId
+    {
+        INPUT_A,
+        INPUT_B,
+        INPUTS_LEN
+    };
+    enum OutputId
+    {
+        OUTPUT_AND,
+        OUTPUT_OR,
+        OUTPUT_NOT,
+        OUTPUT_NAND,
+        OUTPUT_NOR,
+        OUTPUT_XOR,
+        OUTPUT_XNOR,
+        OUTPUTS_LEN
+    };
+    enum LightId
+    {
+        LIGHT_A,
+        LIGHT_B,
+        LIGHT_AND,
+        LIGHT_OR,
+        LIGHT_NOT,
+        LIGHT_NAND,
+        LIGHT_NOR,
+        LIGHT_XOR,
+        LIGHT_XNOR,
         LIGHTS_LEN
     };
 
@@ -81,7 +130,8 @@ struct Gates : Module {
     // TIME: ms per screen.
     float screenMs = 500.f;
 
-    Gates() {
+    Gates()
+    {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         // Default 0.5 == exactly 500 ms/screen (log mapping)
         configParam<TimeQuantity>(PARAM_TIME, 0.f, 1.f, 0.5f, "Time");
@@ -90,7 +140,7 @@ struct Gates : Module {
         configInput(INPUT_B, "Input B");
         configOutput(OUTPUT_AND, "AND");
         configOutput(OUTPUT_OR, "OR");
-        configOutput(OUTPUT_NOT, "NOT");
+        configOutput(OUTPUT_NOT, "NOT (A)");
         configOutput(OUTPUT_NAND, "NAND");
         configOutput(OUTPUT_NOR, "NOR");
         configOutput(OUTPUT_XOR, "XOR");
@@ -107,7 +157,8 @@ struct Gates : Module {
         configLight(LIGHT_XNOR, "XNOR active");
     }
 
-    void process(const ProcessArgs& args) override {
+    void process(const ProcessArgs &args) override
+    {
         // Same mapping used by TimeQuantity::getDisplayValue()
         screenMs = timeKnobToMs(params[PARAM_TIME].getValue());
 
@@ -118,30 +169,38 @@ struct Gates : Module {
         bool a0 = false, b0 = false;
         bool o0[7] = {};
 
-        for (int c = 0; c < channels; ++c) {
+        for (int c = 0; c < channels; ++c)
+        {
             bool a = inputs[INPUT_A].getVoltage(c) > 1.f;
             bool b = inputs[INPUT_B].getVoltage(c) > 1.f;
 
-            bool g_and  = (a && b);
-            bool g_or   = (a || b);
-            bool g_not  = !a;
+            bool g_and = (a && b);
+            bool g_or = (a || b);
+            bool g_not = !a;
             bool g_nand = !(a && b);
-            bool g_nor  = !(a || b);
-            bool g_xor  = (a != b);
+            bool g_nor = !(a || b);
+            bool g_xor = (a != b);
             bool g_xnor = (a == b);
 
-            outputs[OUTPUT_AND].setVoltage(g_and   ? 10.f : 0.f, c);
-            outputs[OUTPUT_OR].setVoltage(g_or     ? 10.f : 0.f, c);
-            outputs[OUTPUT_NOT].setVoltage(g_not   ? 10.f : 0.f, c);
+            outputs[OUTPUT_AND].setVoltage(g_and ? 10.f : 0.f, c);
+            outputs[OUTPUT_OR].setVoltage(g_or ? 10.f : 0.f, c);
+            outputs[OUTPUT_NOT].setVoltage(g_not ? 10.f : 0.f, c);
             outputs[OUTPUT_NAND].setVoltage(g_nand ? 10.f : 0.f, c);
-            outputs[OUTPUT_NOR].setVoltage(g_nor   ? 10.f : 0.f, c);
-            outputs[OUTPUT_XOR].setVoltage(g_xor   ? 10.f : 0.f, c);
+            outputs[OUTPUT_NOR].setVoltage(g_nor ? 10.f : 0.f, c);
+            outputs[OUTPUT_XOR].setVoltage(g_xor ? 10.f : 0.f, c);
             outputs[OUTPUT_XNOR].setVoltage(g_xnor ? 10.f : 0.f, c);
 
-            if (c == 0) {
-                a0 = a; b0 = b;
-                o0[0] = g_and; o0[1] = g_or; o0[2] = g_not;
-                o0[3] = g_nand; o0[4] = g_nor; o0[5] = g_xor; o0[6] = g_xnor;
+            if (c == 0)
+            {
+                a0 = a;
+                b0 = b;
+                o0[0] = g_and;
+                o0[1] = g_or;
+                o0[2] = g_not;
+                o0[3] = g_nand;
+                o0[4] = g_nor;
+                o0[5] = g_xor;
+                o0[6] = g_xnor;
             }
         }
 
@@ -150,7 +209,8 @@ struct Gates : Module {
 
         aNow = a0;
         bNow = b0;
-        for (int i = 0; i < 7; ++i) outNow[i] = o0[i];
+        for (int i = 0; i < 7; ++i)
+            outNow[i] = o0[i];
 
         lights[LIGHT_A].setBrightness(a0 ? 1.f : 0.f);
         lights[LIGHT_B].setBrightness(b0 ? 1.f : 0.f);
@@ -163,13 +223,15 @@ struct Gates : Module {
         lights[LIGHT_XNOR].setBrightness(o0[6] ? 1.f : 0.f);
 
         // Sample history at a rate determined by screenMs.
-        double slotSec = (screenMs / 1000.0) / (double) HIST;
+        double slotSec = (screenMs / 1000.0) / (double)HIST;
         histAccum += args.sampleTime;
-        while (histAccum >= slotSec) {
+        while (histAccum >= slotSec)
+        {
             histAccum -= slotSec;
             histA[histPos] = a0;
             histB[histPos] = b0;
-            for (int i = 0; i < 7; ++i) histOut[i][histPos] = o0[i];
+            for (int i = 0; i < 7; ++i)
+                histOut[i][histPos] = o0[i];
             histPos = (histPos + 1) % HIST;
         }
     }
@@ -177,276 +239,172 @@ struct Gates : Module {
     double histAccum = 0.0;
 };
 
-namespace {
+// ------------------------------------------------------------
+// UI (anonymous namespace: names cannot clash with other module files)
+// ------------------------------------------------------------
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colHi()       { return nvgRGB(0x50, 0xff, 0x90); }
-NVGcolor colLo()       { return nvgRGB(0x3a, 0x40, 0x4a); }
+    struct GTPanel : TransparentWidget
+    {
+        GTPanel() { box.size = Vec(GT_W, GT_H); }
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            agmm::panelBase(vg, GT_W, GT_H, "GATES");
+            agmm::bezel(vg, GT_DX, GT_DY, GT_DW, GT_DH);
 
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
+            // ---- control row: inputs A / B and TIME ----
+            agmm::sectionHeader(vg, GT_W, GT_CTRL_HEAD_Y, "CONTROL", 14.f);
+            agmm::cell(vg, GT_INX[0], GT_CTRL_TOP, GT_CTRL_W, GT_CTRL_H, "IN A");
+            agmm::cell(vg, GT_INX[1], GT_CTRL_TOP, GT_CTRL_W, GT_CTRL_H, "IN B");
+            agmm::cell(vg, GT_KNOBX, GT_CTRL_TOP, GT_CTRL_W, GT_CTRL_H, "TIME");
 
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
+            // ---- output row (tinted plates, label on top) ----
+            agmm::sectionHeader(vg, GT_W, GT_OUT_HEAD_Y, "OUTPUT", 14.f);
+            const char *outs[7] = {"AND", "OR", "NOT", "NAND", "NOR", "XOR", "XNOR"};
+            for (int i = 0; i < 7; ++i)
+                agmm::cell(vg, gtOutJx(i), GT_OUT_TOP, GT_OUT_W, GT_OUT_H, outs[i], true);
 
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-        nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
+            Widget::draw(args);
+        }
+    };
 
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void label(NVGcontext* vg, float x, float y, const char* t, float size = 7.f) {
-    drawText(vg, x, y, t, size, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenOverlay(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
-struct GTPanel : TransparentWidget {
-    GTPanel() { box.size = Vec(GT_W, GT_H); }
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        drawPanelBase(vg, GT_W, GT_H, "GATES");
-        drawBezel(vg, GT_DX, GT_DY, GT_DW, GT_DH);
-
-        // Input plates + labels (top)
-        const char* inNames[2] = {"A", "B"};
-        for (int i = 0; i < 2; ++i) {
-            float x = gtInJx(i);
-            plate(vg, x - 17.f, GT_IN_Y - 27.f, 34.f, 44.f);
-            label(vg, x, GT_IN_Y - 19.f, inNames[i]);
+    struct GTDisplay : TransparentWidget
+    {
+        Gates *module = nullptr;
+        GTDisplay(Gates *m) : module(m)
+        {
+            box.pos = Vec(GT_DX, GT_DY);
+            box.size = Vec(GT_DW, GT_DH);
         }
 
-        // Time knob ring + label
-        ring(vg, GT_KNOBX, GT_KNOBY, 18.f);
-        label(vg, GT_KNOBX, GT_KNOBY + 25.f, "TIME");
+        static const int ROWS = 9;
 
-        // Output labels under the jacks
-        const char* outs[7] = {"AND", "OR", "NOT", "NAND", "NOR", "XOR", "XNOR"};
-        for (int i = 0; i < 7; ++i)
-            label(vg, gtOutJx(i), GT_OUT_Y + 26.f, outs[i], 6.f);
-
-        Widget::draw(args);
-    }
-};
-
-struct GTDisplay : TransparentWidget {
-    Gates* module = nullptr;
-    GTDisplay(Gates* m) : module(m) {
-        box.pos = Vec(GT_DX, GT_DY);
-        box.size = Vec(GT_DW, GT_DH);
-    }
-
-    static const int ROWS = 9;
-
-    void drawRow(NVGcontext* vg, float x, float y, float w, float h,
-                 const char* title, bool curHigh,
-                 const bool* hist, int len, int pos, NVGcolor color) {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 2.f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-        nvgFill(vg);
-
-        float traceW = w - 50.f;
-        float traceX = x + 2.f;
-        float hiY = y + 2.5f;
-        float loY = y + h - 2.5f;
-
-        if (hist && len > 1) {
-            float step = traceW / (float)(len - 1);
+        // One trace row: label column on the left, trace in the middle, state dot on the right
+        void drawRow(NVGcontext *vg, float x, float y, float w, float h,
+                     const char *title, bool curHigh,
+                     const bool *hist, int len, int pos, NVGcolor color)
+        {
             nvgBeginPath(vg);
-            bool prev = false;
-            for (int i = 0; i < len; ++i) {
-                int idx = (pos + i) % len;
-                bool v = hist[idx];
-                float px = traceX + i * step;
-                float py = v ? hiY : loY;
-                if (i == 0) {
-                    nvgMoveTo(vg, px, py);
-                } else if (v != prev) {
-                    float mx = traceX + (i - 0.5f) * step;
-                    nvgLineTo(vg, mx, prev ? hiY : loY);
-                    nvgLineTo(vg, mx, py);
-                    nvgLineTo(vg, px, py);
-                } else {
-                    nvgLineTo(vg, px, py);
+            nvgRect(vg, x, y, w, h);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, 10));
+            nvgFill(vg);
+
+            agmm::text(vg, x + 5.f, y + h * 0.5f + 0.5f, title, 7.f, agmm::textCol(), agmm::ALIGN_L, 0.3f);
+
+            const float traceX = x + GT_LABEL_W;
+            const float traceW = w - GT_LABEL_W - GT_DOT_W;
+            const float hiY = y + 2.5f;
+            const float loY = y + h - 2.5f;
+
+            if (hist && len > 1)
+            {
+                float step = traceW / (float)(len - 1);
+                nvgBeginPath(vg);
+                bool prev = false;
+                for (int i = 0; i < len; ++i)
+                {
+                    int idx = (pos + i) % len;
+                    bool v = hist[idx];
+                    float px = traceX + i * step;
+                    float py = v ? hiY : loY;
+                    if (i == 0)
+                    {
+                        nvgMoveTo(vg, px, py);
+                    }
+                    else if (v != prev)
+                    {
+                        float mx = traceX + (i - 0.5f) * step;
+                        nvgLineTo(vg, mx, prev ? hiY : loY);
+                        nvgLineTo(vg, mx, py);
+                        nvgLineTo(vg, px, py);
+                    }
+                    else
+                    {
+                        nvgLineTo(vg, px, py);
+                    }
+                    prev = v;
                 }
-                prev = v;
+                nvgStrokeColor(vg, color);
+                nvgStrokeWidth(vg, 1.5f);
+                nvgStroke(vg);
             }
-            nvgStrokeColor(vg, color);
-            nvgStrokeWidth(vg, 2.f);
-            nvgStroke(vg);
+
+            nvgBeginPath(vg);
+            nvgCircle(vg, x + w - GT_DOT_W / 2.f, y + h * 0.5f, 3.f);
+            nvgFillColor(vg, curHigh ? color : nvgRGBA(255, 255, 255, 40));
+            nvgFill(vg);
         }
 
-        float dotX = traceX + traceW + 8.f;
-        nvgBeginPath(vg);
-        nvgCircle(vg, dotX, y + h * 0.5f, 3.f);
-        nvgFillColor(vg, curHigh ? colHi() : colLo());
-        nvgFill(vg);
-
-        drawText(vg, x + w - 6.f, y + h * 0.5f, title, 7.f, colText(),
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-    }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-
-        screenBase(vg, GT_DW, GT_DH);
-        screenOverlay(vg, GT_DW, GT_DH);
-
-        const char* titles[ROWS] = {"A", "B", "AND", "OR", "NOT", "NAND", "NOR", "XOR", "XNOR"};
-        NVGcolor colors[ROWS] = {
-            colAccent(), colAccent(),
-            colHi(), colHi(), colHi(), colHi(), colHi(), colHi(), colHi()
-        };
-
-        bool cur[ROWS] = {};
-        const bool* hist[ROWS] = {};
-        int len = 0, pos = 0;
-
-        if (module) {
-            cur[0] = module->aNow;
-            cur[1] = module->bNow;
-            for (int i = 0; i < 7; ++i) cur[2 + i] = module->outNow[i];
-
-            hist[0] = module->histA;
-            hist[1] = module->histB;
-            for (int i = 0; i < 7; ++i) hist[2 + i] = module->histOut[i];
-
-            len = Gates::HIST;
-            pos = module->histPos;
+        void draw(const DrawArgs &args) override
+        {
+            agmm::screen(args.vg, 0.f, 0.f, GT_DW, GT_DH);
+            Widget::draw(args);
         }
 
-        const float topPad = 4.f;
-        const float rowH = (GT_DH - topPad * 2.f) / (float)ROWS;
-        const float rowGap = 1.f;
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
+                return;
+            }
+            NVGcontext *vg = args.vg;
 
-        for (int r = 0; r < ROWS; ++r) {
-            float y = topPad + r * rowH + rowGap * 0.5f;
-            float h = rowH - rowGap;
-            drawRow(vg, 4.f, y, GT_DW - 8.f, h, titles[r], cur[r],
-                    hist[r], len, pos, colors[r]);
-        }
+            const char *titles[ROWS] = {"A", "B", "AND", "OR", "NOT", "NAND", "NOR", "XOR", "XNOR"};
+            NVGcolor colors[ROWS] = {
+                agmm::violet(), agmm::violet(),
+                agmm::accent(), agmm::accent(), agmm::accent(), agmm::accent(),
+                agmm::accent(), agmm::accent(), agmm::accent()};
 
-        // TIME readout
-        if (module) {
+            bool cur[ROWS] = {};
+            const bool *hist[ROWS] = {};
+            int len = 0, pos = 0;
+            float ms = 500.f;
+
+            if (module)
+            {
+                cur[0] = module->aNow;
+                cur[1] = module->bNow;
+                for (int i = 0; i < 7; ++i)
+                    cur[2 + i] = module->outNow[i];
+
+                hist[0] = module->histA;
+                hist[1] = module->histB;
+                for (int i = 0; i < 7; ++i)
+                    hist[2 + i] = module->histOut[i];
+
+                len = Gates::HIST;
+                pos = module->histPos;
+                ms = module->screenMs;
+            }
+
+            // ---- header row ----
             char buf[32];
-            float ms = module->screenMs;
-            if (ms >= 1000.f) snprintf(buf, sizeof(buf), "%.2f s/scr", ms / 1000.f);
-            else              snprintf(buf, sizeof(buf), "%.1f ms/scr", ms);
-            drawText(vg, GT_DW - 6.f, GT_DH - 6.f, buf, 6.f, colDim(),
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-        }
+            agmm::text(vg, 8.f, 9.f, "CHANNEL 1", 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
+            if (ms >= 1000.f)
+                snprintf(buf, sizeof(buf), "%.2f S / SCREEN", ms / 1000.f);
+            else
+                snprintf(buf, sizeof(buf), "%.1f MS / SCREEN", ms);
+            agmm::text(vg, GT_DW - 8.f, 9.f, buf, 7.f, agmm::accent(), agmm::ALIGN_R, 0.5f);
 
-        Widget::draw(args);
-    }
-};
+            // ---- trace rows ----
+            for (int r = 0; r < ROWS; ++r)
+                drawRow(vg, 4.f, GT_ROW0 + r * GT_ROW_PITCH, GT_DW - 8.f, GT_ROW_H, titles[r], cur[r],
+                        hist[r], len, pos, colors[r]);
+
+            Widget::drawLayer(args, layer);
+        }
+    };
 
 } // namespace
 
-struct GatesWidget : ModuleWidget {
-    GatesWidget(Gates* module) {
+struct GatesWidget : ModuleWidget
+{
+    GatesWidget(Gates *module)
+    {
         setModule(module);
         box.size = Vec(GT_W, GT_H);
 
@@ -458,16 +416,16 @@ struct GatesWidget : ModuleWidget {
 
         addChild(new GTDisplay(module));
 
-        // Inputs
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(gtInJx(0), GT_IN_Y), module, Gates::INPUT_A));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(gtInJx(1), GT_IN_Y), module, Gates::INPUT_B));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtInJx(0) - 30, GT_IN_Y), module, Gates::LIGHT_A));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtInJx(1) + 30, GT_IN_Y), module, Gates::LIGHT_B));
+        // Inputs: jack left of centre, its activity LED on the right of the same plate
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(GT_INX[0] - 9.f, GT_IN_Y), module, Gates::INPUT_A));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(GT_INX[1] - 9.f, GT_IN_Y), module, Gates::INPUT_B));
+        addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(GT_INX[0] + 17.f, GT_IN_Y), module, Gates::LIGHT_A));
+        addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(GT_INX[1] + 17.f, GT_IN_Y), module, Gates::LIGHT_B));
 
-        // Time knob (below display, left)
+        // Time knob
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(GT_KNOBX, GT_KNOBY), module, Gates::PARAM_TIME));
 
-        // Outputs below display
+        // Outputs
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(0), GT_OUT_Y), module, Gates::OUTPUT_AND));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(1), GT_OUT_Y), module, Gates::OUTPUT_OR));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(2), GT_OUT_Y), module, Gates::OUTPUT_NOT));
@@ -476,14 +434,13 @@ struct GatesWidget : ModuleWidget {
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(5), GT_OUT_Y), module, Gates::OUTPUT_XOR));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(6), GT_OUT_Y), module, Gates::OUTPUT_XNOR));
 
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(0), GT_OUT_Y - 22.f), module, Gates::LIGHT_AND));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(1), GT_OUT_Y - 22.f), module, Gates::LIGHT_OR));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(2), GT_OUT_Y - 22.f), module, Gates::LIGHT_NOT));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(3), GT_OUT_Y - 22.f), module, Gates::LIGHT_NAND));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(4), GT_OUT_Y - 22.f), module, Gates::LIGHT_NOR));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(5), GT_OUT_Y - 22.f), module, Gates::LIGHT_XOR));
-        addChild(createLightCentered<SmallLight<GreenLight>>(Vec(gtOutJx(6), GT_OUT_Y - 22.f), module, Gates::LIGHT_XNOR));
+        // Output LEDs sit on the label row, to the right of the text
+        const int ledIds[7] = {Gates::LIGHT_AND, Gates::LIGHT_OR, Gates::LIGHT_NOT, Gates::LIGHT_NAND,
+                               Gates::LIGHT_NOR, Gates::LIGHT_XOR, Gates::LIGHT_XNOR};
+        for (int i = 0; i < 7; ++i)
+            addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
+                Vec(gtOutJx(i) + 16.f, GT_OUT_LED_Y), module, ledIds[i]));
     }
 };
 
-Model* modelGates = createModel<Gates, GatesWidget>("Gates");
+Model *modelGates = createModel<Gates, GatesWidget>("Gates");
