@@ -32,8 +32,8 @@ struct DarkHall : Module
     // ---- display state ----
     float scopeMin[DH_SCOPE_N] = {};
     float scopeMax[DH_SCOPE_N] = {};
-    int   scopeHead = 0;
-    int   scopeCount = 0;
+    int scopeHead = 0;
+    int scopeCount = 0;
     float scopeBMin = 0.f, scopeBMax = 0.f;
     float peakL = 0.f, peakR = 0.f;
 
@@ -64,16 +64,19 @@ struct DarkHall : Module
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN);
 
-        configParam(MIX_PARAM, 0.f, 1.f, 0.4f, "Mix");
-        configParam(SIZE_PARAM, 0.f, 1.f, 0.7f, "Room Size");
-        configParam(DAMP_PARAM, 0.f, 1.f, 0.6f, "Damping");
-        configParam(MOD_PARAM, 0.f, 1.f, 0.3f, "Modulation");
+        configParam(MIX_PARAM, 0.f, 1.f, 0.4f, "Mix", "%", 0.f, 100.f);
+        configParam(SIZE_PARAM, 0.f, 1.f, 0.7f, "Room size", "%", 0.f, 100.f);
+        configParam(DAMP_PARAM, 0.f, 1.f, 0.6f, "Damping", "%", 0.f, 100.f);
+        configParam(MOD_PARAM, 0.f, 1.f, 0.3f, "Modulation", "%", 0.f, 100.f);
 
-        configInput(IN_L, "Left In");
-        configInput(IN_R, "Right In");
+        configInput(IN_L, "Left");
+        configInput(IN_R, "Right");
 
-        configOutput(OUT_L, "Left Out");
-        configOutput(OUT_R, "Right Out");
+        configOutput(OUT_L, "Left");
+        configOutput(OUT_R, "Right");
+
+        configBypass(IN_L, OUT_L);
+        configBypass(IN_R, OUT_R);
     }
 
     float allpass(float input, float *buf, int &idx, float gain)
@@ -194,13 +197,16 @@ struct DarkHall : Module
         peakR = std::max(std::fabs(vR), peakR * decay);
 
         float mono = 0.5f * (vL + vR);
-        if (scopeCount == 0) scopeBMin = scopeBMax = mono;
-        else {
+        if (scopeCount == 0)
+            scopeBMin = scopeBMax = mono;
+        else
+        {
             scopeBMin = std::min(scopeBMin, mono);
             scopeBMax = std::max(scopeBMax, mono);
         }
         int bucket = std::max(1, (int)(args.sampleRate * 0.0025f));
-        if (++scopeCount >= bucket) {
+        if (++scopeCount >= bucket)
+        {
             scopeCount = 0;
             scopeMin[scopeHead] = scopeBMin;
             scopeMax[scopeHead] = scopeBMax;
@@ -210,331 +216,309 @@ struct DarkHall : Module
 };
 
 // ============================================================
-// Layout constants (12 HP = 180 px)
+// Layout (12 HP = 180 x 380 px)
+//
+//   y   0-15   screws
+//   y  15      title
+//   y  30-62   display (scope + meters)
+//   y  76      readouts (own row, under the display)
+//   y  88      section: REVERB
+//   y  96-172  row 1: label / knob
+//   y 180-256  row 2
+//   y 288      section: I / O
+//   y 296-348  4 jack cells (2 inputs left, 2 outputs right)
+//   y 367      maker tag
+//
+// Every control lives inside its plate; no label shares space with a widget.
 // ============================================================
-static const float DH_PANEL_W = RACK_GRID_WIDTH * 12;   // 180
-static const float DH_PANEL_H = RACK_GRID_HEIGHT;       // 380
+static const float DH_PANEL_W = RACK_GRID_WIDTH * 12; // 180
+static const float DH_PANEL_H = RACK_GRID_HEIGHT;     // 380
+
+static const float DH_TITLE_Y = 15.f;
+static const float DH_MAKER_Y = 367.f;
 
 static const float DH_DISP_W = 150.f;
-static const float DH_DISP_H = 34.f;
-static const float DH_DISP_X = (DH_PANEL_W - DH_DISP_W) / 2.f;
-static const float DH_DISP_Y = 46.f;
+static const float DH_DISP_H = 32.f;
+static const float DH_DISP_X = (DH_PANEL_W - DH_DISP_W) / 2.f; // 15
+static const float DH_DISP_Y = 30.f;
+static const float DH_READ_Y = 76.f; // panel coordinates
 
-static const float DH_CELL_W = 60.f;
-static const float DH_CELL_H = 70.f;
-static const float DH_ROW[2] = {145.f, 225.f};
-static const float DH_COL[2] = {45.f, 135.f};
-static const float DH_PORT_Y = 322.f;
+static const float DH_SEC1_Y = 88.f;
+static const float DH_CELL_W = 76.f, DH_CELL_H = 76.f;
+static const float DH_COL[2] = {48.f, 132.f};
+static const float DH_ROW_TOP[2] = {96.f, 180.f};
+static const float DH_CELL_LABEL = 10.f; // offsets from the plate top
+static const float DH_CELL_KNOB = 42.f;
+
+static const float DH_SEC2_Y = 288.f;
+static const float DH_IO_TOP = 296.f, DH_IO_H = 52.f, DH_IO_W = 38.f;
+static const float DH_IO_LABEL = 10.f, DH_IO_JACK = 34.f;
+static float dhIoX(int i) { return 25.5f + 43.f * i; }
 
 // ============================================================
 // Theme + drawing helpers (anonymous namespace)
 // ============================================================
-namespace {
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colAccent2()  { return nvgRGB(0xb0, 0x5a, 0xff); }
+    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    NVGcolor colAccent2() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font)
+    const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
+
+    bool setFont(NVGcontext *vg)
+    {
+        if (!APP || !APP->window)
+            return false;
+        std::shared_ptr<window::Font> font =
+            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+        if (!font)
+            return false;
         nvgFontFaceId(vg, font->handle);
-}
+        return true;
+    }
 
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
+    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
+                  int align = ALIGN_C, float spacing = 0.5f)
+    {
+        if (!setFont(vg))
+            return;
+        nvgFontSize(vg, size);
+        nvgTextLetterSpacing(vg, spacing);
+        nvgTextAlign(vg, align);
+        nvgFillColor(vg, col);
+        nvgText(vg, x, y, s, NULL);
+    }
 
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                       nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                         nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s,       ty,            s, s);
-    nvgRect(vg, tx,           ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-struct DhCellDef { const char* name; int param; };
-const DhCellDef DH_CELLS[4] = {
-    {"MIX",   DarkHall::MIX_PARAM},
-    {"SIZE",  DarkHall::SIZE_PARAM},
-    {"DAMP",  DarkHall::DAMP_PARAM},
-    {"MOD",   DarkHall::MOD_PARAM},
-};
-
-// ------------------------------------------------------------
-// Panel background
-// ------------------------------------------------------------
-struct DhPanelBackground : TransparentWidget {
-    DhPanelBackground() { box.size = Vec(DH_PANEL_W, DH_PANEL_H); }
-
-    void plate(NVGcontext* vg, float cx, float ry) {
+    // Control plate; tint = output jacks
+    void plate(NVGcontext *vg, float cx, float top, float w, float h, bool tint = false)
+    {
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, cx - DH_CELL_W / 2.f, ry - DH_CELL_H / 2.f,
-                       DH_CELL_W, DH_CELL_H, 7.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 55));
+        nvgRoundedRect(vg, cx - w / 2.f, top, w, h, 5.f);
+        nvgFillColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 22) : nvgRGBA(0, 0, 0, 55));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 20));
+        nvgStrokeColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 60) : nvgRGBA(255, 255, 255, 22));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
-    void section(NVGcontext* vg, float y, const char* txt) {
-        float x1 = 14.f, x2 = DH_PANEL_W - 14.f, cx = DH_PANEL_W / 2.f;
-        float w = 10.f + (float) strlen(txt) * 7.f;
-        drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
+    // Section title with hairlines that stop a measured distance from the text
+    void sectionHeader(NVGcontext *vg, float W, float y, const char *txt)
+    {
+        const float x1 = 12.f, x2 = W - 12.f, cx = W / 2.f;
+        if (!setFont(vg))
+            return;
+        nvgFontSize(vg, 8.f);
+        nvgTextLetterSpacing(vg, 2.f);
+        float b[4];
+        nvgTextBounds(vg, 0.f, 0.f, txt, NULL, b);
+        float gap = (b[2] - b[0]) / 2.f + 6.f;
+
+        drawText(vg, cx, y, txt, 8.f, colAccent(), ALIGN_C, 2.f);
         nvgBeginPath(vg);
         nvgMoveTo(vg, x1, y);
-        nvgLineTo(vg, cx - w / 2.f, y);
-        nvgMoveTo(vg, cx + w / 2.f, y);
+        nvgLineTo(vg, cx - gap, y);
+        nvgMoveTo(vg, cx + gap, y);
         nvgLineTo(vg, x2, y);
         nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
+    struct DhCellDef
+    {
+        const char *name;
+        int param;
+    };
+    const DhCellDef DH_CELLS[4] = {
+        {"MIX", DarkHall::MIX_PARAM},
+        {"SIZE", DarkHall::SIZE_PARAM},
+        {"DAMP", DarkHall::DAMP_PARAM},
+        {"MOD", DarkHall::MOD_PARAM},
+    };
+    const char *DH_IO_NAMES[4] = {"L IN", "R IN", "L OUT", "R OUT"};
 
-        // Base gradient
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, DH_PANEL_W, DH_PANEL_H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, DH_PANEL_H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
+    // ------------------------------------------------------------
+    // Panel background (static artwork only)
+    // ------------------------------------------------------------
+    struct DhPanelBackground : TransparentWidget
+    {
+        DhPanelBackground() { box.size = Vec(DH_PANEL_W, DH_PANEL_H); }
 
-        // Brushed texture
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int) DH_PANEL_H; y += 3) {
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, DH_PANEL_W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-
-        // Edge highlight
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, DH_PANEL_W - 1.f, DH_PANEL_H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Logo + title
-        drawLogo(vg, DH_PANEL_W / 2.f, 13.f);
-        drawText(vg, DH_PANEL_W / 2.f, 31.f, "DARK HALL", 13.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-        // Display bezel
-        float bx = DH_DISP_X - 5.f, by = DH_DISP_Y - 5.f;
-        float bw = DH_DISP_W + 10.f, bh = DH_DISP_H + 10.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                           nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-
-        // 4 control cells
-        for (int i = 0; i < 4; ++i) {
-            int row = i / 2, col = i % 2;
-            float cx = DH_COL[col], ry = DH_ROW[row];
-            plate(vg, cx, ry);
-            drawText(vg, cx, ry + 18.f, DH_CELLS[i].name, 8.f, colDim(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-        }
-
-        // I/O section
-        section(vg, 290.f, "I / O");
-        const char* io[4] = {"L IN", "R IN", "L OUT", "R OUT"};
-        for (int i = 0; i < 4; ++i) {
-            float cx = 22.5f + i * 45.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - 20.f, 296.f, 40.f, 42.f, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+            nvgRect(vg, 0, 0, DH_PANEL_W, DH_PANEL_H);
+            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, DH_PANEL_H, colBgTop(), colBgBottom()));
             nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+
+            drawText(vg, DH_PANEL_W / 2.f, DH_TITLE_Y, "DARK HALL", 12.f, colText(), ALIGN_C, 3.f);
+            drawText(vg, DH_PANEL_W / 2.f, DH_MAKER_Y, "AGMM", 9.f, colDim(), ALIGN_C, 3.f);
+
+            // Display bezel
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, DH_DISP_X - 4.f, DH_DISP_Y - 4.f,
+                           DH_DISP_W + 8.f, DH_DISP_H + 8.f, 5.f);
+            nvgFillColor(vg, nvgRGB(0x0b, 0x0c, 0x0e));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
-            drawText(vg, cx, 304.f, io[i], 8.f, colDim(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-        }
 
-        Widget::draw(args);
-    }
-};
-
-// ------------------------------------------------------------
-// Scope display + L/R level meters
-// ------------------------------------------------------------
-struct DhDisplayWidget : TransparentWidget {
-    DarkHall* module = nullptr;
-
-    DhDisplayWidget(DarkHall* m) : module(m) {
-        box.pos = Vec(DH_DISP_X, DH_DISP_Y);
-        box.size = Vec(DH_DISP_W, DH_DISP_H);
-    }
-
-    static float scopeW() { return DH_DISP_W - 16.f; }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, DH_DISP_W, DH_DISP_H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, DH_DISP_W / 2.f, DH_DISP_H / 2.f, 20.f,
-                                           DH_DISP_W * 0.6f,
-                                           nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        for (float x = 0.f; x <= scopeW(); x += 28.f) {
-            nvgMoveTo(vg, x + 0.5f, 0);
-            nvgLineTo(vg, x + 0.5f, DH_DISP_H);
-        }
-        nvgMoveTo(vg, 0, DH_DISP_H / 2.f + 0.5f);
-        nvgLineTo(vg, scopeW(), DH_DISP_H / 2.f + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        Widget::draw(args);
-    }
-
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) {
-            Widget::drawLayer(args, layer);
-            return;
-        }
-        NVGcontext* vg = args.vg;
-
-        const float mid  = DH_DISP_H / 2.f;
-        const float amp  = mid - 2.f;
-        const float sw   = scopeW();
-        const float colW = sw / (float) DH_SCOPE_N;
-
-        nvgSave(vg);
-        nvgScissor(vg, 0, 0, sw, DH_DISP_H);
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            for (int i = 0; i < DH_SCOPE_N; ++i) {
-                float vmin, vmax;
-                if (module) {
-                    int idx = (module->scopeHead + i) % DH_SCOPE_N;
-                    vmin = module->scopeMin[idx];
-                    vmax = module->scopeMax[idx];
-                } else {
-                    float t = (float) i / DH_SCOPE_N;
-                    float e = 3.5f * std::exp(-3.f * t) * (0.6f + 0.4f * std::sin(t * 90.f));
-                    vmax = e;
-                    vmin = -e;
-                }
-                float y0 = mid - std::min(std::max(vmax / 5.f, -1.f), 1.f) * amp;
-                float y1 = mid - std::min(std::max(vmin / 5.f, -1.f), 1.f) * amp;
-                float h = std::max(y1 - y0, 1.f);
-                float x = i * colW;
-                if (pass == 0)
-                    nvgRect(vg, x - 0.5f, y0 - 1.5f, colW + 1.f, h + 3.f);
-                else
-                    nvgRect(vg, x, y0, std::max(colW - 0.4f, 1.f), h);
+            // ---- REVERB: 2 x 2 cells (label above the knob) ----
+            sectionHeader(vg, DH_PANEL_W, DH_SEC1_Y, "REVERB");
+            for (int i = 0; i < 4; ++i)
+            {
+                float cx = DH_COL[i % 2];
+                float top = DH_ROW_TOP[i / 2];
+                plate(vg, cx, top, DH_CELL_W, DH_CELL_H);
+                drawText(vg, cx, top + DH_CELL_LABEL, DH_CELLS[i].name, 8.f, colDim(), ALIGN_C, 0.5f);
             }
-            nvgFillColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 32) : nvgRGB(0x8a, 0xee, 0xff));
-            nvgFill(vg);
-        }
-        nvgResetScissor(vg);
-        nvgRestore(vg);
 
-        // L / R level meters
-        for (int ch = 0; ch < 2; ++ch) {
-            float peak = module ? (ch == 0 ? module->peakL : module->peakR) : (ch == 0 ? 3.f : 2.4f);
-            float lvl = std::min(peak / 10.f, 1.f);
-            float x = sw + 3.f + ch * 6.f;
+            // ---- I / O (inputs left, outputs right, outputs tinted) ----
+            sectionHeader(vg, DH_PANEL_W, DH_SEC2_Y, "I / O");
+            for (int i = 0; i < 4; ++i)
+            {
+                float cx = dhIoX(i);
+                plate(vg, cx, DH_IO_TOP, DH_IO_W, DH_IO_H, i >= 2);
+                drawText(vg, cx, DH_IO_TOP + DH_IO_LABEL, DH_IO_NAMES[i], 7.f, colDim(), ALIGN_C, 0.5f);
+            }
+
+            Widget::draw(args);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // Scope + L/R level meters. Readouts live in their own row below
+    // the display, never over the waveform.
+    // ------------------------------------------------------------
+    struct DhDisplayWidget : TransparentWidget
+    {
+        DarkHall *module = nullptr;
+
+        DhDisplayWidget(DarkHall *m) : module(m)
+        {
+            box.pos = Vec(DH_DISP_X, DH_DISP_Y);
+            box.size = Vec(DH_DISP_W, DH_DISP_H);
+        }
+
+        static float scopeW() { return DH_DISP_W - 16.f; }
+
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+
             nvgBeginPath(vg);
-            nvgRect(vg, x, 1.f, 4.f, DH_DISP_H - 2.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
+            nvgRect(vg, 0, 0, DH_DISP_W, DH_DISP_H);
+            nvgFillColor(vg, nvgRGB(0x05, 0x08, 0x0c));
             nvgFill(vg);
-            if (lvl > 0.01f) {
-                float h = lvl * (DH_DISP_H - 2.f);
+
+            nvgBeginPath(vg);
+            for (float x = 0.f; x <= scopeW(); x += 28.f)
+            {
+                nvgMoveTo(vg, x + 0.5f, 0);
+                nvgLineTo(vg, x + 0.5f, DH_DISP_H);
+            }
+            nvgMoveTo(vg, 0, DH_DISP_H / 2.f + 0.5f);
+            nvgLineTo(vg, scopeW(), DH_DISP_H / 2.f + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            Widget::draw(args);
+        }
+
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer == 1)
+            {
+                NVGcontext *vg = args.vg;
+
+                const float mid = DH_DISP_H / 2.f;
+                const float amp = mid - 2.f;
+                const float sw = scopeW();
+                const float colW = sw / (float)DH_SCOPE_N;
+
+                // Waveform
+                nvgSave(vg);
+                nvgScissor(vg, 0, 0, sw, DH_DISP_H);
                 nvgBeginPath(vg);
-                nvgRect(vg, x, DH_DISP_H - 1.f - h, 4.f, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, DH_DISP_H, 0, 0,
-                                                   colAccent(), colAccent2()));
+                for (int i = 0; i < DH_SCOPE_N; ++i)
+                {
+                    float vmin, vmax;
+                    if (module)
+                    {
+                        int idx = (module->scopeHead + i) % DH_SCOPE_N;
+                        vmin = module->scopeMin[idx];
+                        vmax = module->scopeMax[idx];
+                    }
+                    else
+                    {
+                        float t = (float)i / DH_SCOPE_N;
+                        float e = 3.5f * std::exp(-3.f * t) * (0.6f + 0.4f * std::sin(t * 90.f));
+                        vmax = e;
+                        vmin = -e;
+                    }
+                    float y0 = mid - clamp(vmax / 5.f, -1.f, 1.f) * amp;
+                    float y1 = mid - clamp(vmin / 5.f, -1.f, 1.f) * amp;
+                    nvgRect(vg, i * colW, y0, std::max(colW - 0.4f, 1.f), std::max(y1 - y0, 1.f));
+                }
+                nvgFillColor(vg, nvgRGB(0x8a, 0xee, 0xff));
                 nvgFill(vg);
+                nvgResetScissor(vg);
+                nvgRestore(vg);
+
+                // L / R level meters (right of the scope)
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    float peak = module ? (ch == 0 ? module->peakL : module->peakR)
+                                        : (ch == 0 ? 3.f : 2.4f);
+                    float lvl = std::min(peak / 10.f, 1.f);
+                    float x = sw + 4.f + ch * 6.f;
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, 1.f, 4.f, DH_DISP_H - 2.f);
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
+                    nvgFill(vg);
+                    if (lvl > 0.01f)
+                    {
+                        float h = lvl * (DH_DISP_H - 2.f);
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x, DH_DISP_H - 1.f - h, 4.f, h);
+                        nvgFillPaint(vg, nvgLinearGradient(vg, 0, DH_DISP_H, 0, 0,
+                                                           colAccent(), colAccent2()));
+                        nvgFill(vg);
+                    }
+                }
+
+                // Readouts: own row under the display, centred over the two columns
+                char buf[32];
+                float mx = module ? module->params[DarkHall::MIX_PARAM].getValue() : 0.4f;
+                float sz = module ? module->params[DarkHall::SIZE_PARAM].getValue() : 0.7f;
+                const float ry = DH_READ_Y - DH_DISP_Y;
+                snprintf(buf, sizeof(buf), "MIX %3.0f%%", mx * 100.f);
+                drawText(vg, DH_COL[0] - DH_DISP_X, ry, buf, 7.f, colAccent(), ALIGN_C, 0.5f);
+                snprintf(buf, sizeof(buf), "SIZE %3.0f%%", sz * 100.f);
+                drawText(vg, DH_COL[1] - DH_DISP_X, ry, buf, 7.f, colAccent(), ALIGN_C, 0.5f);
             }
+            Widget::drawLayer(args, layer);
         }
-
-        // Scanlines
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int) DH_DISP_H; y += 2)
-            nvgRect(vg, 0, y + 1, DH_DISP_W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-        nvgFill(vg);
-
-        // Glass reflection
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, DH_DISP_W, DH_DISP_H * 0.4f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, DH_DISP_H * 0.4f,
-                                           nvgRGBA(255, 255, 255, 16),
-                                           nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-
-        // Readouts
-        char buf[32];
-        float mx = module ? module->params[DarkHall::MIX_PARAM].getValue()  : 0.4f;
-        float sz = module ? module->params[DarkHall::SIZE_PARAM].getValue() : 0.7f;
-        snprintf(buf, sizeof(buf), "MIX %3.0f%%", mx * 100.f);
-        drawText(vg, 4.f, 7.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 190),
-                 NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "SIZE %3.0f%%", sz * 100.f);
-        drawText(vg, sw - 4.f, 7.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 190),
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-        Widget::drawLayer(args, layer);
-    }
-};
+    };
 
 } // namespace
 
 // ============================================================
 // Module widget
 // ============================================================
-struct DarkHallWidget : ModuleWidget {
-    DarkHallWidget(DarkHall* module) {
+struct DarkHallWidget : ModuleWidget
+{
+    DarkHallWidget(DarkHall *module)
+    {
         setModule(module);
         box.size = Vec(DH_PANEL_W, DH_PANEL_H);
 
@@ -547,27 +531,21 @@ struct DarkHallWidget : ModuleWidget {
 
         addChild(new DhDisplayWidget(module));
 
-        // 4 knobs (2×2)
-        for (int i = 0; i < 4; ++i) {
-            int row = i / 2, col = i % 2;
-            float cx = DH_COL[col], ry = DH_ROW[row];
-            addParam(createParamCentered<RoundBlackKnob>(Vec(cx, ry - 8.f), module, DH_CELLS[i].param));
+        // 4 knobs (2 x 2), centred under their labels
+        for (int i = 0; i < 4; ++i)
+        {
+            float cx = DH_COL[i % 2];
+            float top = DH_ROW_TOP[i / 2];
+            addParam(createParamCentered<RoundBlackKnob>(
+                Vec(cx, top + DH_CELL_KNOB), module, DH_CELLS[i].param));
         }
 
-        // I/O – 4 jacks in a row: L IN, R IN, L OUT, R OUT
-        const int ioIds[4] = {
-            DarkHall::IN_L,
-            DarkHall::IN_R,
-            DarkHall::OUT_L,
-            DarkHall::OUT_R,
-        };
-        for (int i = 0; i < 4; ++i) {
-            float cx = 22.5f + i * 45.f;
-            if (i < 2)
-                addInput(createInputCentered<DarkPJ301MPort>(Vec(cx, DH_PORT_Y), module, ioIds[i]));
-            else
-                addOutput(createOutputCentered<DarkPJ301MPort>(Vec(cx, DH_PORT_Y), module, ioIds[i]));
-        }
+        // I/O: L IN, R IN | L OUT, R OUT
+        const float jy = DH_IO_TOP + DH_IO_JACK;
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(dhIoX(0), jy), module, DarkHall::IN_L));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(dhIoX(1), jy), module, DarkHall::IN_R));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dhIoX(2), jy), module, DarkHall::OUT_L));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dhIoX(3), jy), module, DarkHall::OUT_R));
     }
 };
 

@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -9,33 +10,46 @@
 #include <chrono>
 
 // ------------------------------------------------------------
-// Layout constants
+// Layout (28 HP = 420 x 380)
+// Every control sits in a plate with its label ABOVE it.
 // ------------------------------------------------------------
 static const float DS_PANEL_W = RACK_GRID_WIDTH * 28; // 420
 static const float DS_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Display: 16 channel columns, pattern strip, probability meter
-static const float DS_DISP_X = 100.f;
-static const float DS_DISP_Y = 46.f;
-static const float DS_DISP_W = 220.f;
-static const float DS_DISP_H = 170.f;
+// Display (bezel is drawn 4 px around it)
+static const float DS_DISP_X = 108.f;
+static const float DS_DISP_Y = 34.f;
+static const float DS_DISP_W = 212.f;
+static const float DS_DISP_H = 166.f;
 static const float DS_CH_X0 = 10.f; // first channel column inside the display
-static const float DS_CH_W = 12.5f; // 16 x 12.5 = 200
+static const float DS_CH_W = 12.f;  // 16 x 12 = 192
 
-// Left control block (2 columns x 4 rows)
-static const float DS_LCOL[2] = {28.f, 68.f};
-static const float DS_LROW[4] = {90.f, 138.f, 186.f, 234.f};
+// Left block: 2 columns x 4 rows of small knobs
+static const float DS_BLOCK_HEAD_Y = 40.f;
+static const float DS_LCOL[2] = {30.f, 72.f};
+static const float DS_LTOP0 = 50.f, DS_LPITCH = 56.f;
+static const float DS_LW = 38.f, DS_LH = 52.f;
+static float dsLTop(int r) { return DS_LTOP0 + DS_LPITCH * r; }
+static float dsLKnobY(int r) { return dsLTop(r) + 32.f; }
 
-// Right block: outputs, transport switches
+// Right block: outputs, then transport
 static const float DS_RCOL[2] = {352.f, 392.f};
-static const float DS_ROUT[2] = {100.f, 150.f};
-static const float DS_RSW[2] = {208.f, 258.f};
+static const float DS_RW = 36.f;
+static const float DS_ROUT_TOP[2] = {50.f, 100.f};
+static const float DS_ROUT_H = 46.f;
+static const float DS_TRANS_HEAD_Y = 160.f;
+static const float DS_RSW_TOP[2] = {172.f, 230.f};
+static const float DS_RSW_H = 54.f;
 
-// LED strip under the display (aligned with the channel columns)
-static const float DS_LED_Y = 241.f;
+// LED strip under the display (numbers on top, LEDs below)
+static const float DS_LED_TOP = 212.f, DS_LED_H = 34.f;
+static const float DS_LED_NUM_Y = DS_LED_TOP + 10.f;
+static const float DS_LED_Y = DS_LED_TOP + 24.f;
 
 // Input row (10 jacks)
-static const float DS_IN_Y = 340.f;
+static const float DS_IN_HEAD_Y = 298.f;
+static const float DS_IN_TOP = 308.f, DS_IN_H = 50.f, DS_IN_W = 38.f;
+static const float DS_IN_Y = DS_IN_TOP + 31.f;
 static float dsInX(int i) { return 30.f + 40.f * i; }
 
 // ------------------------------------------------------------
@@ -389,31 +403,31 @@ struct DiceOnSteroids : Module
 
     void dataFromJson(json_t *root) override
     {
-        json_t *gt = json_object_get(root, "gateTime");
-        if (gt)
-            gateTime = json_real_value(gt);
-        json_t *rr = json_object_get(root, "randomRange");
-        if (rr)
-            randomRange = json_integer_value(rr);
-        json_t *ss = json_object_get(root, "selectedScale");
-        if (ss)
-            selectedScale = json_integer_value(ss);
-        json_t *glide = json_object_get(root, "glideTime");
-        if (glide)
-            glideTime = json_real_value(glide);
-        json_t *rm = json_object_get(root, "randomMode");
-        if (rm)
-            randomMode = json_integer_value(rm);
-        json_t *cd = json_object_get(root, "clockDiv");
-        if (cd)
-            clockDiv = json_integer_value(cd);
+        auto readFloat = [&](const char *key, float &out, float lo, float hi)
+        {
+            json_t *j = json_object_get(root, key);
+            if (j && json_is_number(j))
+                out = clamp((float)json_number_value(j), lo, hi);
+        };
+        auto readInt = [&](const char *key, int &out, int lo, int hi)
+        {
+            json_t *j = json_object_get(root, key);
+            if (j && json_is_integer(j))
+                out = clamp((int)json_integer_value(j), lo, hi);
+        };
+        readFloat("gateTime", gateTime, 0.001f, 1.f);
+        readInt("randomRange", randomRange, 0, 3);
+        readInt("selectedScale", selectedScale, 0, (int)scales.size() - 1);
+        readFloat("glideTime", glideTime, 0.f, 1.f);
+        readInt("randomMode", randomMode, 0, 3);
+        readInt("clockDiv", clockDiv, 1, 16);
         json_t *ufs = json_object_get(root, "useFixedSeed");
         if (ufs)
             useFixedSeed = json_is_true(ufs);
         json_t *seed = json_object_get(root, "randomSeed");
-        if (seed)
+        if (seed && json_is_integer(seed))
         {
-            randomSeed = json_integer_value(seed);
+            randomSeed = (uint32_t)json_integer_value(seed);
             rng.seed(randomSeed);
         }
         json_t *tm = json_object_get(root, "trainMode");
@@ -432,14 +446,14 @@ struct DiceOnSteroids : Module
                     for (size_t i = 0; i < MAX_PATTERN_LEN && i < stepCount; ++i)
                     {
                         json_t *stepObj = json_array_get(chArr, i);
-                        if (stepObj)
+                        if (stepObj && json_is_object(stepObj))
                         {
                             json_t *g = json_object_get(stepObj, "gate");
                             json_t *p = json_object_get(stepObj, "pitch");
                             json_t *q = json_object_get(stepObj, "quant");
-                            pattern[ch][i].gate = g ? json_real_value(g) : 0.f;
-                            pattern[ch][i].pitch = p ? json_real_value(p) : 0.f;
-                            pattern[ch][i].quantized = q ? json_real_value(q) : 0.f;
+                            pattern[ch][i].gate = (g && json_is_number(g)) ? (float)json_number_value(g) : 0.f;
+                            pattern[ch][i].pitch = (p && json_is_number(p)) ? (float)json_number_value(p) : 0.f;
+                            pattern[ch][i].quantized = (q && json_is_number(q)) ? (float)json_number_value(q) : 0.f;
                         }
                     }
                 }
@@ -817,275 +831,82 @@ std::vector<Scale> DiceOnSteroids::scales = {
     {"Spanish Gypsy", {0, 1, 4, 5, 7, 8, 10}},
     {"Algerian", {0, 2, 4, 5, 7, 8, 10}}};
 
-// Everything below lives in an anonymous namespace so the names cannot clash
-// with the same-named helpers in the other module files.
+// ------------------------------------------------------------
+// UI (everything below is in an anonymous namespace so the names cannot
+// clash with same-named helpers in other module files)
+// ------------------------------------------------------------
 namespace
 {
 
-    // ------------------------------------------------------------
-    // Theme (same palette as the other AGMM modules)
-    // ------------------------------------------------------------
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-
-    NVGcolor withAlpha(NVGcolor c, float a)
+    // Section header for a block that is narrower than the panel
+    void dsBlockHeader(NVGcontext *vg, float x0, float w, float y, const char *txt)
     {
-        c.a = a;
-        return c;
+        nvgSave(vg);
+        nvgTranslate(vg, x0, 0.f);
+        agmm::sectionHeader(vg, w, y, txt, 0.f);
+        nvgRestore(vg);
     }
 
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    // Cyan LEDs (Rack has no built-in ones)
-    template <typename TBase = GrayModuleLightWidget>
-    struct TDSCyanLight : TBase
-    {
-        TDSCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-    };
-    using DSCyanLight = TDSCyanLight<>;
-
-    // ------------------------------------------------------------
-    // AGMM logo
-    // ------------------------------------------------------------
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        // Pill body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        // Tiny cell triangle
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        // Wordmark
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    // ------------------------------------------------------------
-    // Panel background
-    // ------------------------------------------------------------
     struct DSPanelBackground : TransparentWidget
     {
         DSPanelBackground() { box.size = Vec(DS_PANEL_W, DS_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
-        {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Caption with an underline (side blocks)
-        void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float x1, float x2)
-        {
-            drawText(vg, cx, y, txt, 8.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y + 8.f);
-            nvgLineTo(vg, x2, y + 8.f);
-            nvgStrokeColor(vg, withAlpha(col, 0.35f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Full-width divider with a centered caption
-        void section(NVGcontext *vg, float y, const char *txt)
-        {
-            float x1 = 14.f, x2 = DS_PANEL_W - 14.f, cx = DS_PANEL_W / 2.f;
-            float w = 10.f + (float)strlen(txt) * 7.f;
-            drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y);
-            nvgLineTo(vg, cx - w / 2.f, y);
-            nvgMoveTo(vg, cx + w / 2.f, y);
-            nvgLineTo(vg, x2, y);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Output / input cell: label on top, jack below
-        void topCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-            label(vg, cx, cy - 19.f, txt);
-        }
-        // Control in the middle, label below
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 17.f, 34.f, 34.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-        void knobCell(NVGcontext *vg, float cx, float cy, float r, const char *txt)
-        {
-            ring(vg, cx, cy, r);
-            label(vg, cx, cy + 25.f, txt);
-        }
-        void switchCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 20.f, 34.f, 40.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
+            agmm::panelBase(vg, DS_PANEL_W, DS_PANEL_H, "DICE ON STEROIDS");
+            agmm::bezel(vg, DS_DISP_X, DS_DISP_Y, DS_DISP_W, DS_DISP_H);
 
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, DS_PANEL_W, DS_PANEL_H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, DS_PANEL_H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
+            // ---- left block: 8 knobs, label above each ----
+            dsBlockHeader(vg, 10.f, 82.f, DS_BLOCK_HEAD_Y, "CONTROL");
+            static const char *kl[8] = {"POLY", "PROB", "GLIDE", "ROOT", "CLK DIV", "SPREAD", "SMOOTH", "LOOP LEN"};
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 2; ++c)
+                    agmm::cell(vg, DS_LCOL[c], dsLTop(r), DS_LW, DS_LH, kl[r * 2 + c], false, 7.f);
 
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)DS_PANEL_H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, DS_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
+            // ---- right block: outputs ----
+            dsBlockHeader(vg, 334.f, 76.f, DS_BLOCK_HEAD_Y, "OUTPUT");
+            agmm::cell(vg, DS_RCOL[0], DS_ROUT_TOP[0], DS_RW, DS_ROUT_H, "GATES", true);
+            agmm::cell(vg, DS_RCOL[1], DS_ROUT_TOP[0], DS_RW, DS_ROUT_H, "RANDOM", true);
+            agmm::cell(vg, DS_RCOL[0], DS_ROUT_TOP[1], DS_RW, DS_ROUT_H, "QUANT", true);
+            agmm::cell(vg, DS_RCOL[1], DS_ROUT_TOP[1], DS_RW, DS_ROUT_H, "TRIG", true);
 
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, DS_PANEL_W - 1.f, DS_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            // ---- right block: transport ----
+            dsBlockHeader(vg, 334.f, 76.f, DS_TRANS_HEAD_Y, "TRANSPORT");
+            agmm::cell(vg, DS_RCOL[0], DS_RSW_TOP[0], DS_RW, DS_RSW_H, "REC");
+            agmm::cell(vg, DS_RCOL[1], DS_RSW_TOP[0], DS_RW, DS_RSW_H, "PLAY");
+            agmm::cell(vg, DS_RCOL[0], DS_RSW_TOP[1], DS_RW, DS_RSW_H, "TRAIN");
+            agmm::cell(vg, DS_RCOL[1], DS_RSW_TOP[1], DS_RW, DS_RSW_H, "SEED");
 
-            // Logo + title
-            drawLogo(vg, DS_PANEL_W / 2.f, 13.f);
-            drawText(vg, DS_PANEL_W / 2.f, 31.f, "DICE ON STEROIDS", 13.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-
-            // Display bezel
-            float bx = DS_DISP_X - 5.f, by = DS_DISP_Y - 5.f;
-            float bw = DS_DISP_W + 10.f, bh = DS_DISP_H + 10.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
-
-            // Block captions
-            caption(vg, 48.f, 54.f, "CONTROL", colAccent(), 12.f, 84.f);
-            caption(vg, 372.f, 54.f, "OUTPUT", colViolet(), 335.f, 409.f);
-            caption(vg, 372.f, 176.f, "TRANSPORT", colAccent(), 335.f, 409.f);
-
-            // ---- left block: 8 knobs ----
-            const float l0 = DS_LCOL[0], l1 = DS_LCOL[1];
-            knobCell(vg, l0, DS_LROW[0], 18.f, "POLY");
-            knobCell(vg, l1, DS_LROW[0], 18.f, "PROB");
-            knobCell(vg, l0, DS_LROW[1], 18.f, "GLIDE");
-            knobCell(vg, l1, DS_LROW[1], 18.f, "ROOT");
-            knobCell(vg, l0, DS_LROW[2], 18.f, "CLK DIV");
-            knobCell(vg, l1, DS_LROW[2], 18.f, "SPREAD");
-            knobCell(vg, l0, DS_LROW[3], 18.f, "SMOOTH");
-            knobCell(vg, l1, DS_LROW[3], 18.f, "LOOP LEN");
-
-            // ---- right block ----
-            const float r0 = DS_RCOL[0], r1 = DS_RCOL[1];
-            topCell(vg, r0, DS_ROUT[0], "GATES");
-            topCell(vg, r1, DS_ROUT[0], "RANDOM");
-            topCell(vg, r0, DS_ROUT[1], "QUANT");
-            topCell(vg, r1, DS_ROUT[1], "TRIG");
-            switchCell(vg, r0, DS_RSW[0], "REC");
-            switchCell(vg, r1, DS_RSW[0], "PLAY");
-            switchCell(vg, r0, DS_RSW[1], "TRAIN");
-            jackCell(vg, r1, DS_RSW[1], "SEED");
-
-            // ---- LED plate under the display ----
-            plate(vg, DS_DISP_X, 229.f, DS_DISP_W, 36.f);
+            // ---- gate LED strip: channel numbers above the LEDs ----
+            agmm::plate(vg, DS_DISP_X + DS_DISP_W / 2.f, DS_LED_TOP, DS_DISP_W, DS_LED_H);
             for (int i = 0; i < 16; ++i)
             {
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d", i + 1);
-                drawText(vg, DS_DISP_X + DS_CH_X0 + (i + 0.5f) * DS_CH_W, 256.f, buf, 6.f, colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                agmm::text(vg, DS_DISP_X + DS_CH_X0 + (i + 0.5f) * DS_CH_W, DS_LED_NUM_Y, buf, 7.f,
+                           agmm::dim(), agmm::ALIGN_C, 0.f);
             }
 
             // ---- input row ----
-            section(vg, 296.f, "INPUTS");
-            const char *in[10] = {"CLK", "RESET", "RETRIG", "CV PROB", "CV POLY",
-                                  "CV GATE", "CV RANGE", "CV SCALE", "CV TRANS", "CV GLIDE"};
+            agmm::sectionHeader(vg, DS_PANEL_W, DS_IN_HEAD_Y, "INPUTS", 14.f);
+            static const char *in[10] = {"CLK", "RESET", "RETRIG", "CV PROB", "CV POLY",
+                                         "CV GATE", "CV RANGE", "CV SCALE", "CV TRANS", "CV GLIDE"};
             for (int i = 0; i < 10; ++i)
-                topCell(vg, dsInX(i), DS_IN_Y, in[i]);
+                agmm::cell(vg, dsInX(i), DS_IN_TOP, DS_IN_W, DS_IN_H, in[i], false, 7.f);
 
             Widget::draw(args);
         }
     };
 
     // ------------------------------------------------------------
-    // Display: channel columns, pattern strip, probability meter
+    // Display rows (top to bottom):
+    //   y  9  scale name / random mode
+    //   y 21  root / range / gate time
+    //   30-110  channel plot (no text inside)
+    //   118  pattern strip (channel 1)
+    //   134  status chips + loop readout
+    //   156  probability meter
     // ------------------------------------------------------------
     struct DSDisplayWidget : TransparentWidget
     {
@@ -1097,51 +918,14 @@ namespace
             box.size = Vec(DS_DISP_W, DS_DISP_H);
         }
 
-        static constexpr float CH_Y0 = 32.f; // channel area top
-        static constexpr float CH_H = 90.f;  // channel area height
+        static constexpr float PLOT_Y = 30.f, PLOT_H = 80.f;
+        static constexpr float PAT_Y = 118.f, PAT_H = 8.f;
+        static constexpr float CHIP_Y = 134.f, CHIP_H = 12.f;
+        static constexpr float METER_Y = 156.f;
 
-        // Static background: screen, grid, channel tracks
         void draw(const DrawArgs &args) override
         {
-            NVGcontext *vg = args.vg;
-            const float W = DS_DISP_W, H = DS_DISP_H;
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 30.f, W * 0.75f,
-                                               nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-            nvgFill(vg);
-
-            // Channel tracks
-            const float mid = CH_Y0 + CH_H / 2.f;
-            for (int c = 0; c < 16; ++c)
-            {
-                float x = DS_CH_X0 + c * DS_CH_W;
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x + 1.5f, CH_Y0, DS_CH_W - 3.f, CH_H, 2.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 9));
-                nvgFill(vg);
-            }
-
-            // Voltage grid every 2.5 V (+-5 V range) and zero line
-            nvgBeginPath(vg);
-            for (int k = -2; k <= 2; ++k)
-            {
-                float y = mid - k * (CH_H / 2.f) / 2.f + 0.5f;
-                nvgMoveTo(vg, DS_CH_X0, y);
-                nvgLineTo(vg, DS_CH_X0 + 16.f * DS_CH_W, y);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, DS_CH_X0, mid + 0.5f);
-            nvgLineTo(vg, DS_CH_X0 + 16.f * DS_CH_W, mid + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 45));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
+            agmm::screen(args.vg, 0.f, 0.f, DS_DISP_W, DS_DISP_H);
             Widget::draw(args);
         }
 
@@ -1153,9 +937,10 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float W = DS_DISP_W, H = DS_DISP_H;
-            const float mid = CH_Y0 + CH_H / 2.f;
-            const float amp = CH_H / 2.f - 2.f; // pixels for 5 V
+            const float W = DS_DISP_W;
+            const float mid = PLOT_Y + PLOT_H / 2.f;
+            const float amp = PLOT_H / 2.f - 3.f; // pixels for 5 V
+            const float plotX0 = DS_CH_X0, plotW = 16.f * DS_CH_W;
 
             // ---- gather state (live, or a sample scene in the module browser) ----
             int poly, loopLen, readPos = 0, writePos = 0, scaleIdx, mode, range, div;
@@ -1164,9 +949,7 @@ namespace
             bool rec, play, train;
 
             for (int c = 0; c < 16; ++c)
-            {
                 quant[c] = raw[c] = fl[c] = 0.f;
-            }
             for (int i = 0; i < DiceOnSteroids::MAX_PATTERN_LEN; ++i)
                 stepGate[i] = 0.f;
 
@@ -1179,7 +962,7 @@ namespace
                     raw[c] = module->voctVoltages[c];
                     fl[c] = module->flash[c];
                 }
-                loopLen = std::min(std::max(module->loopLength, 1), DiceOnSteroids::MAX_PATTERN_LEN);
+                loopLen = clamp(module->loopLength, 1, DiceOnSteroids::MAX_PATTERN_LEN);
                 for (int i = 0; i < loopLen; ++i)
                     stepGate[i] = module->pattern[0][i].gate;
                 readPos = module->patternReadPos[0];
@@ -1219,69 +1002,92 @@ namespace
                 play = true;
                 train = false;
             }
-            poly = std::min(std::max(poly, 1), 16);
-            scaleIdx = std::min(std::max(scaleIdx, 0), (int)DiceOnSteroids::scales.size() - 1);
-            mode = std::min(std::max(mode, 0), 3);
-            range = std::min(std::max(range, 0), 3);
+            poly = clamp(poly, 1, 16);
+            scaleIdx = clamp(scaleIdx, 0, (int)DiceOnSteroids::scales.size() - 1);
+            mode = clamp(mode, 0, 3);
+            range = clamp(range, 0, 3);
 
-            // ---- channel bars ----
+            char buf[64];
+
+            // ---- row 1 + 2: readouts ----
+            static const char *modeNames[4] = {"UNIFORM", "WALK", "DRUNK", "GAUSS"};
+            static const char *rangeNames[4] = {"0/+1V", "-1/+1V", "-2/+2V", "-5/+5V"};
+
+            const float modeW = agmm::textWidth(vg, modeNames[mode], 7.f);
+            agmm::text(vg, W - 8.f, 9.f, modeNames[mode], 7.f, agmm::accent(), agmm::ALIGN_R);
+            std::string sname = DiceOnSteroids::scales[scaleIdx].name;
+            const float maxW = W - 16.f - modeW - 8.f;
+            while (sname.size() > 3 && agmm::textWidth(vg, sname.c_str(), 7.f) > maxW)
+                sname.pop_back();
+            agmm::text(vg, 8.f, 9.f, sname.c_str(), 7.f, agmm::accent(), agmm::ALIGN_L);
+
+            snprintf(buf, sizeof(buf), "ROOT %+.1f", rootSemi);
+            agmm::text(vg, 8.f, 21.f, buf, 7.f, agmm::dim(), agmm::ALIGN_L);
+            snprintf(buf, sizeof(buf), "RNG %s", rangeNames[range]);
+            agmm::text(vg, W / 2.f, 21.f, buf, 7.f, agmm::dim(), agmm::ALIGN_C);
+            snprintf(buf, sizeof(buf), "GATE %.0fMS", gateMs);
+            agmm::text(vg, W - 8.f, 21.f, buf, 7.f, agmm::dim(), agmm::ALIGN_R);
+
+            // ---- channel plot ----
+            agmm::plotFrame(vg, plotX0 - 4.f, PLOT_Y, plotW + 8.f, PLOT_H);
             for (int c = 0; c < 16; ++c)
             {
-                float x = DS_CH_X0 + c * DS_CH_W + 1.5f;
+                nvgBeginPath(vg);
+                nvgRect(vg, plotX0 + c * DS_CH_W + 1.5f, PLOT_Y + 1.f, DS_CH_W - 3.f, PLOT_H - 2.f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 8));
+                nvgFill(vg);
+            }
+            nvgBeginPath(vg);
+            for (int k = -1; k <= 1; ++k)
+            {
+                float y = std::floor(mid - k * amp / 2.f) + 0.5f;
+                nvgMoveTo(vg, plotX0 - 3.f, y);
+                nvgLineTo(vg, plotX0 + plotW + 3.f, y);
+            }
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 24));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            for (int c = 0; c < 16; ++c)
+            {
+                float x = plotX0 + c * DS_CH_W + 1.5f;
                 float w = DS_CH_W - 3.f;
                 if (c >= poly)
                 {
                     nvgBeginPath(vg);
                     nvgRect(vg, x + 2.f, mid, w - 4.f, 1.f);
-                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 30));
                     nvgFill(vg);
                     continue;
                 }
-                float f = fl[c];
+                float f = clamp(fl[c], 0.f, 1.f);
 
-                // Random (unquantized) pitch tick
-                float yr = mid - std::min(std::max(raw[c] / 5.f, -1.f), 1.f) * amp;
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 0.5f, yr, w + 1.f, 1.f);
-                nvgFillColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 150));
-                nvgFill(vg);
-
-                // Quantized pitch bar
-                float yq = mid - std::min(std::max(quant[c] / 5.f, -1.f), 1.f) * amp;
+                // quantized pitch bar from the zero line
+                float yq = mid - clamp(quant[c] / 5.f, -1.f, 1.f) * amp;
                 float top = std::min(mid, yq);
                 float h = std::max(std::fabs(mid - yq), 1.5f);
-
-                if (f > 0.02f)
-                {
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x - 1.5f, top - 1.5f, w + 3.f, h + 3.f);
-                    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, (int)(50.f * f)));
-                    nvgFill(vg);
-                }
                 nvgBeginPath(vg);
                 nvgRect(vg, x, top, w, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, mid + amp, 0, mid - amp,
-                                                   nvgRGBA(0x1f, 0x9f, 0xc0, (int)(110 + 120 * f)),
-                                                   nvgRGBA(0x8a, 0xee, 0xff, (int)(110 + 145 * f))));
+                nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, (int)(90 + 150 * f)));
                 nvgFill(vg);
 
-                // Cap at the pitch
+                // random (unquantized) pitch: violet tick
+                float yr = mid - clamp(raw[c] / 5.f, -1.f, 1.f) * amp;
                 nvgBeginPath(vg);
-                nvgRect(vg, x, yq - 1.f, w, 2.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, (int)(110 + 145 * f)));
+                nvgRect(vg, x - 0.5f, yr - 0.5f, w + 1.f, 1.f);
+                nvgFillColor(vg, agmm::violet());
                 nvgFill(vg);
             }
 
             // ---- pattern strip (channel 1) ----
-            const float py = 130.f, ph = 8.f;
-            const float sw = (16.f * DS_CH_W) / (float)loopLen;
+            const float sw = plotW / (float)loopLen;
             for (int i = 0; i < loopLen; ++i)
             {
-                float x = DS_CH_X0 + i * sw;
+                float x = plotX0 + i * sw;
                 float cw = std::max(sw - (loopLen > 32 ? 0.6f : 1.4f), 1.f);
                 bool on = stepGate[i] > 0.f;
                 nvgBeginPath(vg);
-                nvgRect(vg, x, py, cw, ph);
+                nvgRect(vg, x, PAT_Y, cw, PAT_H);
                 nvgFillColor(vg, on ? nvgRGBA(0x3d, 0xe0, 0xff, 170) : nvgRGBA(255, 255, 255, 14));
                 nvgFill(vg);
             }
@@ -1290,7 +1096,7 @@ namespace
                 // readPos points at the NEXT step to play, so mark the one before it
                 int cur = (readPos + loopLen - 1) % loopLen;
                 nvgBeginPath(vg);
-                nvgRect(vg, DS_CH_X0 + cur * sw - 0.5f, py - 2.f, std::max(sw, 2.f) + 0.5f, ph + 4.f);
+                nvgRect(vg, plotX0 + cur * sw - 0.5f, PAT_Y - 2.f, std::max(sw, 2.f) + 0.5f, PAT_H + 4.f);
                 nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 220));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
@@ -1298,85 +1104,38 @@ namespace
             if (rec && writePos >= 0 && writePos < loopLen)
             {
                 nvgBeginPath(vg);
-                nvgRect(vg, DS_CH_X0 + writePos * sw, py + ph + 1.f, std::max(sw - 1.f, 2.f), 2.f);
-                nvgFillColor(vg, nvgRGB(0xb0, 0x5a, 0xff));
+                nvgRect(vg, plotX0 + writePos * sw, PAT_Y + PAT_H + 2.f, std::max(sw - 1.f, 2.f), 2.f);
+                nvgFillColor(vg, agmm::violet());
                 nvgFill(vg);
             }
 
-            // ---- status chips ----
-            auto chip = [&](float x, float w, const char *txt, bool on, NVGcolor col)
+            // ---- chip row: REC / PLAY / TRAIN, loop readout on the right ----
+            float cx = 8.f;
+            const char *chipTxt[3] = {"REC", "PLAY", "TRAIN"};
+            bool chipOn[3] = {rec, play, train};
+            NVGcolor chipCol[3] = {agmm::violet(), agmm::accent(), agmm::accent()};
+            for (int i = 0; i < 3; ++i)
             {
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, 144.f, w, 11.f, 3.f);
-                if (on)
-                {
-                    nvgFillColor(vg, withAlpha(col, 0.25f));
-                    nvgFill(vg);
-                    nvgStrokeColor(vg, withAlpha(col, 0.9f));
-                }
-                else
-                {
-                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-                }
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                drawText(vg, x + w / 2.f, 149.5f, txt, 6.f, on ? col : colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-            };
-            chip(10.f, 26.f, "REC", rec, colViolet());
-            chip(40.f, 28.f, "PLAY", play, colAccent());
-            chip(72.f, 32.f, "TRAIN", train, colAccent());
+                float cw = agmm::textWidth(vg, chipTxt[i], 7.f) + 10.f;
+                agmm::chip(vg, cx, CHIP_Y, cw, CHIP_H, chipTxt[i], chipOn[i], chipCol[i]);
+                cx += cw + 4.f;
+            }
+            snprintf(buf, sizeof(buf), "CH1 LOOP %d DIV %d", loopLen, div);
+            agmm::text(vg, W - 8.f, CHIP_Y + CHIP_H / 2.f + 0.5f, buf, 7.f, agmm::dim(), agmm::ALIGN_R);
 
-            char buf[48];
-            snprintf(buf, sizeof(buf), "LOOP %d  DIV %d", loopLen, div);
-            drawText(vg, W - 10.f, 149.5f, buf, 7.f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-            // ---- probability meter ----
-            const float mx = 36.f, mw = W - 36.f - 44.f, my = 159.f;
-            drawText(vg, 10.f, my + 1.f, "PROB", 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            // ---- probability meter row ----
+            const float mx = 36.f, mw = W - 36.f - 40.f;
+            agmm::text(vg, 8.f, METER_Y, "PROB", 7.f, agmm::dim(), agmm::ALIGN_L);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, mx, my - 2.f, mw, 5.f, 2.f);
+            nvgRect(vg, mx, METER_Y - 2.5f, mw, 5.f);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
             nvgFill(vg);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, mx, my - 2.f, std::max(mw * prob, 2.f), 5.f, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, mx, 0, mx + mw, 0, colAccent(), colViolet()));
+            nvgRect(vg, mx, METER_Y - 2.5f, std::max(mw * clamp(prob, 0.f, 1.f), 1.f), 5.f);
+            nvgFillColor(vg, agmm::accent());
             nvgFill(vg);
-            snprintf(buf, sizeof(buf), "%3.0f%%", prob * 100.f);
-            drawText(vg, W - 10.f, my + 1.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 200),
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-            // ---- scanlines ----
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)H; y += 3)
-                nvgRect(vg, 0, y + 1, W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
-
-            // ---- glass reflection ----
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H * 0.3f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
-
-            // ---- readouts (top) ----
-            static const char *modeNames[4] = {"UNIFORM", "WALK", "DRUNK", "GAUSS"};
-            static const char *rangeNames[4] = {"0/+1V", "-1/+1V", "-2/+2V", "-5/+5V"};
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 230);
-
-            drawText(vg, 10.f, 9.f, DiceOnSteroids::scales[scaleIdx].name.c_str(), 7.f, c1,
-                     NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, W - 10.f, 9.f, modeNames[mode], 7.f, c1,
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-            snprintf(buf, sizeof(buf), "ROOT %+.1f", rootSemi);
-            drawText(vg, 10.f, 21.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "RNG %s", rangeNames[range]);
-            drawText(vg, W / 2.f, 21.f, buf, 7.f, cd, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "GATE %.0fMS", gateMs);
-            drawText(vg, W - 10.f, 21.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "%.0f%%", prob * 100.f);
+            agmm::text(vg, W - 8.f, METER_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_R);
 
             Widget::drawLayer(args, layer);
         }
@@ -1403,28 +1162,28 @@ struct DiceOnSteroidsWidget : ModuleWidget
 
         addChild(new DSDisplayWidget(module));
 
-        // ---- left block: knobs ----
-        const float l0 = DS_LCOL[0], l1 = DS_LCOL[1];
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, DS_LROW[0]), module, DiceOnSteroids::PARAM_POLYPHONY));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l1, DS_LROW[0]), module, DiceOnSteroids::PARAM_PROBABILITY));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, DS_LROW[1]), module, DiceOnSteroids::PARAM_GLIDE_TIME));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l1, DS_LROW[1]), module, DiceOnSteroids::PARAM_ROOT_SHIFT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, DS_LROW[2]), module, DiceOnSteroids::PARAM_CLOCK_DIV));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l1, DS_LROW[2]), module, DiceOnSteroids::PARAM_PROB_SPREAD));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, DS_LROW[3]), module, DiceOnSteroids::PARAM_PROB_SMOOTH));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l1, DS_LROW[3]), module, DiceOnSteroids::PARAM_LOOP_LENGTH));
+        // ---- left block: knobs (row-major, same order as the labels) ----
+        static const int knobIds[8] = {
+            DiceOnSteroids::PARAM_POLYPHONY, DiceOnSteroids::PARAM_PROBABILITY,
+            DiceOnSteroids::PARAM_GLIDE_TIME, DiceOnSteroids::PARAM_ROOT_SHIFT,
+            DiceOnSteroids::PARAM_CLOCK_DIV, DiceOnSteroids::PARAM_PROB_SPREAD,
+            DiceOnSteroids::PARAM_PROB_SMOOTH, DiceOnSteroids::PARAM_LOOP_LENGTH};
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 2; ++c)
+                addParam(createParamCentered<RoundSmallBlackKnob>(Vec(DS_LCOL[c], dsLKnobY(r)), module, knobIds[r * 2 + c]));
 
-        // ---- right block ----
+        // ---- right block: outputs ----
         const float r0 = DS_RCOL[0], r1 = DS_RCOL[1];
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, DS_ROUT[0]), module, DiceOnSteroids::OUTPUT_GATES));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, DS_ROUT[0]), module, DiceOnSteroids::OUTPUT_VOCT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, DS_ROUT[1]), module, DiceOnSteroids::OUTPUT_QUANTIZED));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, DS_ROUT[1]), module, DiceOnSteroids::OUTPUT_TRIGGER_NEW));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, DS_ROUT_TOP[0] + 28.f), module, DiceOnSteroids::OUTPUT_GATES));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, DS_ROUT_TOP[0] + 28.f), module, DiceOnSteroids::OUTPUT_VOCT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, DS_ROUT_TOP[1] + 28.f), module, DiceOnSteroids::OUTPUT_QUANTIZED));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, DS_ROUT_TOP[1] + 28.f), module, DiceOnSteroids::OUTPUT_TRIGGER_NEW));
 
-        addParam(createParamCentered<CKSS>(Vec(r0, DS_RSW[0]), module, DiceOnSteroids::PARAM_RECORD_ENABLE));
-        addParam(createParamCentered<CKSS>(Vec(r1, DS_RSW[0]), module, DiceOnSteroids::PARAM_PLAYBACK_ENABLE));
-        addParam(createParamCentered<CKSS>(Vec(r0, DS_RSW[1]), module, DiceOnSteroids::PARAM_TRAIN_MODE));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(r1, DS_RSW[1]), module, DiceOnSteroids::INPUT_RANDOM_SEED));
+        // ---- right block: transport ----
+        addParam(createParamCentered<CKSS>(Vec(r0, DS_RSW_TOP[0] + 34.f), module, DiceOnSteroids::PARAM_RECORD_ENABLE));
+        addParam(createParamCentered<CKSS>(Vec(r1, DS_RSW_TOP[0] + 34.f), module, DiceOnSteroids::PARAM_PLAYBACK_ENABLE));
+        addParam(createParamCentered<CKSS>(Vec(r0, DS_RSW_TOP[1] + 34.f), module, DiceOnSteroids::PARAM_TRAIN_MODE));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(r1, DS_RSW_TOP[1] + 32.f), module, DiceOnSteroids::INPUT_RANDOM_SEED));
 
         // ---- input row ----
         const int inIds[10] = {
@@ -1443,7 +1202,7 @@ struct DiceOnSteroidsWidget : ModuleWidget
 
         // ---- 16 gate LEDs, aligned with the display columns ----
         for (int i = 0; i < 16; ++i)
-            addChild(createLightCentered<SmallLight<DSCyanLight>>(
+            addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
                 Vec(DS_DISP_X + DS_CH_X0 + (i + 0.5f) * DS_CH_W, DS_LED_Y),
                 module, DiceOnSteroids::LIGHT_GATES + i));
     }
@@ -1456,254 +1215,63 @@ struct DiceOnSteroidsWidget : ModuleWidget
 
         menu->addChild(new MenuSeparator);
 
-        // Gate Time submenu
-        struct GateTimeMenu : MenuItem
-        {
-            DiceOnSteroids *module;
-            Menu *createChildMenu() override
-            {
-                Menu *m = new Menu;
-                std::vector<float> times = {0.005f, 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f};
-                std::vector<std::string> names = {"5ms", "10ms", "20ms", "50ms", "100ms", "200ms", "500ms"};
-                for (size_t i = 0; i < times.size(); ++i)
-                {
-                    struct GateTimeItem : MenuItem
-                    {
-                        DiceOnSteroids *module;
-                        float time;
-                        void onAction(const ActionEvent &e) override
-                        {
-                            if (module)
-                                module->gateTime = time;
-                        }
-                        void step() override
-                        {
-                            if (!module)
-                            {
-                                rightText = "";
-                                MenuItem::step();
-                                return;
-                            }
-                            rightText = (module->gateTime == time) ? "✔" : "";
-                            MenuItem::step();
-                        }
-                    };
-                    auto item = new GateTimeItem;
-                    item->text = names[i];
-                    item->module = module;
-                    item->time = times[i];
-                    m->addChild(item);
-                }
-                return m;
-            }
-        };
-        auto gateItem = new GateTimeMenu;
-        gateItem->text = "Gate Time";
-        gateItem->module = module;
-        menu->addChild(gateItem);
+        menu->addChild(createSubmenuItem("Gate time", "",
+                                         [=](Menu *sub)
+                                         {
+                                             static const float T[7] = {0.005f, 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f};
+                                             static const char *N[7] = {"5 ms", "10 ms", "20 ms", "50 ms", "100 ms", "200 ms", "500 ms"};
+                                             for (int i = 0; i < 7; ++i)
+                                                 sub->addChild(createMenuItem(N[i], CHECKMARK(std::fabs(module->gateTime - T[i]) < 1e-6f),
+                                                                              [=]()
+                                                                              { module->gateTime = T[i]; }));
+                                         }));
 
-        // Random Mode submenu
-        struct RandomModeMenu : MenuItem
-        {
-            DiceOnSteroids *module;
-            Menu *createChildMenu() override
-            {
-                Menu *m = new Menu;
-                struct RandomModeItem : MenuItem
-                {
-                    DiceOnSteroids *module;
-                    int mode;
-                    void onAction(const ActionEvent &e) override
-                    {
-                        if (module)
-                            module->randomMode = mode;
-                    }
-                    void step() override
-                    {
-                        if (!module)
-                        {
-                            rightText = "";
-                            MenuItem::step();
-                            return;
-                        }
-                        rightText = (module->randomMode == mode) ? "✔" : "";
-                        MenuItem::step();
-                    }
-                };
-                const std::vector<std::pair<int, std::string>> modes = {
-                    {0, "Uniform"}, {1, "Random Walk"}, {2, "Drunk Walk"}, {3, "Gaussian"}};
-                for (const auto &p : modes)
-                {
-                    auto item = new RandomModeItem;
-                    item->text = p.second;
-                    item->module = module;
-                    item->mode = p.first;
-                    m->addChild(item);
-                }
-                return m;
-            }
-        };
-        auto randItem = new RandomModeMenu;
-        randItem->text = "Random Mode";
-        randItem->module = module;
-        menu->addChild(randItem);
+        menu->addChild(createSubmenuItem("Random mode", "",
+                                         [=](Menu *sub)
+                                         {
+                                             static const char *N[4] = {"Uniform", "Random walk", "Drunk walk", "Gaussian"};
+                                             for (int i = 0; i < 4; ++i)
+                                                 sub->addChild(createMenuItem(N[i], CHECKMARK(module->randomMode == i),
+                                                                              [=]()
+                                                                              { module->randomMode = i; }));
+                                         }));
 
-        // V/Oct Range submenu
-        struct RangeMenu : MenuItem
-        {
-            DiceOnSteroids *module;
-            Menu *createChildMenu() override
-            {
-                Menu *m = new Menu;
-                struct RangeItem : MenuItem
-                {
-                    DiceOnSteroids *module;
-                    int range;
-                    void onAction(const ActionEvent &e) override
-                    {
-                        if (module)
-                            module->randomRange = range;
-                    }
-                    void step() override
-                    {
-                        if (!module)
-                        {
-                            rightText = "";
-                            MenuItem::step();
-                            return;
-                        }
-                        rightText = (module->randomRange == range) ? "✔" : "";
-                        MenuItem::step();
-                    }
-                };
-                const std::vector<std::pair<int, std::string>> ranges = {
-                    {0, "0 to +1V"},
-                    {1, "-1 to +1V"},
-                    {2, "-2 to +2V"},
-                    {3, "-5 to +5V"}};
-                for (const auto &p : ranges)
-                {
-                    auto item = new RangeItem;
-                    item->text = p.second;
-                    item->module = module;
-                    item->range = p.first;
-                    m->addChild(item);
-                }
-                return m;
-            }
-        };
-        auto rangeItem = new RangeMenu;
-        rangeItem->text = "V/Oct Random Range";
-        rangeItem->module = module;
-        menu->addChild(rangeItem);
+        menu->addChild(createSubmenuItem("V/Oct random range", "",
+                                         [=](Menu *sub)
+                                         {
+                                             static const char *N[4] = {"0 to +1 V", "-1 to +1 V", "-2 to +2 V", "-5 to +5 V"};
+                                             for (int i = 0; i < 4; ++i)
+                                                 sub->addChild(createMenuItem(N[i], CHECKMARK(module->randomRange == i),
+                                                                              [=]()
+                                                                              { module->randomRange = i; }));
+                                         }));
 
-        // Clock Division submenu (sets the CLK DIV knob)
-        struct ClockDivMenu : MenuItem
-        {
-            DiceOnSteroids *module;
-            Menu *createChildMenu() override
-            {
-                Menu *m = new Menu;
-                struct ClockDivItem : MenuItem
-                {
-                    DiceOnSteroids *module;
-                    int div;
-                    void onAction(const ActionEvent &e) override
-                    {
-                        if (module)
-                            module->params[DiceOnSteroids::PARAM_CLOCK_DIV].setValue((float)div);
-                    }
-                    void step() override
-                    {
-                        if (!module)
-                        {
-                            rightText = "";
-                            MenuItem::step();
-                            return;
-                        }
-                        rightText = (module->clockDiv == div) ? "✔" : "";
-                        MenuItem::step();
-                    }
-                };
-                for (int d = 1; d <= 16; ++d)
-                {
-                    auto item = new ClockDivItem;
-                    item->text = string::f("%d", d);
-                    item->module = module;
-                    item->div = d;
-                    m->addChild(item);
-                }
-                return m;
-            }
-        };
-        auto clockItem = new ClockDivMenu;
-        clockItem->text = "Clock Division (1..16)";
-        clockItem->module = module;
-        menu->addChild(clockItem);
+        menu->addChild(createSubmenuItem("Clock division (1..16)", "",
+                                         [=](Menu *sub)
+                                         {
+                                             for (int d = 1; d <= 16; ++d)
+                                                 sub->addChild(createMenuItem(string::f("%d", d), CHECKMARK(module->clockDiv == d),
+                                                                              [=]()
+                                                                              { module->params[DiceOnSteroids::PARAM_CLOCK_DIV].setValue((float)d); }));
+                                         }));
 
-        // Scale selection submenu
-        struct ScaleMenu : MenuItem
-        {
-            DiceOnSteroids *module;
-            Menu *createChildMenu() override
-            {
-                Menu *m = new Menu;
-                const auto &scales = DiceOnSteroids::getScales();
-                struct ScaleMenuItem : MenuItem
-                {
-                    DiceOnSteroids *module;
-                    int index;
-                    void onAction(const ActionEvent &e) override
-                    {
-                        if (module)
-                            module->selectedScale = index;
-                    }
-                    void step() override
-                    {
-                        if (!module)
-                        {
-                            rightText = "";
-                            MenuItem::step();
-                            return;
-                        }
-                        rightText = (module->selectedScale == index) ? "✔" : "";
-                        MenuItem::step();
-                    }
-                };
-                for (size_t i = 0; i < scales.size(); ++i)
-                {
-                    auto item = new ScaleMenuItem;
-                    item->text = scales[i].name;
-                    item->module = module;
-                    item->index = (int)i;
-                    m->addChild(item);
-                }
-                return m;
-            }
-        };
-        auto scaleItem = new ScaleMenu;
-        scaleItem->text = "Quantization Scale";
-        scaleItem->module = module;
-        menu->addChild(scaleItem);
+        menu->addChild(createSubmenuItem("Quantization scale", "",
+                                         [=](Menu *sub)
+                                         {
+                                             const auto &sc = DiceOnSteroids::getScales();
+                                             for (int i = 0; i < (int)sc.size(); ++i)
+                                                 sub->addChild(createMenuItem(sc[i].name, CHECKMARK(module->selectedScale == i),
+                                                                              [=]()
+                                                                              { module->selectedScale = i; }));
+                                         }));
 
-        // Randomize Seed
-        struct RandomizeSeedItem : MenuItem
-        {
-            DiceOnSteroids *module;
-            void onAction(const ActionEvent &e) override
-            {
-                if (module)
-                {
-                    module->randomSeed = std::chrono::steady_clock::now().time_since_epoch().count();
-                    module->rng.seed(module->randomSeed);
-                    module->useFixedSeed = false;
-                }
-            }
-        };
-        auto seedItem = new RandomizeSeedItem;
-        seedItem->text = "Randomize Seed";
-        seedItem->module = module;
-        menu->addChild(seedItem);
+        menu->addChild(createMenuItem("Randomize seed", "",
+                                      [=]()
+                                      {
+                                          module->randomSeed = std::chrono::steady_clock::now().time_since_epoch().count();
+                                          module->rng.seed(module->randomSeed);
+                                          module->useFixedSeed = false;
+                                      }));
     }
 };
 

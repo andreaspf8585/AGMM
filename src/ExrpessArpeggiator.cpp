@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -9,40 +10,51 @@
 #include <memory>
 
 // ------------------------------------------------------------
-// Layout constants
+// Layout (28 HP = 420 x 380)
+// Every control sits in a plate with its label ABOVE it.
 // ------------------------------------------------------------
-static const float EA_W = RACK_GRID_WIDTH * 28;   // 420
-static const float EA_H = RACK_GRID_HEIGHT;       // 380
+static const float EA_W = RACK_GRID_WIDTH * 28; // 420
+static const float EA_H = RACK_GRID_HEIGHT;     // 380
 
-// Display
-static const float EA_DX = 75.f, EA_DY = 44.f, EA_DW = 270.f, EA_DH = 150.f;
+// Display (bezel is drawn 4 px around it)
+static const float EA_DX = 75.f, EA_DY = 32.f, EA_DW = 270.f, EA_DH = 176.f;
 
 // Rows below the display
-static const float EA_CTRL_SEC_Y = 214.f;
-static const float EA_CTRL_Y     = 246.f;
-static const float EA_IO_SEC_Y   = 297.f;
-static const float EA_IO_Y       = 337.f;
+static const float EA_HEAD_Y = 40.f; // headers of the two side blocks
+static const float EA_CTRL_SEC_Y = 224.f;
+static const float EA_IO_SEC_Y = 302.f;
+static const float EA_IO_TOP = 312.f, EA_IO_W = 34.f, EA_IO_H = 44.f;
+static const float EA_IO_Y = EA_IO_TOP + 31.f; // jack centre (label above)
 static float eaIoX(int i) { return 39.f + 38.f * (float)i; }
 
-// Display geometry (display-local coordinates)
-static const float EA_BX0 = 26.f;     // left edge of step columns
-static const float EA_CW  = 15.f;     // column pitch (16 x 15 = 240)
-static const float EA_BY0 = 20.f;     // top of bars
-static const float EA_BH  = 58.f;     // bar area height
-static const float EA_NOTE_Y = 84.5f; // note name row
-static const float EA_GATE_Y = 90.f,  EA_GATE_H = 8.f;
-static const float EA_LOCK_Y = 101.f, EA_LOCK_H = 8.f;
-static const float EA_NUM_Y  = 114.5f;
-static const float EA_KB_X0 = 8.f, EA_KB_X1 = 126.f, EA_KB_Y = 121.f;
+// Display geometry (display-local coordinates), top to bottom:
+//   y  9      readouts
+//   20-78     pitch bars (octave names in the left column)
+//   87        note names
+//   94-102    gate / mute row
+//   105-113   lock row
+//   122       step numbers
+//   132-150   keyboard | direction chips (y 132) | status chips (y 148)
+//   168       help / position caption
+static const float EA_BX0 = 26.f;    // left edge of step columns
+static const float EA_CW = 15.f;     // column pitch (16 x 15 = 240)
+static const float EA_BY0 = 20.f;    // top of bars
+static const float EA_BH = 58.f;     // bar area height
+static const float EA_NOTE_Y = 87.f; // note name row
+static const float EA_GATE_Y = 94.f, EA_GATE_H = 8.f;
+static const float EA_LOCK_Y = 105.f, EA_LOCK_H = 8.f;
+static const float EA_NUM_Y = 122.f;
+static const float EA_KB_X0 = 8.f, EA_KB_X1 = 126.f, EA_KB_Y = 132.f;
 static const float EA_KB_WH = 18.f, EA_KB_BH = 11.f, EA_KB_BW = 9.f;
 static const float EA_CHIP_X = 136.f, EA_CHIP_P = 26.f, EA_CHIP_W = 24.f;
-static const float EA_CHIP_Y = 121.f, EA_CHIP_H = 11.f;
+static const float EA_CHIP_Y = 132.f, EA_CHIP_H = 12.f;
+static const float EA_STAT_Y = 148.f, EA_STAT_P = 33.f, EA_STAT_W = 30.f, EA_STAT_H = 12.f;
+static const float EA_CAP_Y = 168.f;
 
 static inline int eaMod12(int a) { return ((a % 12) + 12) % 12; }
 
-static const char* const EA_NN[12] = {
-    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-};
+static const char *const EA_NN[12] = {
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
 // ----------------------------------------------------------------------------
 // Scale data: names and semitone intervals from the root
@@ -207,32 +219,32 @@ struct ExpressArpeggiator : Module
     };
 
     // ---- pattern (all 16 steps are stored; STEPS only sets how many play) ----
-    int  noteSemi[16] = {};          // semitones relative to C4
-    bool locked[16] = {};            // protected from randomize / mutation
-    bool muted[16] = {};             // always a rest
-    int  numSteps = 4;
-    int  currentStep = 0;
-    int  dirSign = 1;
-    bool playing = false;            // false = next clock plays the first step
+    int noteSemi[16] = {}; // semitones relative to C4
+    bool locked[16] = {};  // protected from randomize / mutation
+    bool muted[16] = {};   // always a rest
+    int numSteps = 4;
+    int currentStep = 0;
+    int dirSign = 1;
+    bool playing = false; // false = next clock plays the first step
     bool curRest = false;
     uint32_t stepCounter = 0;
 
-    int  lastRoot = -1, lastScale = -1, lastSpan = -1;
-    uint16_t scaleMask = 0;          // absolute pitch classes in the scale
+    int lastRoot = -1, lastScale = -1, lastSpan = -1;
+    uint16_t scaleMask = 0; // absolute pitch classes in the scale
 
     // ---- audio state ----
     float targetV = 0.f, outV = 0.f;
-    bool  outInit = false;
+    bool outInit = false;
     float gateRemaining = 0.f;
     float sinceClock = 0.f, clockPeriod = 0.25f;
-    bool  clockSeen = false;
+    bool clockSeen = false;
 
     // ---- display data (torn reads are only cosmetic) ----
     float stepGlow[16] = {};
     float eocFlash = 0.f, restFlash = 0.f, mutFlash = 0.f, randFlash = 0.f;
-    int   mutIdx = -1;
-    int   playPc = -1;
-    int   vTranspose = 0;
+    int mutIdx = -1;
+    int playPc = -1;
+    int vTranspose = 0;
 
     dsp::SchmittTrigger clockTrig, randTrig, resetTrig, randBtnTrig;
     dsp::PulseGenerator eocPulse;
@@ -306,12 +318,22 @@ struct ExpressArpeggiator : Module
         int best = s;
         for (int d = 0; d <= 6; ++d)
         {
-            if (inScale(s - d, root, iv)) { best = s - d; break; }
-            if (inScale(s + d, root, iv)) { best = s + d; break; }
+            if (inScale(s - d, root, iv))
+            {
+                best = s - d;
+                break;
+            }
+            if (inScale(s + d, root, iv))
+            {
+                best = s + d;
+                break;
+            }
         }
         int lo = root, hi = root + 12 * span - 1;
-        while (best < lo) best += 12;
-        while (best > hi) best -= 12;
+        while (best < lo)
+            best += 12;
+        while (best > hi)
+            best -= 12;
         return best;
     }
 
@@ -365,8 +387,9 @@ struct ExpressArpeggiator : Module
         playPc = -1;
     }
 
-    void onReset() override
+    void onReset(const ResetEvent &e) override
     {
+        Module::onReset(e);
         initPattern();
         outInit = false;
     }
@@ -410,11 +433,19 @@ struct ExpressArpeggiator : Module
         {
         case 0:
             currentStep++;
-            if (currentStep >= n) { currentStep = 0; eoc = true; }
+            if (currentStep >= n)
+            {
+                currentStep = 0;
+                eoc = true;
+            }
             break;
         case 1:
             currentStep--;
-            if (currentStep < 0) { currentStep = n - 1; eoc = true; }
+            if (currentStep < 0)
+            {
+                currentStep = n - 1;
+                eoc = true;
+            }
             break;
         case 2:
             currentStep = randInt(n);
@@ -428,12 +459,25 @@ struct ExpressArpeggiator : Module
             break;
         }
         default:
-            if (n <= 1) { currentStep = 0; eoc = true; }
+            if (n <= 1)
+            {
+                currentStep = 0;
+                eoc = true;
+            }
             else
             {
                 currentStep += dirSign;
-                if (currentStep >= n)     { currentStep = n - 2; dirSign = -1; }
-                else if (currentStep < 0) { currentStep = 1;     dirSign = 1; eoc = true; }
+                if (currentStep >= n)
+                {
+                    currentStep = n - 2;
+                    dirSign = -1;
+                }
+                else if (currentStep < 0)
+                {
+                    currentStep = 1;
+                    dirSign = 1;
+                    eoc = true;
+                }
             }
             break;
         }
@@ -543,7 +587,7 @@ struct ExpressArpeggiator : Module
             outV = tgt;
             outInit = true;
         }
-        float tau = (glide < 0.002f) ? 0.f : 0.002f * std::pow(250.f, glide);   // 2 ms .. 500 ms
+        float tau = (glide < 0.002f) ? 0.f : 0.002f * std::pow(250.f, glide); // 2 ms .. 500 ms
         float a = (tau > 0.f) ? (1.f - std::exp(-dt / tau)) : 1.f;
         outV += (tgt - outV) * a;
         outputs[VOCT_OUTPUT].setVoltage(outV);
@@ -594,8 +638,8 @@ struct ExpressArpeggiator : Module
             if (n && json_is_array(n))
             {
                 json_t *v = json_array_get(n, i);
-                if (v)
-                    noteSemi[i] = (int)json_integer_value(v);
+                if (v && json_is_integer(v))
+                    noteSemi[i] = rack::math::clamp((int)json_integer_value(v), 0, 59);
             }
             if (l && json_is_array(l))
             {
@@ -616,412 +660,190 @@ struct ExpressArpeggiator : Module
 };
 
 // ----------------------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace)
+// UI (anonymous namespace: names cannot clash with other module files)
 // ----------------------------------------------------------------------------
-namespace {
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x25, 0x28, 0x30); }
-NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-NVGcolor colText()     { return nvgRGB(0xd6, 0xdc, 0xe6); }
-NVGcolor colDim()      { return nvgRGB(0x8a, 0x95, 0xa5); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colBright()   { return nvgRGB(0x7a, 0xec, 0xff); }
-NVGcolor colWarm()     { return nvgRGB(0xff, 0x9c, 0x6a); }
-NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
+    const int EA_WPC[7] = {0, 2, 4, 5, 7, 9, 11}; // white keys
+    const int EA_BPC[5] = {1, 3, 6, 8, 10};       // black keys
+    const int EA_BIDX[5] = {0, 1, 3, 4, 5};       // white key left of each black key
 
-NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
+    // Knob table: parameter, centre x, plate top, plate width, label.
+    // The knob centre is always 34 px below the plate top (label sits above it).
+    struct EAKnob
+    {
+        int param;
+        float x, top, w;
+        const char *label;
+    };
+    const float EA_KNOB_DY = 34.f, EA_KNOB_H = 56.f;
+    const EAKnob EA_KNOBS[10] = {
+        {ExpressArpeggiator::ROOT_NOTE_PARAM, 38.f, 50.f, 52.f, "KEY"},
+        {ExpressArpeggiator::SCALE_PARAM, 38.f, 116.f, 52.f, "SCALE"},
+        {ExpressArpeggiator::STEPS_PARAM, 384.f, 50.f, 52.f, "STEPS"},
+        {ExpressArpeggiator::DIRECTION_PARAM, 384.f, 116.f, 52.f, "MOVE"},
+        {ExpressArpeggiator::MUTATION_PARAM, 50.f, 234.f, 56.f, "MUTATE"},
+        {ExpressArpeggiator::OCTAVES_PARAM, 114.f, 234.f, 56.f, "RANGE"},
+        {ExpressArpeggiator::GATE_LEN_PARAM, 178.f, 234.f, 56.f, "GATE"},
+        {ExpressArpeggiator::REST_PARAM, 242.f, 234.f, 56.f, "REST"},
+        {ExpressArpeggiator::GLIDE_PARAM, 306.f, 234.f, 56.f, "GLIDE"},
+        {ExpressArpeggiator::TRANSPOSE_PARAM, 370.f, 234.f, 56.f, "TRANS"},
+    };
 
-const int EA_WPC[7]  = {0, 2, 4, 5, 7, 9, 11};   // white keys
-const int EA_BPC[5]  = {1, 3, 6, 8, 10};         // black keys
-const int EA_BIDX[5] = {0, 1, 3, 4, 5};          // white key left of each black key
+    // Section header for a block narrower than the panel
+    void eaBlockHeader(NVGcontext *vg, float x0, float w, float y, const char *txt)
+    {
+        nvgSave(vg);
+        nvgTranslate(vg, x0, 0.f);
+        agmm::sectionHeader(vg, w, y, txt, 0.f);
+        nvgRestore(vg);
+    }
 
-// Knob table: parameter, position, tick count, bipolar arc, label
-struct EAKnob { int param; float x, y; int ticks; bool bipolar; const char* label; };
-const EAKnob EA_KNOBS[10] = {
-    {ExpressArpeggiator::ROOT_NOTE_PARAM,  36.f,  82.f, 12, false, "KEY"},
-    {ExpressArpeggiator::SCALE_PARAM,      36.f, 152.f, 11, false, "SCALE"},
-    {ExpressArpeggiator::STEPS_PARAM,     384.f,  82.f,  8, false, "STEPS"},
-    {ExpressArpeggiator::DIRECTION_PARAM, 384.f, 152.f,  5, false, "MOVE"},
-    {ExpressArpeggiator::MUTATION_PARAM,   50.f, 246.f, 11, false, "MUTATE"},
-    {ExpressArpeggiator::OCTAVES_PARAM,   114.f, 246.f,  4, false, "RANGE"},
-    {ExpressArpeggiator::GATE_LEN_PARAM,  178.f, 246.f, 11, false, "GATE"},
-    {ExpressArpeggiator::REST_PARAM,      242.f, 246.f, 11, false, "REST"},
-    {ExpressArpeggiator::GLIDE_PARAM,     306.f, 246.f, 11, false, "GLIDE"},
-    {ExpressArpeggiator::TRANSPOSE_PARAM, 370.f, 246.f,  9, true,  "TRANS"},
-};
-
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-// Custom light for the button LED
-template <typename TBase = GrayModuleLightWidget>
-struct TEACyanLight : TBase {
-    TEACyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using EACyanLight = TEACyanLight<>;
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                       nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                         nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s,       ty,            s, s);
-    nvgRect(vg, tx,           ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-// Tick arc around a knob (n ticks across the 270 degree sweep)
-void drawKnobTicks(NVGcontext* vg, float cx, float cy, float r0, float r1, int n = 11) {
-    nvgLineCap(vg, NVG_ROUND);
-    for (int i = 0; i < n; ++i) {
-        float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-        bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-        float ra = major ? r0 - 1.5f : r0;
+    // Small padlock glyph (flat)
+    void drawLock(NVGcontext *vg, float cx, float cy, bool on)
+    {
+        NVGcolor col = on ? agmm::violet() : agmm::dim();
+        float al = on ? 0.95f : 0.35f;
+        float sy = on ? cy - 0.5f : cy - 2.2f;
         nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-        nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-        nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-        nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
+        nvgArc(vg, cx, sy, 2.1f, (float)M_PI, 2.f * (float)M_PI, NVG_CW);
+        nvgStrokeColor(vg, agmm::withA(col, al));
+        nvgStrokeWidth(vg, 1.1f);
         nvgStroke(vg);
-    }
-}
-
-// Small padlock glyph
-void drawLock(NVGcontext* vg, float cx, float cy, bool on) {
-    NVGcolor col = on ? colViolet() : colDim();
-    float al = on ? 0.95f : 0.28f;
-    if (on) {
         nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy + 1.f, 5.5f);
-        nvgFillColor(vg, withA(colViolet(), 0.16f));
+        nvgRoundedRect(vg, cx - 3.f, cy - 0.5f, 6.f, 4.6f, 1.f);
+        nvgFillColor(vg, agmm::withA(col, al));
         nvgFill(vg);
     }
-    float sy = on ? cy - 0.5f : cy - 2.2f;
-    nvgBeginPath(vg);
-    nvgArc(vg, cx, sy, 2.1f, (float)M_PI, 2.f * (float)M_PI, NVG_CW);
-    nvgStrokeColor(vg, withA(col, al));
-    nvgStrokeWidth(vg, 1.1f);
-    nvgStroke(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, cx - 3.f, cy - 0.5f, 6.f, 4.6f, 1.f);
-    nvgFillColor(vg, withA(col, al * 0.9f));
-    nvgFill(vg);
-}
 
-// ------------------------------------------------------------
-// Panel background
-// ------------------------------------------------------------
-struct EAPanel : TransparentWidget {
-    EAPanel() { box.size = Vec(EA_W, EA_H); }
+    // ------------------------------------------------------------
+    // Panel background
+    // ------------------------------------------------------------
+    struct EAPanel : TransparentWidget
+    {
+        EAPanel() { box.size = Vec(EA_W, EA_H); }
 
-    void label(NVGcontext* vg, float x, float y, const char* txt) {
-        drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-    }
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            agmm::panelBase(vg, EA_W, EA_H, "EXPRESSARP");
+            agmm::bezel(vg, EA_DX, EA_DY, EA_DW, EA_DH);
 
-    void plate(NVGcontext* vg, float x, float y, float w, float h) {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-        nvgFill(vg);
+            // ---- side blocks and control row: plate + label above each knob ----
+            eaBlockHeader(vg, 10.f, 56.f, EA_HEAD_Y, "PITCH");
+            eaBlockHeader(vg, 356.f, 56.f, EA_HEAD_Y, "SEQ");
+            agmm::sectionHeader(vg, EA_W, EA_CTRL_SEC_Y, "CONTROL", 12.f);
+            for (int k = 0; k < 10; ++k)
+            {
+                const EAKnob &kn = EA_KNOBS[k];
+                agmm::cell(vg, kn.x, kn.top, kn.w, EA_KNOB_H, kn.label, false, 8.f);
+            }
 
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
+            // ---- I/O row: inputs left, randomize button, outputs right (tinted) ----
+            agmm::sectionHeader(vg, EA_W, EA_IO_SEC_Y, "I / O", 12.f);
+            const char *io[10] = {"CLOCK", "RESET", "RND IN", "TRN CV", "MUT CV",
+                                  "RANDOM", "V/OCT", "GATE", "EOC", "STEP"};
+            for (int i = 0; i < 10; ++i)
+                agmm::cell(vg, eaIoX(i), EA_IO_TOP, EA_IO_W, EA_IO_H, io[i], i >= 6, 7.f);
 
-    void ring(NVGcontext* vg, float cx, float cy, float r) {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-                                           nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
+            Widget::draw(args);
+        }
+    };
 
-    void section(NVGcontext* vg, float y, const char* txt) {
-        float x1 = 12.f, x2 = EA_W - 12.f, cx = EA_W / 2.f;
-        float w = 14.f + (float) strlen(txt) * 7.f;
-        drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
+    // ------------------------------------------------------------
+    // Pattern display (interactive)
+    // ------------------------------------------------------------
+    enum
+    {
+        Z_NONE = 0,
+        Z_BARS,
+        Z_GATE,
+        Z_LOCK,
+        Z_NUM,
+        Z_DIR
+    };
 
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, x1, y);
-        nvgLineTo(vg, cx - w / 2.f, y);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-                                             nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
+    struct EADisplay : Widget
+    {
+        ExpressArpeggiator *module = nullptr;
+        int hoverZone = Z_NONE, hoverIdx = -1;
+        bool editing = false;
+        Vec dragPos;
 
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + w / 2.f, y);
-        nvgLineTo(vg, x2, y);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-                                             nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // kind: 0 = input (orange), 1 = output (cyan), 2 = control (purple)
-    void cell(NVGcontext* vg, float cx, float cy, const char* txt, int kind) {
-        const float w = 32.f, top = -27.f, h = 44.f;
-        float x = cx - w / 2.f, y = cy + top;
-        plate(vg, x, y, w, h);
-
-        NVGcolor c = (kind == 0) ? nvgRGBA(0xff, 0x9c, 0x6a, 170)
-                   : (kind == 1) ? nvgRGBA(0x3d, 0xe0, 0xff, 170)
-                                 : nvgRGBA(0xb0, 0x5a, 0xff, 170);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
-        nvgFillColor(vg, c);
-        nvgFill(vg);
-
-        label(vg, cx, cy - 19.f, txt);
-    }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-
-        // Base gradient
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, EA_W, EA_H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, EA_H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
-
-        // Brushed texture
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int) EA_H; y += 3) {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, EA_W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
+        EADisplay(ExpressArpeggiator *m) : module(m)
+        {
+            box.pos = Vec(EA_DX, EA_DY);
+            box.size = Vec(EA_DW, EA_DH);
         }
 
-        // Corner vignette
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, EA_W, EA_H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, EA_W / 2.f, EA_H * 0.4f,
-                                           EA_H * 0.35f, EA_H * 0.95f,
-                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-        nvgFill(vg);
-
-        // Edge highlight
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, EA_W - 1.f, EA_H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Top accent line
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, EA_W, 2.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, EA_W, 0,
-                                           nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgFill(vg);
-
-        // Logo + title
-        drawLogo(vg, EA_W / 2.f, 15.f);
-        drawText(vg, EA_W / 2.f, 32.f, "EXPRESSARP", 12.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-        // ---- Display bezel (metallic, recessed) ----
-        float bx = EA_DX - 5.f, by = EA_DY - 5.f;
-        float bw = EA_DW + 10.f, bh = EA_DH + 10.f;
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                           nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-
-        // ---- Knobs: wells, tick scales, labels ----
-        for (int k = 0; k < 10; ++k) {
-            const EAKnob& kn = EA_KNOBS[k];
-            ring(vg, kn.x, kn.y, 17.f);
-            drawKnobTicks(vg, kn.x, kn.y, 21.f, 24.f, kn.ticks);
-            label(vg, kn.x, kn.y + 29.f, kn.label);
+        // ---- hit testing ----
+        int zoneAt(Vec p, int &idx) const
+        {
+            idx = -1;
+            if (p.x >= EA_BX0 && p.x < EA_BX0 + 16.f * EA_CW)
+            {
+                int c = rack::math::clamp((int)std::floor((p.x - EA_BX0) / EA_CW), 0, 15);
+                if (p.y >= EA_BY0 - 3.f && p.y <= EA_BY0 + EA_BH + 2.f)
+                {
+                    idx = c;
+                    return Z_BARS;
+                }
+                if (p.y >= EA_GATE_Y - 1.f && p.y <= EA_GATE_Y + EA_GATE_H + 1.f)
+                {
+                    idx = c;
+                    return Z_GATE;
+                }
+                if (p.y >= EA_LOCK_Y - 1.f && p.y <= EA_LOCK_Y + EA_LOCK_H + 1.f)
+                {
+                    idx = c;
+                    return Z_LOCK;
+                }
+                if (p.y >= EA_NUM_Y - 4.5f && p.y <= EA_NUM_Y + 4.5f)
+                {
+                    idx = c;
+                    return Z_NUM;
+                }
+            }
+            if (p.y >= EA_CHIP_Y && p.y <= EA_CHIP_Y + EA_CHIP_H && p.x >= EA_CHIP_X)
+            {
+                float rel = p.x - EA_CHIP_X;
+                int i = (int)std::floor(rel / EA_CHIP_P);
+                if (i >= 0 && i < 5 && rel - (float)i * EA_CHIP_P <= EA_CHIP_W)
+                {
+                    idx = i;
+                    return Z_DIR;
+                }
+            }
+            return Z_NONE;
         }
 
-        // ---- Section headers ----
-        section(vg, EA_CTRL_SEC_Y, "CONTROL");
-        section(vg, EA_IO_SEC_Y, "I / O");
-
-        // ---- I/O row ----
-        const char* io[10] = {"CLOCK", "RESET", "RND IN", "TRN CV", "MUT CV",
-                              "RANDOM", "V/OCT", "GATE", "EOC", "STEP"};
-        const int kind[10] = {0, 0, 0, 0, 0, 2, 1, 1, 1, 1};
-        for (int i = 0; i < 10; ++i)
-            cell(vg, eaIoX(i), EA_IO_Y, io[i], kind[i]);
-
-        char buf[64];
-        snprintf(buf, sizeof(buf), "16 STEP  -  %d SCALES  -  GATE / V/OCT",
-                 (int) scaleTable().size());
-        drawText(vg, EA_W / 2.f, 368.f, buf, 6.f, nvgRGBA(0x8a, 0x95, 0xa5, 120),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
-
-        Widget::draw(args);
-    }
-};
-
-// ------------------------------------------------------------
-// Live value arcs around the knobs
-// ------------------------------------------------------------
-struct EAKnobArcs : TransparentWidget {
-    ExpressArpeggiator* module = nullptr;
-
-    EAKnobArcs(ExpressArpeggiator* m) : module(m) { box.size = Vec(EA_W, EA_H); }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        const float R = 17.2f;
-        const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
-        const float a1 =  0.75f * (float)M_PI - (float)M_PI / 2.f;
-
-        for (int k = 0; k < 10; ++k) {
-            const EAKnob& kn = EA_KNOBS[k];
-
-            nvgBeginPath(vg);
-            nvgArc(vg, kn.x, kn.y, R, a0, a1, NVG_CW);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 2.f);
-            nvgLineCap(vg, NVG_ROUND);
-            nvgStroke(vg);
-
-            if (!module) continue;
-            float v = module->paramQuantities[kn.param]->getScaledValue();   // 0..1
-            float from = kn.bipolar ? 0.5f : 0.f;
-            float lo = std::min(from, v), hi = std::max(from, v);
-            if (hi - lo < 0.004f) continue;
-
-            float s = a0 + (a1 - a0) * lo;
-            float e = a0 + (a1 - a0) * hi;
-            NVGcolor col = (kn.bipolar && v < 0.5f) ? colWarm() : colAccent();
-
-            nvgBeginPath(vg);
-            nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-            nvgStrokeColor(vg, withA(col, 0.18f));
-            nvgStrokeWidth(vg, 5.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-            nvgStrokeColor(vg, withA(col, 0.95f));
-            nvgStrokeWidth(vg, 2.f);
-            nvgStroke(vg);
-        }
-    }
-};
-
-// ------------------------------------------------------------
-// Pattern display (interactive)
-// ------------------------------------------------------------
-enum { Z_NONE = 0, Z_BARS, Z_GATE, Z_LOCK, Z_NUM, Z_DIR };
-
-struct EADisplay : Widget {
-    ExpressArpeggiator* module = nullptr;
-    int  hoverZone = Z_NONE, hoverIdx = -1;
-    bool editing = false;
-    Vec  dragPos;
-
-    EADisplay(ExpressArpeggiator* m) : module(m) {
-        box.pos = Vec(EA_DX, EA_DY);
-        box.size = Vec(EA_DW, EA_DH);
-    }
-
-    // ---- hit testing ----
-    int zoneAt(Vec p, int& idx) const {
-        idx = -1;
-        if (p.x >= EA_BX0 && p.x < EA_BX0 + 16.f * EA_CW) {
+        // ---- paint a note from the pointer position ----
+        void applyEdit(Vec p)
+        {
+            if (!module)
+                return;
             int c = rack::math::clamp((int)std::floor((p.x - EA_BX0) / EA_CW), 0, 15);
-            if (p.y >= EA_BY0 - 3.f && p.y <= EA_BY0 + EA_BH + 2.f) { idx = c; return Z_BARS; }
-            if (p.y >= EA_GATE_Y - 1.f && p.y <= EA_GATE_Y + EA_GATE_H + 1.f) { idx = c; return Z_GATE; }
-            if (p.y >= EA_LOCK_Y - 1.f && p.y <= EA_LOCK_Y + EA_LOCK_H + 1.f) { idx = c; return Z_LOCK; }
-            if (p.y >= EA_NUM_Y - 3.5f && p.y <= EA_NUM_Y + 3.5f) { idx = c; return Z_NUM; }
+            if (c >= module->numSteps)
+                return;
+            float t = rack::math::clamp((EA_BY0 + EA_BH - p.y) / EA_BH, 0.f, 1.f);
+            int root = module->getRoot(), span = module->getSpan();
+            float semiF = (float)root + t * 12.f * (float)span - 1.f;
+            module->noteSemi[c] = module->quantizeToScale(semiF);
+            module->stepGlow[c] = 1.f;
         }
-        if (p.y >= EA_CHIP_Y && p.y <= EA_CHIP_Y + EA_CHIP_H && p.x >= EA_CHIP_X) {
-            float rel = p.x - EA_CHIP_X;
-            int i = (int)std::floor(rel / EA_CHIP_P);
-            if (i >= 0 && i < 5 && rel - (float)i * EA_CHIP_P <= EA_CHIP_W) { idx = i; return Z_DIR; }
-        }
-        return Z_NONE;
-    }
 
-    // ---- paint a note from the pointer position ----
-    void applyEdit(Vec p) {
-        if (!module) return;
-        int c = rack::math::clamp((int)std::floor((p.x - EA_BX0) / EA_CW), 0, 15);
-        if (c >= module->numSteps) return;
-        float t = rack::math::clamp((EA_BY0 + EA_BH - p.y) / EA_BH, 0.f, 1.f);
-        int root = module->getRoot(), span = module->getSpan();
-        float semiF = (float)root + t * 12.f * (float)span - 1.f;
-        module->noteSemi[c] = module->quantizeToScale(semiF);
-        module->stepGlow[c] = 1.f;
-    }
-
-    // ---- mouse ----
-    void onButton(const ButtonEvent& e) override {
-        if (module && e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
-            int idx;
-            int z = zoneAt(e.pos, idx);
-            if (z != Z_NONE) {
-                switch (z) {
+        // ---- mouse ----
+        void onButton(const ButtonEvent &e) override
+        {
+            if (module && e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
+            {
+                int idx;
+                int z = zoneAt(e.pos, idx);
+                if (z != Z_NONE)
+                {
+                    switch (z)
+                    {
                     case Z_BARS:
                         editing = true;
                         dragPos = e.pos;
@@ -1040,567 +862,549 @@ struct EADisplay : Widget {
                     case Z_DIR:
                         module->params[ExpressArpeggiator::DIRECTION_PARAM].setValue((float)idx);
                         break;
+                    }
+                    e.consume(this);
+                    return;
                 }
+            }
+            Widget::onButton(e);
+        }
+
+        void onDragMove(const DragMoveEvent &e) override
+        {
+            if (!editing || !module)
+                return;
+            dragPos = dragPos.plus(e.mouseDelta.div(getAbsoluteZoom()));
+            applyEdit(dragPos);
+        }
+
+        void onDragEnd(const DragEndEvent &e) override
+        {
+            editing = false;
+            Widget::onDragEnd(e);
+        }
+
+        void onHover(const HoverEvent &e) override
+        {
+            int idx;
+            int z = zoneAt(e.pos, idx);
+            hoverZone = z;
+            hoverIdx = idx;
+            if (z != Z_NONE)
                 e.consume(this);
+            else
+                Widget::onHover(e);
+        }
+
+        void onLeave(const LeaveEvent &e) override
+        {
+            hoverZone = Z_NONE;
+            hoverIdx = -1;
+            Widget::onLeave(e);
+        }
+
+        // ---- static background: flat screen + row labels ----
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            agmm::screen(vg, 0.f, 0.f, EA_DW, EA_DH);
+
+            // row labels live in the left column, never over the bars
+            agmm::text(vg, EA_BX0 - 3.f, EA_GATE_Y + EA_GATE_H / 2.f + 0.5f, "GATE", 7.f, agmm::dim(), agmm::ALIGN_R, 0.3f);
+            agmm::text(vg, EA_BX0 - 3.f, EA_LOCK_Y + EA_LOCK_H / 2.f + 0.5f, "LOCK", 7.f, agmm::dim(), agmm::ALIGN_R, 0.3f);
+            agmm::text(vg, EA_BX0 - 3.f, EA_NUM_Y, "STEP", 7.f, agmm::dim(), agmm::ALIGN_R, 0.3f);
+
+            Widget::draw(args);
+        }
+
+        // ---- live content ----
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
                 return;
             }
-        }
-        Widget::onButton(e);
-    }
+            NVGcontext *vg = args.vg;
+            const float W = EA_DW, H = EA_DH;
 
-    void onDragMove(const DragMoveEvent& e) override {
-        if (!editing || !module) return;
-        dragPos = dragPos.plus(e.mouseDelta.div(getAbsoluteZoom()));
-        applyEdit(dragPos);
-    }
+            // ----- snapshot of the state -----
+            int n = 8, cur = 2, dir = 0, root = 0, scaleIdx = 0, span = 2;
+            int mutIdx = -1, playPc = -1, trans = 0;
+            bool playing = true, curRest = false, gateOn = true;
+            int notes[16];
+            bool lk[16], mt[16];
+            float glow[16];
+            float eocF = 0.f, restF = 0.f, mutF = 0.f, mutP = 0.2f, gateLen = 0.5f;
+            uint16_t mask = 0xAB5;
 
-    void onDragEnd(const DragEndEvent& e) override {
-        editing = false;
-        Widget::onDragEnd(e);
-    }
-
-    void onHover(const HoverEvent& e) override {
-        int idx;
-        int z = zoneAt(e.pos, idx);
-        hoverZone = z;
-        hoverIdx = idx;
-        if (z != Z_NONE) e.consume(this);
-        else Widget::onHover(e);
-    }
-
-    void onLeave(const LeaveEvent& e) override {
-        hoverZone = Z_NONE;
-        hoverIdx = -1;
-        Widget::onLeave(e);
-    }
-
-    // ---- static background ----
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, 0, 0, EA_DW, EA_DH, 4.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, EA_DH,
-                                           nvgRGB(0x0a, 0x16, 0x1f), nvgRGB(0x03, 0x06, 0x09)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, 0.5f, 0.5f, EA_DW - 1.f, EA_DH - 1.f, 4.f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        NVGcolor rl = nvgRGBA(0x8a, 0x95, 0xa5, 150);
-        drawText(vg, EA_BX0 - 3.f, EA_GATE_Y + EA_GATE_H / 2.f, "GATE", 4.8f, rl,
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-        drawText(vg, EA_BX0 - 3.f, EA_LOCK_Y + EA_LOCK_H / 2.f, "LOCK", 4.8f, rl,
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-        drawText(vg, EA_BX0 - 3.f, EA_NUM_Y, "STEP", 4.8f, rl,
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-
-        Widget::draw(args);
-    }
-
-    // ---- live content ----
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) {
-            Widget::drawLayer(args, layer);
-            return;
-        }
-        NVGcontext* vg = args.vg;
-        const float W = EA_DW, H = EA_DH;
-
-        // ----- snapshot of the state -----
-        int n = 8, cur = 2, dir = 0, root = 0, scaleIdx = 0, span = 2;
-        int mutIdx = -1, playPc = -1, trans = 0;
-        bool playing = true, curRest = false, gateOn = true;
-        int notes[16];
-        bool lk[16], mt[16];
-        float glow[16];
-        float eocF = 0.f, restF = 0.f, mutF = 0.f, mutP = 0.2f, gateLen = 0.5f;
-        uint16_t mask = 0xAB5;
-
-        if (module) {
-            n = module->numSteps;
-            cur = module->currentStep;
-            playing = module->playing;
-            curRest = module->curRest;
-            gateOn = module->gateRemaining > 0.f;
-            for (int i = 0; i < 16; ++i) {
-                notes[i] = module->noteSemi[i];
-                lk[i] = module->locked[i];
-                mt[i] = module->muted[i];
-                glow[i] = module->stepGlow[i];
-            }
-            eocF = module->eocFlash;
-            restF = module->restFlash;
-            mutF = module->mutFlash;
-            mutIdx = module->mutIdx;
-            playPc = module->playPc;
-            trans = module->vTranspose;
-            mask = module->scaleMask;
-            dir = (int) std::round(module->params[ExpressArpeggiator::DIRECTION_PARAM].getValue());
-            root = (int) std::round(module->params[ExpressArpeggiator::ROOT_NOTE_PARAM].getValue());
-            scaleIdx = (int) std::round(module->params[ExpressArpeggiator::SCALE_PARAM].getValue());
-            span = (int) std::round(module->params[ExpressArpeggiator::OCTAVES_PARAM].getValue());
-            mutP = module->params[ExpressArpeggiator::MUTATION_PARAM].getValue();
-            gateLen = module->params[ExpressArpeggiator::GATE_LEN_PARAM].getValue();
-        } else {
-            // demo values for the module browser
-            static const int demo[16] = {0, 4, 7, 12, 9, 5, 16, 11, 2, 7, 14, 9, 4, 0, 12, 7};
-            for (int i = 0; i < 16; ++i) {
-                notes[i] = demo[i];
-                lk[i] = (i == 3);
-                mt[i] = (i == 5);
-                glow[i] = (i == 2) ? 0.7f : 0.f;
-            }
-            playPc = 7;
-        }
-        n = rack::math::clamp(n, 2, 16);
-        cur = rack::math::clamp(cur, 0, n - 1);
-        dir = rack::math::clamp(dir, 0, 4);
-        root = rack::math::clamp(root, 0, 11);
-        span = rack::math::clamp(span, 1, 4);
-        scaleIdx = rack::math::clamp(scaleIdx, 0, (int) scaleTable().size() - 1);
-
-        const float baseY = EA_BY0 + EA_BH;
-        const float rangeSemi = 12.f * (float) span;
-
-        nvgSave(vg);
-        nvgScissor(vg, 0, 0, W, H);
-
-        // ================= column slots =================
-        for (int c = 0; c < 16; ++c) {
-            bool active = (c < n);
-            bool isCur = playing && c == cur;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, EA_BX0 + (float)c * EA_CW + 1.f, EA_BY0,
-                           EA_CW - 2.f, EA_BH, 2.f);
-            float a = active ? (isCur ? 0.05f + 0.08f * glow[c] + 0.05f : 0.035f) : 0.012f;
-            nvgFillColor(vg, withA(isCur ? colAccent() : nvgRGB(255, 255, 255), a));
-            nvgFill(vg);
-        }
-
-        // ================= pitch grid =================
-        {
-            int count = 0;
-            for (int pc = 0; pc < 12; ++pc)
-                if ((mask >> pc) & 1) count++;
-            count *= span;
-
-            // scale tone guides + edge ticks
-            for (int s = root; s < root + 12 * span; ++s) {
-                if (!((mask >> eaMod12(s)) & 1)) continue;
-                float f = ((float)(s - root) + 1.f) / rangeSemi;
-                float y = baseY - EA_BH * f;
-                if (count <= 16) {
-                    nvgBeginPath(vg);
-                    nvgMoveTo(vg, EA_BX0, y + 0.5f);
-                    nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, y + 0.5f);
-                    nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 9));
-                    nvgStrokeWidth(vg, 1.f);
-                    nvgStroke(vg);
+            if (module)
+            {
+                n = module->numSteps;
+                cur = module->currentStep;
+                playing = module->playing;
+                curRest = module->curRest;
+                gateOn = module->gateRemaining > 0.f;
+                for (int i = 0; i < 16; ++i)
+                {
+                    notes[i] = module->noteSemi[i];
+                    lk[i] = module->locked[i];
+                    mt[i] = module->muted[i];
+                    glow[i] = module->stepGlow[i];
                 }
-                if (count <= 40) {
+                eocF = module->eocFlash;
+                restF = module->restFlash;
+                mutF = module->mutFlash;
+                mutIdx = module->mutIdx;
+                playPc = module->playPc;
+                trans = module->vTranspose;
+                mask = module->scaleMask;
+                dir = (int)std::round(module->params[ExpressArpeggiator::DIRECTION_PARAM].getValue());
+                root = (int)std::round(module->params[ExpressArpeggiator::ROOT_NOTE_PARAM].getValue());
+                scaleIdx = (int)std::round(module->params[ExpressArpeggiator::SCALE_PARAM].getValue());
+                span = (int)std::round(module->params[ExpressArpeggiator::OCTAVES_PARAM].getValue());
+                mutP = module->params[ExpressArpeggiator::MUTATION_PARAM].getValue();
+                gateLen = module->params[ExpressArpeggiator::GATE_LEN_PARAM].getValue();
+            }
+            else
+            {
+                // demo values for the module browser
+                static const int demo[16] = {0, 4, 7, 12, 9, 5, 16, 11, 2, 7, 14, 9, 4, 0, 12, 7};
+                for (int i = 0; i < 16; ++i)
+                {
+                    notes[i] = demo[i];
+                    lk[i] = (i == 3);
+                    mt[i] = (i == 5);
+                    glow[i] = (i == 2) ? 0.7f : 0.f;
+                }
+                playPc = 7;
+            }
+            n = rack::math::clamp(n, 2, 16);
+            cur = rack::math::clamp(cur, 0, n - 1);
+            dir = rack::math::clamp(dir, 0, 4);
+            root = rack::math::clamp(root, 0, 11);
+            span = rack::math::clamp(span, 1, 4);
+            scaleIdx = rack::math::clamp(scaleIdx, 0, (int)scaleTable().size() - 1);
+
+            const float baseY = EA_BY0 + EA_BH;
+            const float rangeSemi = 12.f * (float)span;
+            char buf[64];
+
+            nvgSave(vg);
+            nvgScissor(vg, 0, 0, W, H);
+
+            // ================= readout row =================
+            {
+                snprintf(buf, sizeof(buf), "%s4  MUT %.0f%%", EA_NN[root], mutP * 100.f);
+                const float rW = agmm::textWidth(vg, buf, 7.f, 0.5f);
+                agmm::text(vg, W - 6.f, 9.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), agmm::ALIGN_R, 0.5f);
+
+                char mid[32];
+                snprintf(mid, sizeof(mid), "TRN %+d  %dOCT", trans, span);
+                const float mW = agmm::textWidth(vg, mid, 7.f, 0.5f);
+                const float mCx = W - 6.f - rW - 10.f - mW / 2.f;
+                agmm::text(vg, mCx, 9.f, mid, 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
+
+                // scale name: shorten until it clears the centre readout
+                std::string name = scaleTable()[scaleIdx].name;
+                const float maxW = (mCx - mW / 2.f) - 6.f - 8.f;
+                while (name.size() > 3 && agmm::textWidth(vg, name.c_str(), 7.f, 0.5f) > maxW)
+                    name.pop_back();
+                agmm::text(vg, 6.f, 9.f, name.c_str(), 7.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
+            }
+
+            // ================= column slots =================
+            for (int c = 0; c < 16; ++c)
+            {
+                bool active = (c < n);
+                bool isCur = playing && c == cur;
+                nvgBeginPath(vg);
+                nvgRect(vg, EA_BX0 + (float)c * EA_CW + 1.f, EA_BY0, EA_CW - 2.f, EA_BH);
+                float a = active ? (isCur ? 0.12f : 0.035f) : 0.012f;
+                nvgFillColor(vg, agmm::withA(isCur ? agmm::accent() : nvgRGB(255, 255, 255), a));
+                nvgFill(vg);
+            }
+
+            // ================= pitch grid =================
+            {
+                int count = 0;
+                for (int pc = 0; pc < 12; ++pc)
+                    if ((mask >> pc) & 1)
+                        count++;
+                count *= span;
+
+                for (int s = root; s < root + 12 * span; ++s)
+                {
+                    if (!((mask >> eaMod12(s)) & 1))
+                        continue;
+                    float f = ((float)(s - root) + 1.f) / rangeSemi;
+                    float y = baseY - EA_BH * f;
+                    if (count <= 16)
+                    {
+                        nvgBeginPath(vg);
+                        nvgMoveTo(vg, EA_BX0, y + 0.5f);
+                        nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, y + 0.5f);
+                        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 12));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                    if (count <= 40)
+                    {
+                        nvgBeginPath(vg);
+                        nvgMoveTo(vg, EA_BX0 - 2.f, y + 0.5f);
+                        nvgLineTo(vg, EA_BX0, y + 0.5f);
+                        nvgStrokeColor(vg, agmm::withA(agmm::accent(), 0.5f));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                }
+
+                // octave lines; their note names sit in the left column
+                for (int j = 0; j < span; ++j)
+                {
+                    float f = (12.f * (float)j + 1.f) / rangeSemi;
+                    float y = baseY - EA_BH * f;
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, EA_BX0 - 2.f, y + 0.5f);
-                    nvgLineTo(vg, EA_BX0, y + 0.5f);
-                    nvgStrokeColor(vg, withA(colAccent(), 0.5f));
+                    nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, y + 0.5f);
+                    nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, j == 0 ? 50 : 30));
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
-                }
-            }
 
-            // octave lines with note names
-            for (int j = 0; j < span; ++j) {
-                float f = (12.f * (float)j + 1.f) / rangeSemi;
-                float y = baseY - EA_BH * f;
+                    int semi = root + 12 * j;
+                    snprintf(buf, sizeof(buf), "%s%d", EA_NN[eaMod12(semi)], 4 + (int)std::floor((float)semi / 12.f));
+                    agmm::text(vg, EA_BX0 - 4.f, y - 4.f, buf, 7.f, agmm::warm(), agmm::ALIGN_R, 0.f);
+                }
+
+                // baseline
                 nvgBeginPath(vg);
-                nvgMoveTo(vg, EA_BX0 - 2.f, y + 0.5f);
-                nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, j == 0 ? 42 : 26));
+                nvgMoveTo(vg, EA_BX0, baseY + 0.5f);
+                nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, baseY + 0.5f);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
-                int semi = root + 12 * j;
-                char b[8];
-                snprintf(b, sizeof(b), "%s%d", EA_NN[eaMod12(semi)], 4 + (int) std::floor((float) semi / 12.f));
-                drawText(vg, EA_BX0 - 4.f, y - 3.f, b, 5.f, nvgRGBA(0xff, 0x9c, 0x6a, 190),
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.3f);
-            }
-
-            // baseline
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, EA_BX0, baseY + 0.5f);
-            nvgLineTo(vg, EA_BX0 + 16.f * EA_CW, baseY + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // pattern end marker
-            float ex = EA_BX0 + (float) n * EA_CW;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, ex + 0.5f, EA_BY0 - 2.f);
-            nvgLineTo(vg, ex + 0.5f, EA_NUM_Y + 4.f);
-            nvgStrokeColor(vg, withA(colViolet(), 0.35f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // ================= bars =================
-        float tipX[16], tipY[16];
-        for (int c = 0; c < 16; ++c) {
-            float x = EA_BX0 + (float) c * EA_CW + 1.5f, w = EA_CW - 3.f;
-            float f = rack::math::clamp(((float)(notes[c] - root) + 1.f) / rangeSemi, 0.f, 1.f);
-            float h = std::max(f * EA_BH, 2.f);
-            float top = baseY - h;
-            tipX[c] = x + w / 2.f;
-            tipY[c] = top;
-
-            if (c >= n) {
+                // pattern end marker
+                float ex = EA_BX0 + (float)n * EA_CW;
                 nvgBeginPath(vg);
-                nvgRect(vg, x + 1.f, baseY - 1.f, w - 2.f, 1.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
-                nvgFill(vg);
-                continue;
+                nvgMoveTo(vg, ex + 0.5f, EA_BY0 - 2.f);
+                nvgLineTo(vg, ex + 0.5f, EA_NUM_Y + 5.f);
+                nvgStrokeColor(vg, agmm::withA(agmm::violet(), 0.4f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
             }
 
-            bool isCur = playing && (c == cur);
-            float g = glow[c];
-            bool mutated = (c == mutIdx && mutF > 0.02f);
-            bool isRootNote = (eaMod12(notes[c]) == root);
-            bool isMuted = mt[c];
+            // ================= bars =================
+            float tipX[16], tipY[16];
+            for (int c = 0; c < 16; ++c)
+            {
+                float x = EA_BX0 + (float)c * EA_CW + 1.5f, w = EA_CW - 3.f;
+                float f = rack::math::clamp(((float)(notes[c] - root) + 1.f) / rangeSemi, 0.f, 1.f);
+                float h = std::max(f * EA_BH, 2.f);
+                float top = baseY - h;
+                tipX[c] = x + w / 2.f;
+                tipY[c] = top;
 
-            NVGcolor hi = mutated ? nvgRGB(0xd8, 0xb0, 0xff) : nvgRGB(0x8a, 0xee, 0xff);
-            NVGcolor lo = mutated ? nvgRGB(0x7a, 0x3a, 0xc8) : nvgRGB(0x1f, 0x9f, 0xc0);
-            if (isMuted) { hi = nvgRGB(0x7a, 0x85, 0x94); lo = nvgRGB(0x30, 0x38, 0x42); }
-            float a = isMuted ? 0.35f : (0.50f + 0.50f * std::max(g, isCur ? 0.5f : 0.f));
+                if (c >= n)
+                {
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x + 1.f, baseY - 1.f, w - 2.f, 1.f);
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
+                    nvgFill(vg);
+                    continue;
+                }
 
-            if (!isMuted && (g > 0.02f || isCur)) {
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x - 2.f, top - 2.f, w + 4.f, h + 4.f, 3.f);
-                nvgFillColor(vg, withA(mutated ? colViolet() : colAccent(), 0.10f + 0.28f * g));
-                nvgFill(vg);
-            }
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, top, w, h, 1.5f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, baseY, 0, top, withA(lo, a), withA(hi, a)));
-            nvgFill(vg);
-
-            // tip cap: orange on the root, violet when locked
-            NVGcolor cap = isRootNote ? colWarm() : (lk[c] ? colViolet() : nvgRGB(255, 255, 255));
-            float capA = isMuted ? 0.3f : (isCur ? 0.95f : 0.6f);
-            if (isRootNote || lk[c]) capA = std::max(capA, 0.85f);
-            nvgBeginPath(vg);
-            nvgRect(vg, x - 0.5f, top - 0.5f, w + 1.f, 1.8f);
-            nvgFillColor(vg, withA(cap, capA));
-            nvgFill(vg);
-        }
-
-        // pitch contour through the bar tips
-        {
-            nvgLineCap(vg, NVG_ROUND);
-            nvgLineJoin(vg, NVG_ROUND);
-            nvgBeginPath(vg);
-            for (int c = 0; c < n; ++c) {
-                if (c == 0) nvgMoveTo(vg, tipX[c], tipY[c]);
-                else        nvgLineTo(vg, tipX[c], tipY[c]);
-            }
-            nvgStrokeColor(vg, withA(colBright(), 0.10f));
-            nvgStrokeWidth(vg, 3.5f);
-            nvgStroke(vg);
-            nvgBeginPath(vg);
-            for (int c = 0; c < n; ++c) {
-                if (c == 0) nvgMoveTo(vg, tipX[c], tipY[c]);
-                else        nvgLineTo(vg, tipX[c], tipY[c]);
-            }
-            nvgStrokeColor(vg, withA(colBright(), 0.40f));
-            nvgStrokeWidth(vg, 0.9f);
-            nvgStroke(vg);
-
-            for (int c = 0; c < n; ++c) {
                 bool isCur = playing && (c == cur);
+                float g = glow[c];
+                bool mutated = (c == mutIdx && mutF > 0.02f);
+                bool isRootNote = (eaMod12(notes[c]) == root);
+                bool isMuted = mt[c];
+
+                NVGcolor body = mutated ? agmm::violet() : agmm::accent();
+                if (isMuted)
+                    body = agmm::dim();
+                float a = isMuted ? 0.30f : (0.45f + 0.50f * std::max(g, isCur ? 0.5f : 0.f));
+
                 nvgBeginPath(vg);
-                nvgCircle(vg, tipX[c], tipY[c], isCur ? 2.3f : 1.3f);
-                nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, isCur ? 0.97f : 0.55f));
+                nvgRect(vg, x, top, w, h);
+                nvgFillColor(vg, agmm::withA(body, a));
+                nvgFill(vg);
+
+                // tip cap: orange on the root, violet when locked
+                NVGcolor cap = isRootNote ? agmm::warm() : (lk[c] ? agmm::violet() : nvgRGB(255, 255, 255));
+                float capA = isMuted ? 0.3f : (isCur ? 0.95f : 0.6f);
+                if (isRootNote || lk[c])
+                    capA = std::max(capA, 0.85f);
+                nvgBeginPath(vg);
+                nvgRect(vg, x - 0.5f, top - 0.5f, w + 1.f, 1.8f);
+                nvgFillColor(vg, agmm::withA(cap, capA));
                 nvgFill(vg);
             }
-        }
 
-        // ================= note names =================
-        for (int c = 0; c < n; ++c) {
-            char b[8];
-            int s = notes[c];
-            snprintf(b, sizeof(b), "%s%d", EA_NN[eaMod12(s)], 4 + (int) std::floor((float) s / 12.f));
-            bool isCur = playing && (c == cur);
-            drawText(vg, EA_BX0 + ((float) c + 0.5f) * EA_CW, EA_NOTE_Y, b, 5.2f,
-                     isCur ? colBright() : (mt[c] ? nvgRGBA(0x8a, 0x95, 0xa5, 110) : nvgRGBA(0xc9, 0xd1, 0xdc, 160)),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-        }
-
-        // ================= gate / mute row =================
-        for (int c = 0; c < 16; ++c) {
-            float x = EA_BX0 + (float) c * EA_CW + 1.5f, w = EA_CW - 3.f;
-            bool active = (c < n);
-            bool isCur = playing && (c == cur);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, EA_GATE_Y, w, EA_GATE_H, 2.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, active ? 10 : 4));
-            nvgFill(vg);
-
-            if (!active) continue;
-
-            if (mt[c]) {
+            // pitch contour through the bar tips (single hairline)
+            {
+                nvgLineJoin(vg, NVG_ROUND);
                 nvgBeginPath(vg);
-                nvgMoveTo(vg, x + 2.f, EA_GATE_Y + EA_GATE_H - 1.5f);
-                nvgLineTo(vg, x + w - 2.f, EA_GATE_Y + 1.5f);
-                nvgStrokeColor(vg, withA(colWarm(), 0.7f));
+                for (int c = 0; c < n; ++c)
+                {
+                    if (c == 0)
+                        nvgMoveTo(vg, tipX[c], tipY[c]);
+                    else
+                        nvgLineTo(vg, tipX[c], tipY[c]);
+                }
+                nvgStrokeColor(vg, agmm::withA(agmm::bright(), 0.40f));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
-            } else {
-                float fw = std::max(2.f, w * gateLen);
-                float al = 0.40f + 0.45f * glow[c];
+
+                for (int c = 0; c < n; ++c)
+                {
+                    bool isCur = playing && (c == cur);
+                    nvgBeginPath(vg);
+                    nvgCircle(vg, tipX[c], tipY[c], isCur ? 2.3f : 1.3f);
+                    nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, isCur ? 0.97f : 0.55f));
+                    nvgFill(vg);
+                }
+            }
+
+            // ================= note names =================
+            for (int c = 0; c < n; ++c)
+            {
+                int s = notes[c];
+                snprintf(buf, sizeof(buf), "%s%d", EA_NN[eaMod12(s)], 4 + (int)std::floor((float)s / 12.f));
+                bool isCur = playing && (c == cur);
+                agmm::text(vg, EA_BX0 + ((float)c + 0.5f) * EA_CW, EA_NOTE_Y, buf, 7.f,
+                           isCur ? agmm::bright() : (mt[c] ? agmm::withA(agmm::dim(), 0.5f) : agmm::textCol()),
+                           agmm::ALIGN_C, 0.f);
+            }
+
+            // ================= gate / mute row =================
+            for (int c = 0; c < 16; ++c)
+            {
+                float x = EA_BX0 + (float)c * EA_CW + 1.5f, w = EA_CW - 3.f;
+                bool active = (c < n);
+                bool isCur = playing && (c == cur);
+
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, EA_GATE_Y, fw, EA_GATE_H, 2.f);
-                if (isCur && curRest)
-                    nvgFillColor(vg, withA(colWarm(), 0.75f));
-                else
-                    nvgFillColor(vg, withA(colAccent(), al));
+                nvgRect(vg, x, EA_GATE_Y, w, EA_GATE_H);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, active ? 10 : 4));
                 nvgFill(vg);
 
-                if (isCur && gateOn && !curRest) {
+                if (!active)
+                    continue;
+
+                if (mt[c])
+                {
                     nvgBeginPath(vg);
-                    nvgRoundedRect(vg, x - 0.5f, EA_GATE_Y - 0.5f, w + 1.f, EA_GATE_H + 1.f, 2.5f);
-                    nvgStrokeColor(vg, withA(colBright(), 0.9f));
+                    nvgMoveTo(vg, x + 2.f, EA_GATE_Y + EA_GATE_H - 1.5f);
+                    nvgLineTo(vg, x + w - 2.f, EA_GATE_Y + 1.5f);
+                    nvgStrokeColor(vg, agmm::withA(agmm::warm(), 0.8f));
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
+                else
+                {
+                    float fw = std::max(2.f, w * gateLen);
+                    float al = 0.40f + 0.45f * glow[c];
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, EA_GATE_Y, fw, EA_GATE_H);
+                    if (isCur && curRest)
+                        nvgFillColor(vg, agmm::withA(agmm::warm(), 0.75f));
+                    else
+                        nvgFillColor(vg, agmm::withA(agmm::accent(), al));
+                    nvgFill(vg);
+
+                    if (isCur && gateOn && !curRest)
+                    {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x - 0.5f, EA_GATE_Y - 0.5f, w + 1.f, EA_GATE_H + 1.f);
+                        nvgStrokeColor(vg, agmm::withA(agmm::bright(), 0.9f));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                }
+                if (isCur && curRest && !mt[c])
+                    agmm::text(vg, x + w / 2.f, EA_GATE_Y + EA_GATE_H / 2.f + 0.5f, "R", 7.f,
+                               nvgRGB(0x10, 0x10, 0x14), agmm::ALIGN_C, 0.f);
             }
-            if (isCur && curRest && !mt[c])
-                drawText(vg, x + w / 2.f, EA_GATE_Y + EA_GATE_H / 2.f + 0.5f, "R", 5.5f,
-                         nvgRGBA(0x10, 0x10, 0x14, 230), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-        }
 
-        // ================= lock row =================
-        for (int c = 0; c < n; ++c)
-            drawLock(vg, EA_BX0 + ((float) c + 0.5f) * EA_CW, EA_LOCK_Y + 4.f, lk[c]);
+            // ================= lock row =================
+            for (int c = 0; c < n; ++c)
+                drawLock(vg, EA_BX0 + ((float)c + 0.5f) * EA_CW, EA_LOCK_Y + 4.f, lk[c]);
 
-        // ================= step numbers + playhead =================
-        for (int c = 0; c < 16; ++c) {
-            char b[4];
-            snprintf(b, sizeof(b), "%d", c + 1);
-            float cx = EA_BX0 + ((float) c + 0.5f) * EA_CW;
-            bool active = (c < n);
-            bool isCur = playing && (c == cur);
+            // ================= step numbers + playhead =================
+            for (int c = 0; c < 16; ++c)
+            {
+                float cx = EA_BX0 + ((float)c + 0.5f) * EA_CW;
+                bool active = (c < n);
+                bool isCur = playing && (c == cur);
+                snprintf(buf, sizeof(buf), "%d", c + 1);
 
-            if (isCur) {
+                if (isCur)
+                {
+                    nvgBeginPath(vg);
+                    nvgRoundedRect(vg, cx - 6.f, EA_NUM_Y - 4.5f, 12.f, 9.f, 2.f);
+                    nvgStrokeColor(vg, agmm::withA(agmm::accent(), 0.85f));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                }
+                agmm::text(vg, cx, EA_NUM_Y + 0.5f, buf, 7.f,
+                           isCur ? agmm::bright() : (active ? agmm::dim() : agmm::withA(agmm::dim(), 0.35f)),
+                           agmm::ALIGN_C, 0.f);
+            }
+
+            // hover outline
+            if (hoverZone != Z_NONE && hoverZone != Z_DIR && hoverIdx >= 0)
+            {
+                float x = EA_BX0 + (float)hoverIdx * EA_CW + 0.5f;
+                float y0 = 0.f, h = 0.f;
+                if (hoverZone == Z_BARS)
+                {
+                    y0 = EA_BY0 - 1.f;
+                    h = EA_BH + 2.f;
+                }
+                else if (hoverZone == Z_GATE)
+                {
+                    y0 = EA_GATE_Y - 1.f;
+                    h = EA_GATE_H + 2.f;
+                }
+                else if (hoverZone == Z_LOCK)
+                {
+                    y0 = EA_LOCK_Y - 1.f;
+                    h = EA_LOCK_H + 2.f;
+                }
+                else
+                {
+                    y0 = EA_NUM_Y - 5.f;
+                    h = 10.f;
+                }
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, cx - 5.5f, EA_NUM_Y - 3.5f, 11.f, 7.f, 2.f);
-                nvgStrokeColor(vg, withA(colAccent(), 0.85f));
+                nvgRect(vg, x, y0, EA_CW - 1.f, h);
+                nvgStrokeColor(vg, agmm::withA(agmm::bright(), 0.55f));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
-
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, cx - 2.2f, EA_LOCK_Y + EA_LOCK_H + 0.2f);
-                nvgLineTo(vg, cx + 2.2f, EA_LOCK_Y + EA_LOCK_H + 0.2f);
-                nvgLineTo(vg, cx, EA_NUM_Y - 3.8f);
-                nvgClosePath(vg);
-                nvgFillColor(vg, withA(colBright(), 0.9f));
-                nvgFill(vg);
             }
-            drawText(vg, cx, EA_NUM_Y + 0.5f, b, 5.2f,
-                     isCur ? colBright() : (active ? nvgRGBA(0x8a, 0x95, 0xa5, 220) : nvgRGBA(0x8a, 0x95, 0xa5, 70)),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-        }
 
-        // hover outline
-        if (hoverZone != Z_NONE && hoverZone != Z_DIR && hoverIdx >= 0) {
-            float x = EA_BX0 + (float) hoverIdx * EA_CW + 0.5f;
-            float y0 = 0.f, h = 0.f;
-            if (hoverZone == Z_BARS) { y0 = EA_BY0 - 1.f; h = EA_BH + 2.f; }
-            else if (hoverZone == Z_GATE) { y0 = EA_GATE_Y - 1.f; h = EA_GATE_H + 2.f; }
-            else if (hoverZone == Z_LOCK) { y0 = EA_LOCK_Y - 1.f; h = EA_LOCK_H + 2.f; }
-            else { y0 = EA_NUM_Y - 4.f; h = 8.f; }
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y0, EA_CW - 1.f, h, 2.f);
-            nvgStrokeColor(vg, withA(colBright(), 0.55f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
+            // ================= mini keyboard (flat) =================
+            {
+                const float ww = (EA_KB_X1 - EA_KB_X0) / 7.f;
 
-        // ================= mini keyboard =================
-        {
-            const float ww = (EA_KB_X1 - EA_KB_X0) / 7.f;
+                auto drawKey = [&](float x, float y, float w, float h, int pc, bool black)
+                {
+                    bool in = (mask >> pc) & 1;
+                    bool isRoot = (pc == root);
+                    bool sounding = (playing && !curRest && pc == playPc);
 
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, EA_KB_X0 - 2.f, EA_KB_Y - 2.f,
-                           EA_KB_X1 - EA_KB_X0 + 4.f, EA_KB_WH + 4.f, 3.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-            nvgFill(vg);
-
-            auto drawKey = [&](float x, float y, float w, float h, int pc, bool black) {
-                bool in = (mask >> pc) & 1;
-                bool isRoot = (pc == root);
-                bool sounding = (playing && !curRest && pc == playPc);
-                float gl = playing ? glow[cur] : 0.f;
-
-                if (sounding) {
                     nvgBeginPath(vg);
-                    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 3.f);
-                    nvgFillColor(vg, withA(colAccent(), 0.14f + 0.28f * gl));
+                    nvgRect(vg, x, y, w, h);
+                    nvgFillColor(vg, black ? nvgRGB(0x08, 0x0a, 0x0e) : nvgRGB(0x16, 0x1c, 0x24));
                     nvgFill(vg);
-                }
 
-                nvgBeginPath(vg);
-                nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                nvgFillColor(vg, black ? nvgRGB(0x08, 0x0a, 0x0e) : nvgRGB(0x16, 0x1c, 0x24));
-                nvgFill(vg);
-
-                if (in) {
-                    NVGcolor tint = isRoot ? colWarm() : colAccent();
+                    if (in)
+                    {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x, y, w, h);
+                        nvgFillColor(vg, agmm::withA(isRoot ? agmm::warm() : agmm::accent(), 0.30f));
+                        nvgFill(vg);
+                    }
+                    if (sounding)
+                    {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x, y, w, h);
+                        nvgFillColor(vg, nvgRGBAf(0.80f, 0.97f, 1.f, 0.65f));
+                        nvgFill(vg);
+                    }
                     nvgBeginPath(vg);
-                    nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, y, 0, y + h,
-                                                       withA(tint, 0.10f), withA(tint, 0.42f)));
-                    nvgFill(vg);
-                }
-                if (sounding) {
-                    nvgBeginPath(vg);
-                    nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                    nvgFillColor(vg, nvgRGBAf(0.80f, 0.97f, 1.f, 0.30f + 0.40f * gl));
-                    nvgFill(vg);
-                }
+                    nvgRect(vg, x, y, w, h);
+                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, black ? 34 : 44));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
 
-                nvgBeginPath(vg);
-                nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, black ? 34 : 44));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
+                    if (isRoot)
+                    {
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x + 2.f, y + h - 3.f, w - 4.f, 1.8f);
+                        nvgFillColor(vg, agmm::withA(agmm::warm(), 0.95f));
+                        nvgFill(vg);
+                    }
+                };
 
-                if (isRoot) {
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x + 2.f, y + h - 3.f, w - 4.f, 1.8f);
-                    nvgFillColor(vg, withA(colWarm(), 0.95f));
-                    nvgFill(vg);
+                for (int i = 0; i < 7; ++i)
+                    drawKey(EA_KB_X0 + (float)i * ww + 0.5f, EA_KB_Y, ww - 1.f, EA_KB_WH, EA_WPC[i], false);
+                for (int j = 0; j < 5; ++j)
+                {
+                    float bx = EA_KB_X0 + (float)(EA_BIDX[j] + 1) * ww - EA_KB_BW / 2.f;
+                    drawKey(bx, EA_KB_Y, EA_KB_BW, EA_KB_BH, EA_BPC[j], true);
                 }
-            };
-
-            for (int i = 0; i < 7; ++i)
-                drawKey(EA_KB_X0 + (float) i * ww + 0.5f, EA_KB_Y, ww - 1.f, EA_KB_WH, EA_WPC[i], false);
-            for (int j = 0; j < 5; ++j) {
-                float bx = EA_KB_X0 + (float)(EA_BIDX[j] + 1) * ww - EA_KB_BW / 2.f;
-                drawKey(bx, EA_KB_Y, EA_KB_BW, EA_KB_BH, EA_BPC[j], true);
             }
+
+            // ================= direction chips =================
+            {
+                const char *dn[5] = {"FWD", "BWD", "RND", "DRK", "PND"};
+                for (int i = 0; i < 5; ++i)
+                {
+                    float x = EA_CHIP_X + (float)i * EA_CHIP_P;
+                    bool on = (i == dir);
+                    agmm::chip(vg, x, EA_CHIP_Y, EA_CHIP_W, EA_CHIP_H, dn[i], on, agmm::accent());
+                    if (!on && hoverZone == Z_DIR && hoverIdx == i)
+                    {
+                        nvgBeginPath(vg);
+                        nvgRoundedRect(vg, x, EA_CHIP_Y, EA_CHIP_W, EA_CHIP_H, 3.f);
+                        nvgStrokeColor(vg, agmm::withA(agmm::bright(), 0.7f));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                }
+            }
+
+            // ================= status chips =================
+            {
+                const char *sn[4] = {"GATE", "EOC", "REST", "MUT"};
+                float lit[4] = {gateOn && playing && !curRest ? 1.f : 0.f, eocF, restF, mutF};
+                NVGcolor sc[4] = {agmm::accent(), agmm::violet(), agmm::warm(), agmm::violet()};
+                for (int i = 0; i < 4; ++i)
+                    agmm::chip(vg, EA_CHIP_X + (float)i * EA_STAT_P, EA_STAT_Y, EA_STAT_W, EA_STAT_H,
+                               sn[i], lit[i] > 0.02f, sc[i]);
+            }
+
+            // ================= caption row (help while hovering) =================
+            {
+                const char *help = nullptr;
+                switch (hoverZone)
+                {
+                case Z_BARS:
+                    help = "DRAG: PAINT NOTES";
+                    break;
+                case Z_GATE:
+                    help = "CLICK: MUTE STEP";
+                    break;
+                case Z_LOCK:
+                    help = "CLICK: LOCK STEP";
+                    break;
+                case Z_NUM:
+                    help = "CLICK: SET LENGTH";
+                    break;
+                case Z_DIR:
+                    help = "CLICK: SET DIRECTION";
+                    break;
+                default:
+                    break;
+                }
+                if (help)
+                {
+                    agmm::text(vg, EA_KB_X0, EA_CAP_Y, help, 7.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
+                }
+                else
+                {
+                    snprintf(buf, sizeof(buf), "STEP %02d/%02d", playing ? cur + 1 : 0, n);
+                    agmm::text(vg, EA_KB_X0, EA_CAP_Y, buf, 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
+                }
+            }
+
+            nvgRestore(vg);
+
+            Widget::drawLayer(args, layer);
         }
-
-        // ================= direction chips =================
-        {
-            const char* dn[5] = {"FWD", "BWD", "RND", "DRK", "PND"};
-            for (int i = 0; i < 5; ++i) {
-                float x = EA_CHIP_X + (float) i * EA_CHIP_P;
-                bool on = (i == dir);
-                bool hv = (hoverZone == Z_DIR && hoverIdx == i);
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, EA_CHIP_Y, EA_CHIP_W, EA_CHIP_H, 3.f);
-                if (on) {
-                    nvgFillColor(vg, withA(colAccent(), 0.25f));
-                    nvgFill(vg);
-                    nvgStrokeColor(vg, withA(colAccent(), 0.9f));
-                } else {
-                    nvgStrokeColor(vg, hv ? withA(colBright(), 0.7f) : nvgRGBA(255, 255, 255, 30));
-                }
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                drawText(vg, x + EA_CHIP_W / 2.f, EA_CHIP_Y + EA_CHIP_H / 2.f + 0.5f, dn[i], 6.f,
-                         on ? colAccent() : colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-            }
-        }
-
-        // ================= status chips =================
-        {
-            const char* sn[4] = {"GATE", "EOC", "REST", "MUT"};
-            float lit[4] = {gateOn && playing && !curRest ? 1.f : 0.f, eocF, restF, mutF};
-            NVGcolor sc[4] = {colAccent(), colViolet(), colWarm(), colViolet()};
-            for (int i = 0; i < 4; ++i) {
-                float x = EA_CHIP_X + (float) i * 32.7f;
-                float y = 136.f, w = 30.f, h = 10.f;
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, y, w, h, 3.f);
-                if (lit[i] > 0.02f) {
-                    nvgFillColor(vg, withA(sc[i], 0.12f + 0.30f * lit[i]));
-                    nvgFill(vg);
-                    nvgStrokeColor(vg, withA(sc[i], 0.9f));
-                } else {
-                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-                }
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                drawText(vg, x + w / 2.f, y + h / 2.f + 0.5f, sn[i], 5.8f,
-                         lit[i] > 0.02f ? sc[i] : colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-            }
-        }
-
-        // ================= readouts =================
-        {
-            char buf[64];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
-            NVGcolor cm = nvgRGBA(0xff, 0xe6, 0x80, 220);
-            NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 230);
-
-            std::string name = scaleTable()[scaleIdx].name;
-            if (name.size() > 20) name = name.substr(0, 18) + "..";
-            drawText(vg, 6.f, 8.f, name.c_str(), 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-
-            snprintf(buf, sizeof(buf), "TRN %+d  %dOCT", trans, span);
-            drawText(vg, W / 2.f + 14.f, 8.f, buf, 7.f, cd, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-
-            snprintf(buf, sizeof(buf), "%s4  MUT %.0f%%", EA_NN[root], mutP * 100.f);
-            drawText(vg, W - 6.f, 8.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-            // caption (help text while hovering)
-            const char* help = nullptr;
-            switch (hoverZone) {
-                case Z_BARS: help = "DRAG: PAINT NOTES"; break;
-                case Z_GATE: help = "CLICK: MUTE STEP"; break;
-                case Z_LOCK: help = "CLICK: LOCK STEP"; break;
-                case Z_NUM:  help = "CLICK: SET LENGTH"; break;
-                case Z_DIR:  help = "CLICK: SET DIRECTION"; break;
-                default: break;
-            }
-            if (help) {
-                drawText(vg, EA_KB_X0, 144.5f, help, 5.5f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            } else {
-                snprintf(buf, sizeof(buf), "STEP %02d/%02d", playing ? cur + 1 : 0, n);
-                drawText(vg, EA_KB_X0, 144.5f, buf, 5.5f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            }
-        }
-
-        // ================= scanlines, vignette, glass =================
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int) H; y += 3)
-            nvgRect(vg, 0, y + 1, W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, W * 0.48f, W * 0.90f,
-                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 110)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H * 0.30f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.30f,
-                                           nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-
-        nvgRestore(vg);
-
-        Widget::drawLayer(args, layer);
-    }
-};
+    };
 
 } // namespace
 
@@ -1615,7 +1419,6 @@ struct ExpressArpeggiatorWidget : ModuleWidget
         box.size = Vec(EA_W, EA_H);
 
         addChild(new EAPanel());
-        addChild(new EAKnobArcs(module));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
@@ -1624,10 +1427,11 @@ struct ExpressArpeggiatorWidget : ModuleWidget
 
         addChild(new EADisplay(module));
 
-        // Knobs
-        for (int k = 0; k < 10; ++k) {
+        // Knobs: centre is EA_KNOB_DY below the plate top
+        for (int k = 0; k < 10; ++k)
+        {
             addParam(createParamCentered<RoundSmallBlackKnob>(
-                Vec(EA_KNOBS[k].x, EA_KNOBS[k].y), module, EA_KNOBS[k].param));
+                Vec(EA_KNOBS[k].x, EA_KNOBS[k].top + EA_KNOB_DY), module, EA_KNOBS[k].param));
         }
 
         // I/O row: 5 inputs, randomize button, 4 outputs
@@ -1638,7 +1442,7 @@ struct ExpressArpeggiatorWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(eaIoX(4), EA_IO_Y), module, ExpressArpeggiator::MUT_CV_INPUT));
 
         addParam(createParamCentered<LEDButton>(Vec(eaIoX(5), EA_IO_Y), module, ExpressArpeggiator::RANDOMIZE_BUTTON));
-        addChild(createLightCentered<MediumLight<EACyanLight>>(Vec(eaIoX(5), EA_IO_Y), module, ExpressArpeggiator::RANDOM_LIGHT));
+        addChild(createLightCentered<MediumLight<agmm::CyanLight>>(Vec(eaIoX(5), EA_IO_Y), module, ExpressArpeggiator::RANDOM_LIGHT));
 
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(eaIoX(6), EA_IO_Y), module, ExpressArpeggiator::VOCT_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(eaIoX(7), EA_IO_Y), module, ExpressArpeggiator::GATE_OUTPUT));
@@ -1654,22 +1458,20 @@ struct ExpressArpeggiatorWidget : ModuleWidget
 
         menu->addChild(new ui::MenuSeparator);
 
-        menu->addChild(createMenuItem("Lock all steps", "", [=]() {
-            for (int i = 0; i < 16; ++i) module->locked[i] = true;
-        }));
-        menu->addChild(createMenuItem("Unlock all steps", "", [=]() {
-            for (int i = 0; i < 16; ++i) module->locked[i] = false;
-        }));
-        menu->addChild(createMenuItem("Unmute all steps", "", [=]() {
-            for (int i = 0; i < 16; ++i) module->muted[i] = false;
-        }));
-        menu->addChild(createMenuItem("Randomize unlocked steps", "", [=]() {
-            module->randomizePattern();
-        }));
-        menu->addChild(createMenuItem("New pattern (clears locks and mutes)", "", [=]() {
-            module->initPattern();
-        }));
+        menu->addChild(createMenuItem("Lock all steps", "", [=]()
+                                      {
+            for (int i = 0; i < 16; ++i) module->locked[i] = true; }));
+        menu->addChild(createMenuItem("Unlock all steps", "", [=]()
+                                      {
+            for (int i = 0; i < 16; ++i) module->locked[i] = false; }));
+        menu->addChild(createMenuItem("Unmute all steps", "", [=]()
+                                      {
+            for (int i = 0; i < 16; ++i) module->muted[i] = false; }));
+        menu->addChild(createMenuItem("Randomize unlocked steps", "", [=]()
+                                      { module->randomizePattern(); }));
+        menu->addChild(createMenuItem("New pattern (clears locks and mutes)", "", [=]()
+                                      { module->initPattern(); }));
     }
 };
-//...
+
 Model *modelExpressArpeggiator = createModel<ExpressArpeggiator, ExpressArpeggiatorWidget>("ExpressArpeggiator");

@@ -5,33 +5,63 @@
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
-// ------------------------------------------------------------
-// Layout constants
-// ------------------------------------------------------------
-static const int   CELL_SIZE   = 4;
-static const int   COLS        = 64;                 // fits exactly in a uint64_t
-static const int   ROWS        = 64;
-static const float DISP_W      = COLS * CELL_SIZE;   // 256
-static const float DISP_H      = ROWS * CELL_SIZE;   // 256
-static const float PANEL_W     = RACK_GRID_WIDTH * 32;   // 480
-static const float PANEL_H     = RACK_GRID_HEIGHT;       // 380
-static const float DISP_X      = (PANEL_W - DISP_W) / 2.f;
-static const float DISP_Y      = 44.f;
+// =============================================================================
+// Layout (32 HP = 480 x 380 px)
+//
+//   y   0-15   screws
+//   y  15      title
+//   y  32      status readout (own row above the display)
+//   y  42-306  display bezel; display itself 256 x 256 at (112, 46)
+//   y  46-296  left column: RULE / SPEED / POLY / CLOCK (label above control)
+//   y  46-146  right column: RANDOM / RESET;  y 250-296: GATES output
+//   y 314-330  rule table glyphs (own row under the display)
+//   y 344      16 gate LEDs
+//   y 356      LED caption
+//   y 369      maker tag
+//
+// No text is ever drawn over the display; every control is inside its plate.
+// =============================================================================
+static const int CELL_SIZE = 4;
+static const int COLS = 64; // fits exactly in a uint64_t
+static const int ROWS = 64;
+static const float DISP_W = COLS * CELL_SIZE;         // 256
+static const float DISP_H = ROWS * CELL_SIZE;         // 256
+static const float PANEL_W = RACK_GRID_WIDTH * 32;    // 480
+static const float PANEL_H = RACK_GRID_HEIGHT;        // 380
+static const float DISP_X = (PANEL_W - DISP_W) / 2.f; // 112
+static const float DISP_Y = 46.f;
 
-static const float LEFT_X      = 56.f;
-static const float RIGHT_X     = PANEL_W - 56.f;
+static const float CA_TITLE_Y = 15.f;
+static const float CA_MAKER_Y = 369.f;
+static const float CA_STATUS_Y = 32.f;
+static const float CA_GLYPH_Y = 314.f; // top of the rule glyph row
+static const float CA_LED_Y = 344.f;
+static const float CA_LEDCAP_Y = 356.f;
 
-// Palette
-static NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-static NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-static NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-static NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-static NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
+static const float CA_LEFT_X = 56.f; // column centres (plates are 84 wide)
+static const float CA_RIGHT_X = PANEL_W - 56.f;
+static const float CA_COL_W = 84.f;
 
-// ------------------------------------------------------------
+// Left column: plate tops / heights, label and control offsets from the top
+static const float CA_RULE_TOP = 46.f, CA_RULE_H = 58.f;
+static const float CA_SPEED_TOP = 114.f, CA_SPEED_H = 58.f;
+static const float CA_POLY_TOP = 182.f, CA_POLY_H = 58.f;
+static const float CA_CLOCK_TOP = 250.f, CA_CLOCK_H = 46.f;
+// Right column
+static const float CA_RAND_TOP = 46.f;
+static const float CA_RESET_TOP = 100.f;
+static const float CA_GATES_TOP = 250.f;
+static const float CA_SMALL_H = 46.f;
+
+static const float CA_LABEL_DY = 10.f;
+static const float CA_KNOB_DY = 36.f; // knob plates (h 58)
+static const float CA_JACK_DY = 31.f; // jack / button plates (h 46)
+
+// =============================================================================
 // Module
-// ------------------------------------------------------------
+// =============================================================================
 struct CellAutoGate : Module
 {
     enum ParamId
@@ -43,8 +73,16 @@ struct CellAutoGate : Module
         RESET_PARAM,
         PARAMS_LEN
     };
-    enum InputId  { CLOCK_INPUT, INPUTS_LEN };
-    enum OutputId { GATE_OUTPUT, OUTPUTS_LEN };
+    enum InputId
+    {
+        CLOCK_INPUT,
+        INPUTS_LEN
+    };
+    enum OutputId
+    {
+        GATE_OUTPUT,
+        OUTPUTS_LEN
+    };
     enum LightId
     {
         GATE_LIGHT_1,
@@ -57,7 +95,7 @@ struct CellAutoGate : Module
 
     // History ring buffer (read by the UI thread; a torn read is only cosmetic)
     std::array<uint64_t, ROWS> history{};
-    int histHead  = 0;   // next write index
+    int histHead = 0; // next write index
     int histCount = 0;
 
     // Timing / triggers
@@ -81,13 +119,13 @@ struct CellAutoGate : Module
 
         configButton(RANDOM_PARAM, "Randomize");
         configButton(RESET_PARAM, "Reset");
-        configInput(CLOCK_INPUT, "Clock");
-        configOutput(GATE_OUTPUT, "Gates");
+        configInput(CLOCK_INPUT, "Clock (overrides the speed knob)");
+        configOutput(GATE_OUTPUT, "Gates (polyphonic)");
 
         for (int i = 0; i < 16; ++i)
             configLight(GATE_LIGHT_1 + i, string::f("Gate %d", i + 1));
 
-        int rule = (int) params[RULE_PARAM].getValue();
+        int rule = (int)params[RULE_PARAM].getValue();
         updateRuleset(rule);
         lastRule = rule;
         restart();
@@ -139,11 +177,11 @@ struct CellAutoGate : Module
         uint64_t next = 0;
         for (int i = 0; i < COLS; ++i)
         {
-            int left   = (currentRow >> ((i + COLS - 1) % COLS)) & 1;
+            int left = (currentRow >> ((i + COLS - 1) % COLS)) & 1;
             int center = (currentRow >> i) & 1;
-            int right  = (currentRow >> ((i + 1) % COLS)) & 1;
-            int index  = (left << 2) | (center << 1) | right;
-            next |= (uint64_t) ruleset[index] << i;
+            int right = (currentRow >> ((i + 1) % COLS)) & 1;
+            int index = (left << 2) | (center << 1) | right;
+            next |= (uint64_t)ruleset[index] << i;
         }
         currentRow = next;
         pushHistory(currentRow);
@@ -151,7 +189,7 @@ struct CellAutoGate : Module
 
     void process(const ProcessArgs &args) override
     {
-        int rule = (int) params[RULE_PARAM].getValue();
+        int rule = (int)params[RULE_PARAM].getValue();
         if (rule != lastRule)
         {
             updateRuleset(rule);
@@ -159,7 +197,7 @@ struct CellAutoGate : Module
             lastRule = rule;
         }
 
-        int newChannels = clamp((int) params[POLY_PARAM].getValue(), 1, 16);
+        int newChannels = clamp((int)params[POLY_PARAM].getValue(), 1, 16);
         if (newChannels != polyChannels || outputs[GATE_OUTPUT].getChannels() != newChannels)
         {
             polyChannels = newChannels;
@@ -195,7 +233,8 @@ struct CellAutoGate : Module
         for (int ch = 0; ch < N; ++ch)
         {
             int pos = ((ch + 1) * COLS) / (N + 1);
-            if (pos >= COLS) pos = COLS - 1;
+            if (pos >= COLS)
+                pos = COLS - 1;
             bool on = (currentRow >> pos) & 1;
             outputs[GATE_OUTPUT].setVoltage(on ? 10.f : 0.f, ch);
             lights[GATE_LIGHT_1 + ch].setSmoothBrightness(on ? 1.f : 0.f, args.sampleTime);
@@ -205,352 +244,324 @@ struct CellAutoGate : Module
     }
 };
 
-// ------------------------------------------------------------
-// Drawing helpers
-// ------------------------------------------------------------
-static void setFont(NVGcontext *vg)
+// =============================================================================
+// Theme + drawing helpers
+// =============================================================================
+namespace
 {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font)
+
+    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+
+    const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
+
+    bool setFont(NVGcontext *vg)
+    {
+        if (!APP || !APP->window)
+            return false;
+        std::shared_ptr<window::Font> font =
+            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+        if (!font)
+            return false;
         nvgFontFaceId(vg, font->handle);
-}
-
-static void drawText(NVGcontext *vg, float x, float y, const char *s,
-                     float size, NVGcolor col, int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,
-                     float spacing = 1.f)
-{
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-// ------------------------------------------------------------
-// Panel background (all static artwork)
-// ------------------------------------------------------------
-struct PanelBackground : TransparentWidget
-{
-    PanelBackground() { box.size = Vec(PANEL_W, PANEL_H); }
-
-    void label(NVGcontext *vg, float x, float y, const char *txt)
-    {
-        drawText(vg, x, y, txt, 9.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
+        return true;
     }
 
-    void section(NVGcontext *vg, float x1, float x2, float y, const char *txt)
+    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
+                  int align = ALIGN_C, float spacing = 0.5f)
     {
-        // Line with a centered caption
-        drawText(vg, (x1 + x2) / 2.f, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-        float w = 4.f + strlen(txt) * 5.5f;
+        if (!setFont(vg))
+            return;
+        nvgFontSize(vg, size);
+        nvgTextLetterSpacing(vg, spacing);
+        nvgTextAlign(vg, align);
+        nvgFillColor(vg, col);
+        nvgText(vg, x, y, s, NULL);
+    }
+
+    // Control plate; tint = output jack
+    void plate(NVGcontext *vg, float cx, float top, float w, float h, bool tint = false)
+    {
         nvgBeginPath(vg);
-        nvgMoveTo(vg, x1, y); nvgLineTo(vg, (x1 + x2) / 2.f - w / 2.f, y);
-        nvgMoveTo(vg, (x1 + x2) / 2.f + w / 2.f, y); nvgLineTo(vg, x2, y);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
+        nvgRoundedRect(vg, cx - w / 2.f, top, w, h, 5.f);
+        nvgFillColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 22) : nvgRGBA(0, 0, 0, 55));
+        nvgFill(vg);
+        nvgStrokeColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 60) : nvgRGBA(255, 255, 255, 22));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
     }
 
-    void draw(const DrawArgs &args) override
+    void cell(NVGcontext *vg, float cx, float top, float h, const char *label, bool tint = false)
     {
-        NVGcontext *vg = args.vg;
+        plate(vg, cx, top, CA_COL_W, h, tint);
+        drawText(vg, cx, top + CA_LABEL_DY, label, 8.f, colDim(), ALIGN_C, 1.f);
+    }
 
-        // Base gradient
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, PANEL_W, PANEL_H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, PANEL_H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
+    // ------------------------------------------------------------
+    // Panel background (static artwork only)
+    // ------------------------------------------------------------
+    struct CAPanelBackground : TransparentWidget
+    {
+        CAPanelBackground() { box.size = Vec(PANEL_W, PANEL_H); }
 
-        // Subtle brushed texture
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int) PANEL_H; y += 3)
+        void draw(const DrawArgs &args) override
         {
+            NVGcontext *vg = args.vg;
+
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, PANEL_W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-
-        // Outer edge highlights
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, PANEL_W - 1.f, PANEL_H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Header
-        drawText(vg, PANEL_W / 2.f, 16.f, "CELLAUTOGATE", 15.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, PANEL_W / 2.f - 70.f, 27.f);
-        nvgLineTo(vg, PANEL_W / 2.f + 70.f, 27.f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 140));
-        nvgStrokeWidth(vg, 1.5f);
-        nvgStroke(vg);
-
-        // Display bezel
-        float bx = DISP_X - 8.f, by = DISP_Y - 8.f, bw = DISP_W + 16.f, bh = DISP_H + 16.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                           nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-
-        // Left / right control sections
-        section(vg, 14.f, DISP_X - 22.f, 46.f - 22.f + 0.f, "CONTROL");
-        section(vg, DISP_X + DISP_W + 22.f, PANEL_W - 14.f, 24.f, "TRIGGER");
-        section(vg, DISP_X + DISP_W + 22.f, PANEL_W - 14.f, 252.f, "OUTPUT");
-
-        // Knob / port labels
-        label(vg, LEFT_X, 100.f, "RULE");
-        label(vg, LEFT_X, 170.f, "SPEED");
-        label(vg, LEFT_X, 240.f, "POLY");
-        label(vg, LEFT_X, 322.f, "CLOCK");
-
-        label(vg, RIGHT_X, 100.f, "RANDOM");
-        label(vg, RIGHT_X, 170.f, "RESET");
-        label(vg, RIGHT_X, 322.f, "GATES");
-
-        // Port plates
-        for (float cx : {LEFT_X, RIGHT_X})
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - 22.f, 276.f, 44.f, 44.f, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+            nvgRect(vg, 0, 0, PANEL_W, PANEL_H);
+            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, PANEL_H, colBgTop(), colBgBottom()));
             nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+
+            drawText(vg, PANEL_W / 2.f, CA_TITLE_Y, "CELL AUTO GATE", 12.f, colText(), ALIGN_C, 3.f);
+            drawText(vg, PANEL_W / 2.f, CA_MAKER_Y, "AGMM", 9.f, colDim(), ALIGN_C, 3.f);
+
+            // Display bezel
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, DISP_X - 4.f, DISP_Y - 4.f, DISP_W + 8.f, DISP_H + 8.f, 5.f);
+            nvgFillColor(vg, nvgRGB(0x0b, 0x0c, 0x0e));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
+
+            // Left column
+            cell(vg, CA_LEFT_X, CA_RULE_TOP, CA_RULE_H, "RULE");
+            cell(vg, CA_LEFT_X, CA_SPEED_TOP, CA_SPEED_H, "SPEED");
+            cell(vg, CA_LEFT_X, CA_POLY_TOP, CA_POLY_H, "POLY");
+            cell(vg, CA_LEFT_X, CA_CLOCK_TOP, CA_CLOCK_H, "CLOCK");
+
+            // Right column (output tinted)
+            cell(vg, CA_RIGHT_X, CA_RAND_TOP, CA_SMALL_H, "RANDOM");
+            cell(vg, CA_RIGHT_X, CA_RESET_TOP, CA_SMALL_H, "RESET");
+            cell(vg, CA_RIGHT_X, CA_GATES_TOP, CA_SMALL_H, "GATES", true);
+
+            // LED caption
+            drawText(vg, PANEL_W / 2.f, CA_LEDCAP_Y, "POLY GATE ACTIVITY", 7.f, colDim(), ALIGN_C, 1.f);
+
+            Widget::draw(args);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // Display widget: the automaton history only
+    // ------------------------------------------------------------
+    struct CellularDisplayWidget : TransparentWidget
+    {
+        CellAutoGate *module = nullptr;
+
+        CellularDisplayWidget(CellAutoGate *m) : module(m)
+        {
+            box.pos = Vec(DISP_X, DISP_Y);
+            box.size = Vec(DISP_W, DISP_H);
         }
 
-        // LED caption
-        label(vg, PANEL_W / 2.f, 370.f, "POLY GATE ACTIVITY");
-
-        Widget::draw(args);
-    }
-};
-
-// ------------------------------------------------------------
-// Display widget (cells, rule glyphs, status readout)
-// ------------------------------------------------------------
-struct CellularDisplayWidget : TransparentWidget
-{
-    CellAutoGate *module = nullptr;
-
-    CellularDisplayWidget(CellAutoGate *m) : module(m)
-    {
-        box.pos  = Vec(DISP_X, DISP_Y);
-        box.size = Vec(DISP_W, DISP_H);
-    }
-
-    void draw(const DrawArgs &args) override
-    {
-        NVGcontext *vg = args.vg;
-
-        // Screen background with vignette
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, DISP_W, DISP_H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, DISP_W / 2.f, DISP_H / 2.f, 40.f, DISP_W * 0.8f,
-                                           nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-        nvgFill(vg);
-
-        // Faint grid
-        nvgBeginPath(vg);
-        for (int i = 0; i <= COLS; i += 8)
+        void draw(const DrawArgs &args) override
         {
-            nvgMoveTo(vg, i * CELL_SIZE + 0.5f, 0);
-            nvgLineTo(vg, i * CELL_SIZE + 0.5f, DISP_H);
-            nvgMoveTo(vg, 0, i * CELL_SIZE + 0.5f);
-            nvgLineTo(vg, DISP_W, i * CELL_SIZE + 0.5f);
-        }
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
+            NVGcontext *vg = args.vg;
 
-        Widget::draw(args);
-    }
+            nvgBeginPath(vg);
+            nvgRect(vg, 0, 0, DISP_W, DISP_H);
+            nvgFillColor(vg, nvgRGB(0x05, 0x08, 0x0c));
+            nvgFill(vg);
 
-    void drawLayer(const DrawArgs &args, int layer) override
-    {
-        if (layer != 1)
-        {
-            Widget::drawLayer(args, layer);
-            return;
-        }
-
-        NVGcontext *vg = args.vg;
-
-        // Cells (self-illuminated, newest row brightest)
-        int count = module ? module->histCount : 0;
-        uint64_t demoRows[ROWS];
-        if (!module)
-        {
-            // Browser preview: render rule 30 from a single seed
-            uint64_t cur = 1ULL << (COLS / 2);
-            for (int r = 0; r < ROWS; ++r)
+            // Faint grid
+            nvgBeginPath(vg);
+            for (int i = 0; i <= COLS; i += 8)
             {
-                demoRows[r] = cur;
-                uint64_t next = 0;
-                for (int i = 0; i < COLS; ++i)
-                {
-                    int l = (cur >> ((i + COLS - 1) % COLS)) & 1;
-                    int c = (cur >> i) & 1;
-                    int rr = (cur >> ((i + 1) % COLS)) & 1;
-                    next |= (uint64_t) ((30 >> ((l << 2) | (c << 1) | rr)) & 1) << i;
-                }
-                cur = next;
+                nvgMoveTo(vg, i * CELL_SIZE + 0.5f, 0);
+                nvgLineTo(vg, i * CELL_SIZE + 0.5f, DISP_H);
+                nvgMoveTo(vg, 0, i * CELL_SIZE + 0.5f);
+                nvgLineTo(vg, DISP_W, i * CELL_SIZE + 0.5f);
             }
-            count = ROWS;
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            Widget::draw(args);
         }
 
-        const float inset = 0.4f;
-        for (int pass = 0; pass < 2; ++pass)   // pass 0: glow, pass 1: crisp cell
+        void drawLayer(const DrawArgs &args, int layer) override
         {
-            for (int r = 0; r < count; ++r)
+            if (layer == 1)
             {
-                uint64_t bits = module ? module->getHistoryRow(r) : demoRows[r];
-                if (!bits) continue;
-                float age = (float) (r + 1) / (float) std::max(count, 1);  // 0..1 (1 = newest)
-                float a = 0.25f + 0.75f * age * age;
+                NVGcontext *vg = args.vg;
 
-                nvgBeginPath(vg);
-                for (int x = 0; x < COLS; ++x)
+                int count = module ? module->histCount : 0;
+                uint64_t demoRows[ROWS];
+                if (!module)
                 {
-                    if (!((bits >> x) & 1)) continue;
-                    if (pass == 0)
-                        nvgRect(vg, x * CELL_SIZE - 1.f, r * CELL_SIZE - 1.f, CELL_SIZE + 2.f, CELL_SIZE + 2.f);
-                    else
+                    // Browser preview: render rule 30 from a single seed
+                    uint64_t cur = 1ULL << (COLS / 2);
+                    for (int r = 0; r < ROWS; ++r)
+                    {
+                        demoRows[r] = cur;
+                        uint64_t next = 0;
+                        for (int i = 0; i < COLS; ++i)
+                        {
+                            int l = (cur >> ((i + COLS - 1) % COLS)) & 1;
+                            int c = (cur >> i) & 1;
+                            int rr = (cur >> ((i + 1) % COLS)) & 1;
+                            next |= (uint64_t)((30 >> ((l << 2) | (c << 1) | rr)) & 1) << i;
+                        }
+                        cur = next;
+                    }
+                    count = ROWS;
+                }
+
+                // Cells: newest row brightest
+                const float inset = 0.4f;
+                for (int r = 0; r < count; ++r)
+                {
+                    uint64_t bits = module ? module->getHistoryRow(r) : demoRows[r];
+                    if (!bits)
+                        continue;
+                    float age = (float)(r + 1) / (float)std::max(count, 1); // 0..1 (1 = newest)
+                    float a = 0.3f + 0.7f * age * age;
+
+                    nvgBeginPath(vg);
+                    for (int x = 0; x < COLS; ++x)
+                    {
+                        if (!((bits >> x) & 1))
+                            continue;
                         nvgRect(vg, x * CELL_SIZE + inset, r * CELL_SIZE + inset,
                                 CELL_SIZE - 2 * inset, CELL_SIZE - 2 * inset);
-                }
-                if (pass == 0)
-                    nvgFillColor(vg, nvgRGBAf(0.24f, 0.88f, 1.f, 0.10f * a));
-                else
-                    nvgFillColor(vg, nvgRGBAf(0.24f + 0.55f * age * age, 0.88f + 0.10f * age * age, 1.f, a));
-                nvgFill(vg);
-            }
-        }
-
-        // Newest-row marker line
-        if (module && count > 0 && count < ROWS)
-        {
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, count * CELL_SIZE, DISP_W, 1.f);
-            nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 60));
-            nvgFill(vg);
-        }
-
-        // Scanline overlay for a CRT feel
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int) DISP_H; y += 2)
-            nvgRect(vg, 0, y + 1, DISP_W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-        nvgFill(vg);
-
-        // Glass reflection
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, DISP_W, DISP_H * 0.35f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, DISP_H * 0.35f,
-                                           nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-
-        // Status readout (above display, in panel space)
-        int rule = module ? module->lastRule : 30;
-        char status[96];
-        if (module)
-        {
-            if (module->clockActive)
-                snprintf(status, sizeof(status), "RULE %03d   |   EXT CLOCK   |   %d CH",
-                         rule, module->polyChannels);
-            else
-                snprintf(status, sizeof(status), "RULE %03d   |   %3.0f HZ   |   %d CH",
-                         rule, module->params[CellAutoGate::SPEED_PARAM].getValue(),
-                         module->polyChannels);
-        }
-        else
-            snprintf(status, sizeof(status), "RULE %03d   |   10 HZ   |   1 CH", rule);
-
-        nvgSave(vg);
-        nvgTranslate(vg, 0, -22.f);
-        drawText(vg, DISP_W / 2.f, 0.f, status, 10.f, colAccent(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-        nvgRestore(vg);
-
-        // Rule lookup glyphs (8 neighbourhoods -> result)
-        const float slotW = DISP_W / 8.f;
-        const float gy = DISP_H + 22.f;
-        const float cs = 6.f;
-        for (int k = 0; k < 8; ++k)
-        {
-            int pattern = 7 - k;   // 111 ... 000
-            int res = module ? module->ruleset[pattern] : ((30 >> pattern) & 1);
-            float cx = k * slotW + slotW / 2.f;
-
-            for (int j = 0; j < 3; ++j)
-            {
-                bool on = (pattern >> (2 - j)) & 1;
-                float x = cx - 1.5f * cs - 1.f + j * (cs + 1.f);
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, gy, cs, cs, 1.f);
-                if (on)
-                {
-                    nvgFillColor(vg, nvgRGBA(0xc9, 0xd1, 0xdc, 230));
+                    }
+                    nvgFillColor(vg, nvgRGBAf(0.24f, 0.88f, 1.f, a));
                     nvgFill(vg);
                 }
-                else
+
+                // Newest-row marker line
+                if (module && count > 0 && count < ROWS)
                 {
-                    nvgStrokeColor(vg, nvgRGBA(0x7a, 0x85, 0x94, 200));
-                    nvgStrokeWidth(vg, 1.f);
-                    nvgStroke(vg);
+                    nvgBeginPath(vg);
+                    nvgRect(vg, 0, count * CELL_SIZE, DISP_W, 1.f);
+                    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 60));
+                    nvgFill(vg);
                 }
             }
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - cs / 2.f, gy + cs + 4.f, cs, cs, 1.f);
-            if (res)
-            {
-                nvgFillColor(vg, nvgRGB(0x3d, 0xe0, 0xff));
-                nvgFill(vg);
-                // glow
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, cx - cs / 2.f - 2.f, gy + cs + 2.f, cs + 4.f, cs + 4.f, 2.f);
-                nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-                nvgFill(vg);
-            }
-            else
-            {
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 120));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-            }
+            Widget::drawLayer(args, layer);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // Status row above the display
+    // ------------------------------------------------------------
+    struct CAStatusWidget : TransparentWidget
+    {
+        CellAutoGate *module = nullptr;
+
+        CAStatusWidget(CellAutoGate *m) : module(m)
+        {
+            box.pos = Vec(DISP_X, CA_STATUS_Y - 6.f);
+            box.size = Vec(DISP_W, 12.f);
         }
 
-        Widget::drawLayer(args, layer);
-    }
-};
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer == 1)
+            {
+                NVGcontext *vg = args.vg;
+                int rule = module ? module->lastRule : 30;
+                char status[96];
+                if (module)
+                {
+                    if (module->clockActive)
+                        snprintf(status, sizeof(status), "RULE %03d | EXT CLOCK | %d CH",
+                                 rule, module->polyChannels);
+                    else
+                        snprintf(status, sizeof(status), "RULE %03d | %.0f HZ | %d CH",
+                                 rule, module->params[CellAutoGate::SPEED_PARAM].getValue(),
+                                 module->polyChannels);
+                }
+                else
+                    snprintf(status, sizeof(status), "RULE %03d | 10 HZ | 1 CH", rule);
 
-// ------------------------------------------------------------
-// Custom cyan light (Rack has no built-in CyanLight)
-// ------------------------------------------------------------
-template <typename TBase = GrayModuleLightWidget>
-struct TCyanLight : TBase
-{
-    TCyanLight()
+                drawText(vg, DISP_W / 2.f, 6.f, status, 8.f, colAccent(), ALIGN_C, 1.5f);
+            }
+            Widget::drawLayer(args, layer);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // Rule table under the display: 8 neighbourhoods -> result
+    // ------------------------------------------------------------
+    struct CARuleTableWidget : TransparentWidget
     {
-        this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff));
-    }
-};
-using CyanLight = TCyanLight<>;
+        CellAutoGate *module = nullptr;
 
-// ------------------------------------------------------------
+        CARuleTableWidget(CellAutoGate *m) : module(m)
+        {
+            box.pos = Vec(DISP_X, CA_GLYPH_Y);
+            box.size = Vec(DISP_W, 16.f);
+        }
+
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer == 1)
+            {
+                NVGcontext *vg = args.vg;
+                const float slotW = DISP_W / 8.f;
+                const float cs = 6.f;
+                for (int k = 0; k < 8; ++k)
+                {
+                    int pattern = 7 - k; // 111 ... 000
+                    int res = module ? module->ruleset[pattern] : ((30 >> pattern) & 1);
+                    float cx = k * slotW + slotW / 2.f;
+
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        bool on = (pattern >> (2 - j)) & 1;
+                        float x = cx - 1.5f * cs - 1.f + j * (cs + 1.f);
+                        nvgBeginPath(vg);
+                        nvgRect(vg, x + 0.5f, 0.5f, cs - 1.f, cs - 1.f);
+                        if (on)
+                        {
+                            nvgFillColor(vg, nvgRGBA(0xc9, 0xd1, 0xdc, 230));
+                            nvgFill(vg);
+                        }
+                        else
+                        {
+                            nvgStrokeColor(vg, nvgRGBA(0x8a, 0x95, 0xa4, 200));
+                            nvgStrokeWidth(vg, 1.f);
+                            nvgStroke(vg);
+                        }
+                    }
+                    nvgBeginPath(vg);
+                    nvgRect(vg, cx - cs / 2.f + 0.5f, cs + 4.5f, cs - 1.f, cs - 1.f);
+                    if (res)
+                    {
+                        nvgFillColor(vg, colAccent());
+                        nvgFill(vg);
+                    }
+                    else
+                    {
+                        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 140));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                }
+            }
+            Widget::drawLayer(args, layer);
+        }
+    };
+
+    // Custom cyan light (Rack has no built-in CyanLight)
+    template <typename TBase = GrayModuleLightWidget>
+    struct TCaCyanLight : TBase
+    {
+        TCaCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
+    };
+    using CaCyanLight = TCaCyanLight<>;
+
+} // namespace
+
+// =============================================================================
 // Module widget
-// ------------------------------------------------------------
+// =============================================================================
 struct CellAutoGateWidget : ModuleWidget
 {
     CellAutoGateWidget(CellAutoGate *module)
@@ -558,7 +569,7 @@ struct CellAutoGateWidget : ModuleWidget
         setModule(module);
         box.size = Vec(PANEL_W, PANEL_H);
 
-        addChild(new PanelBackground());
+        addChild(new CAPanelBackground());
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
@@ -566,26 +577,34 @@ struct CellAutoGateWidget : ModuleWidget
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
         addChild(new CellularDisplayWidget(module));
+        addChild(new CAStatusWidget(module));
+        addChild(new CARuleTableWidget(module));
 
         // Left column
-        addParam(createParamCentered<RoundBigBlackKnob>(Vec(LEFT_X, 70.f),  module, CellAutoGate::RULE_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LEFT_X, 140.f), module, CellAutoGate::SPEED_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LEFT_X, 210.f), module, CellAutoGate::POLY_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(LEFT_X, 298.f), module, CellAutoGate::CLOCK_INPUT));
+        addParam(createParamCentered<RoundBlackKnob>(
+            Vec(CA_LEFT_X, CA_RULE_TOP + CA_KNOB_DY), module, CellAutoGate::RULE_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(
+            Vec(CA_LEFT_X, CA_SPEED_TOP + CA_KNOB_DY), module, CellAutoGate::SPEED_PARAM));
+        addParam(createParamCentered<RoundBlackKnob>(
+            Vec(CA_LEFT_X, CA_POLY_TOP + CA_KNOB_DY), module, CellAutoGate::POLY_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(
+            Vec(CA_LEFT_X, CA_CLOCK_TOP + CA_JACK_DY), module, CellAutoGate::CLOCK_INPUT));
 
         // Right column
-        addParam(createParamCentered<VCVButton>(Vec(RIGHT_X, 70.f),  module, CellAutoGate::RANDOM_PARAM));
-        addParam(createParamCentered<VCVButton>(Vec(RIGHT_X, 140.f), module, CellAutoGate::RESET_PARAM));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(RIGHT_X, 298.f), module, CellAutoGate::GATE_OUTPUT));
+        addParam(createParamCentered<VCVButton>(
+            Vec(CA_RIGHT_X, CA_RAND_TOP + CA_JACK_DY), module, CellAutoGate::RANDOM_PARAM));
+        addParam(createParamCentered<VCVButton>(
+            Vec(CA_RIGHT_X, CA_RESET_TOP + CA_JACK_DY), module, CellAutoGate::RESET_PARAM));
+        addOutput(createOutputCentered<DarkPJ301MPort>(
+            Vec(CA_RIGHT_X, CA_GATES_TOP + CA_JACK_DY), module, CellAutoGate::GATE_OUTPUT));
 
-        // Gate LEDs
+        // Gate LEDs under the display
         float ledStartX = DISP_X + 8.f;
-        float ledEndX   = DISP_X + DISP_W - 8.f;
-        float ledY      = 354.f;
-        float spacing   = (ledEndX - ledStartX) / 15.f;
+        float ledEndX = DISP_X + DISP_W - 8.f;
+        float spacing = (ledEndX - ledStartX) / 15.f;
         for (int i = 0; i < 16; ++i)
-            addChild(createLightCentered<SmallLight<CyanLight>>(
-                Vec(ledStartX + i * spacing, ledY), module, CellAutoGate::GATE_LIGHT_1 + i));
+            addChild(createLightCentered<SmallLight<CaCyanLight>>(
+                Vec(ledStartX + i * spacing, CA_LED_Y), module, CellAutoGate::GATE_LIGHT_1 + i));
     }
 };
 

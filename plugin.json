@@ -42,8 +42,8 @@
       "name": "DarkHallGranular",
       "description": "reverb, granular",
       "tags": [
-        "reverb",
-        "drone"
+        "Reverb",
+        "Granular"
       ]
     },
     {
@@ -51,8 +51,8 @@
       "name": "InstantDrone",
       "description": "reverb, drone",
       "tags": [
-        "reverb",
-        "drone"
+        "Oscillator",
+        "Effect"
       ]
     },
     {
@@ -77,8 +77,8 @@
       "description": "LFO",
       "tags": [
         "LFO",
-        "gate",
-        "trigger"
+        "Low-frequency oscillator",
+        "Effect"
       ]
     },
     {
@@ -87,8 +87,7 @@
       "description": "LFO,gate,trigger",
       "tags": [
         "LFO",
-        "gate",
-        "trigger"
+        "Physical modeling"
       ]
     },
     {
@@ -97,9 +96,7 @@
       "description": "LFO,gate,trigger",
       "tags": [
         "LFO",
-        "gate",
-        "trigger",
-        "polyphonic"
+        "Random"
       ]
     },
     {
@@ -125,7 +122,7 @@
       "name": "LSDrone",
       "description": "drone",
       "tags": [
-        "drone"
+        "Oscillator","Effect"
       ]
     },
     {
@@ -133,7 +130,7 @@
       "name": "Pharmakon",
       "description": "drone",
       "tags": [
-        "drone"
+        "Granular","Effect"
       ]
     },
     {
@@ -141,17 +138,15 @@
       "name": "Dice",
       "description": "random gates, Vocts",
       "tags": [
-        "random"
+        "Random"
       ]
     },
     {
       "slug": "DiceOnSteroids",
       "name": "DiceOnSteroids",
-      "description": "random gates, voct",
+      "description": "Random gates",
       "tags": [
-        "random",
-        "gates",
-        "voct"
+        "Random"
       ]
     },
     {
@@ -197,9 +192,9 @@
     {
       "slug": "CellAutoGate",
       "name": "CellAutoGate",
-      "description": "gate",
+      "description": "Random Triggers based on Cell Automata",
       "tags": [
-        "gate"
+        "Random"
       ]
     },
     {
@@ -229,9 +224,9 @@
     {
       "slug": "Swapper",
       "name": "Swapper",
-      "description": "swap signals",
+      "description": "Swap signals",
       "tags": [
-        "swap signals"
+        "Swap signals, Effect"
       ]
     },
     {
@@ -239,7 +234,7 @@
       "name": "FancyADSR",
       "description": "FancyADSR",
       "tags": [
-        "adsr"
+        "Envelope"
       ]
     },
     {
@@ -255,8 +250,8 @@
       "name": "VCAPoly",
       "description": "VCA up to 16 voices",
       "tags": [
-        "vca",
-        "polyphony"
+        "VCA",
+        "Polyphony"
       ]
     },
     {
@@ -264,8 +259,8 @@
       "name": "Range",
       "description": "offset",
       "tags": [
-        "range",
-        "offset"
+        "Normalize",
+        "Offset"
       ]
     },
     {
@@ -321,7 +316,7 @@
       "name": "Lifeform",
       "description": "visualization",
       "tags": [
-        "visualization"
+        "Visualization"
       ]
     },
     {
@@ -337,8 +332,7 @@
       "name": "Gates",
       "description": "logic gates",
       "tags": [
-        "logic",
-        "gates"
+        "Logic"
       ]
     },
     {
@@ -354,8 +348,8 @@
       "name": "Merger",
       "description": "Merge",
       "tags": [
-        "merge",
-        "polyphonic"
+        "Mixer",
+        "Polyphonic"
       ]
     },
     {
@@ -363,8 +357,8 @@
       "name": "Splitter",
       "description": "split",
       "tags": [
-        "split",
-        "polyphonic"
+        "Split signals",
+        "Polyphonic"
       ]
     },
     {
@@ -388,7 +382,7 @@
       "name": "SwitchLines8to1",
       "description": "switch channel 8 to 1",
       "tags": [
-        "switch 8 lines to 1"
+        "Switch"
       ]
     },
     {
@@ -396,7 +390,7 @@
       "name": "SwitchLines1to8",
       "description": "switch 1 to 8",
       "tags": [
-        "switch 1 channel to 8"
+        "Switch"
       ]
     },
     {
@@ -412,8 +406,7 @@
       "name": "MagicBox",
       "description": "apply math functions in wave",
       "tags": [
-        "math",
-        "transform"
+        "Math transform"
       ]
     },
     {

@@ -3,12 +3,26 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <memory>
 #include <random>
 #include <limits>
 
-// ------------------------------------------------------------
-// Layout constants
-// ------------------------------------------------------------
+// =============================================================================
+// Layout (28 HP = 420 x 380 px)
+//
+//   y   0-15   screws
+//   y  15      title
+//   y  26-254  arena bezel; arena itself 220 x 220 at (100, 30)
+//   y  36      block captions: CONTROL (left) / OUTPUT (right)
+//   y  46-302  left block: 5 rows x 2 cells (label above control)
+//   y  46-248  right block: 4 rows x 2 cells (label above jack)
+//   y 264      readouts (own row under the arena)
+//   y 274-308  LED plate (collision / wall-hit rows)
+//   y 314-360  ball speed bars
+//   y 369      maker tag
+//
+// No text is ever drawn over the arena; every control is inside its plate.
+// =============================================================================
 static const int BB_N = 16;            // max balls
 static const int BB_TRAIL_N = 36;      // trail points per ball
 static const float BB_TRAIL_HZ = 50.f; // trail sample rate
@@ -16,32 +30,41 @@ static const float BB_TRAIL_HZ = 50.f; // trail sample rate
 static const float BB_PANEL_W = RACK_GRID_WIDTH * 28; // 420
 static const float BB_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Arena display: 10 px per volt, 6 px rail around the playfield
+static const float BB_TITLE_Y = 15.f;
+static const float BB_MAKER_Y = 369.f;
+
+// Arena: 10 px per volt, 6 px rail around the playfield
 static const float BB_DISP_W = 220.f;
 static const float BB_DISP_H = 220.f;
 static const float BB_DISP_X = 100.f;
-static const float BB_DISP_Y = 46.f;
+static const float BB_DISP_Y = 30.f;
 static const float BB_SCALE = 10.f;
 static const float BB_MARGIN = 6.f;
+static const float BB_READ_Y = 264.f; // panel coordinates
 
-// Left control block (2 columns x 5 rows) and right output block (2 x 4)
-static const float BB_LCOL[2] = {28.f, 68.f};
-static const float BB_LROW[5] = {90.f, 138.f, 186.f, 234.f, 282.f};
-static const float BB_RCOL[2] = {352.f, 392.f};
-static const float BB_ROUT[4] = {100.f, 150.f, 200.f, 250.f};
+// Side blocks
+static const float BB_CAPTION_Y = 36.f;
+static const float BB_CELL_W = 38.f, BB_CELL_H = 48.f;
+static const float BB_CELL_LABEL = 8.f; // offsets from the plate top
+static const float BB_CELL_CTRL = 30.f;
+static const float BB_LCOL[2] = {29.f, 70.f};
+static const float BB_RCOL[2] = {351.f, 392.f};
+static const float BB_ROW_TOP[5] = {46.f, 98.f, 150.f, 202.f, 254.f};
 
-// LED rows under the display
-static const float BB_LED_X = 112.f;
-static const float BB_LED_DX = 11.6f;
-static const float BB_LED_Y1 = 288.f;
-static const float BB_LED_Y2 = 300.f;
+// LED plate under the arena
+static const float BB_LED_PLATE_Y = 274.f, BB_LED_PLATE_H = 34.f;
+static const float BB_LED_X = BB_DISP_X + 44.f;
+static const float BB_LED_DX = 11.f;
+static const float BB_LED_Y1 = 285.f;
+static const float BB_LED_Y2 = 297.f;
 
-// Ball speed bars (bottom strip)
+// Ball speed bars
+static const float BB_SPEED_PLATE_Y = 314.f, BB_SPEED_PLATE_H = 46.f;
 static const float BB_BARS_X = 40.f;
 static const float BB_BARS_Y = 330.f;
 static const float BB_BARS_W = 340.f;
-static const float BB_BARS_H = 34.f;
-static const float BB_BAR_H = 22.f; // bar area height inside the widget
+static const float BB_BARS_H = 28.f;
+static const float BB_BAR_H = 18.f; // bar area height inside the widget
 
 // ------------------------------------------------------------
 // Module
@@ -62,8 +85,8 @@ struct BouncingBalls : Module
     {
         RESET_CV_INPUT,
         ANGLE_CV_INPUT,
-        SPEED_CV_INPUT, // new
-        BALLS_CV_INPUT, // new
+        SPEED_CV_INPUT,
+        BALLS_CV_INPUT,
         INPUTS_LEN
     };
     enum OutputId
@@ -195,7 +218,7 @@ struct BouncingBalls : Module
         configParam(NUM_BALLS_PARAM, 1.f, 16.f, 1.f, "Number of balls");
         getParamQuantity(NUM_BALLS_PARAM)->snapEnabled = true;
         configButton(RESET_BUTTON, "Reset");
-        configParam(ANGLE_ATTENUATOR_PARAM, -1.f, 1.f, 0.f, "Angle CV attenuverter", "%", 0.f, 100.f);
+        configParam(ANGLE_ATTENUATOR_PARAM, -1.f, 1.f, 0.f, "Angle CV amount", "%", 0.f, 100.f);
         configSwitch(COLLISIONS_SWITCH_PARAM, 0.f, 1.f, 0.f, "Ball collisions", {"Off", "On"});
 
         configInput(RESET_CV_INPUT, "Reset gate");
@@ -207,8 +230,8 @@ struct BouncingBalls : Module
         configOutput(Y_OUTPUT, "Y (polyphonic)");
         configOutput(GATE_X_OUTPUT, "Gate X (polyphonic)");
         configOutput(GATE_Y_OUTPUT, "Gate Y (polyphonic)");
-        configOutput(VOCT_X_OUTPUT, "Voct X (polyphonic)");
-        configOutput(VOCT_Y_OUTPUT, "Voct Y (polyphonic)");
+        configOutput(VOCT_X_OUTPUT, "V/oct X (polyphonic)");
+        configOutput(VOCT_Y_OUTPUT, "V/oct Y (polyphonic)");
         configOutput(COLLISION_GATE_OUTPUT, "Collision gate (polyphonic)");
         configOutput(WALL_HIT_GATE_OUTPUT, "Wall hit gate (polyphonic)");
 
@@ -605,10 +628,10 @@ struct BouncingBalls : Module
         json_t *j;
         j = json_object_get(root, "voctRange");
         if (j)
-            voctRange = (VoctRange)json_integer_value(j);
+            voctRange = (VoctRange)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_RANGES - 1);
         j = json_object_get(root, "gateDuration");
         if (j)
-            gateDuration = (GateDuration)json_integer_value(j);
+            gateDuration = (GateDuration)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_GATE_DURS - 1);
     }
 };
 
@@ -623,27 +646,42 @@ namespace
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
+    NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
     NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
-    void setFont(NVGcontext *vg)
+    const int ALIGN_L = NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
+    const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
+    const int ALIGN_R = NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE;
+
+    bool setFont(NVGcontext *vg)
     {
+        if (!APP || !APP->window)
+            return false;
         std::shared_ptr<window::Font> font =
             APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
+        if (!font)
+            return false;
+        nvgFontFaceId(vg, font->handle);
+        return true;
     }
 
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
+                  int align = ALIGN_C, float spacing = 0.5f)
     {
-        setFont(vg);
+        if (!setFont(vg))
+            return;
         nvgFontSize(vg, size);
         nvgTextLetterSpacing(vg, spacing);
         nvgTextAlign(vg, align);
         nvgFillColor(vg, col);
         nvgText(vg, x, y, s, NULL);
+    }
+
+    NVGcolor withAlpha(NVGcolor c, float a)
+    {
+        c.a = a;
+        return c;
     }
 
     // Cyan / violet LEDs (Rack has no built-in ones)
@@ -661,89 +699,12 @@ namespace
     };
     using BBVioletLight = TBBVioletLight<>;
 
-    // ------------------------------------------------------------
-    // AGMM logo
-    // ------------------------------------------------------------
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        // Pill body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        // Tiny cell triangle
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        // Wordmark
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    // ------------------------------------------------------------
-    // Ball helpers
-    // ------------------------------------------------------------
-
-    // Ball colours run from cyan through violet to magenta, so all 16 stay distinct
-    // and fit the theme. The colour depends on the ball index, not on the ball count.
+    // Ball colours run from cyan through violet to magenta, so all 16 stay distinct.
+    // The colour depends on the ball index, not on the ball count.
     NVGcolor ballColor(int i, float sat, float light)
     {
         float h = 0.5f + 0.45f * (float)i / 15.f;
         return nvgHSL(h, sat, light);
-    }
-
-    NVGcolor withAlpha(NVGcolor c, float a)
-    {
-        c.a = a;
-        return c;
-    }
-
-    // Shaded sphere with specular highlight and rim
-    void drawBall(NVGcontext *vg, float cx, float cy, float r, NVGcolor hi, NVGcolor base, NVGcolor edge)
-    {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx - r * 0.35f, cy - r * 0.4f, r * 0.1f, r * 1.25f, hi, base));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r - 0.4f);
-        nvgStrokeColor(vg, edge);
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Bounce light on the lower right
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx + r * 0.38f, cy + r * 0.42f, r * 0.3f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
-        nvgFill(vg);
-
-        // Specular
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx - r * 0.38f, cy - r * 0.42f, r * 0.22f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 215));
-        nvgFill(vg);
     }
 
     // Fading motion trail (older = thinner and fainter)
@@ -768,164 +729,102 @@ namespace
         }
     }
 
+    // Control plate; tint = outputs
+    void plate(NVGcontext *vg, float cx, float top, float w, float h, bool tint = false)
+    {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, cx - w / 2.f, top, w, h, 5.f);
+        nvgFillColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 22) : nvgRGBA(0, 0, 0, 55));
+        nvgFill(vg);
+        nvgStrokeColor(vg, tint ? nvgRGBA(0x3d, 0xe0, 0xff, 60) : nvgRGBA(255, 255, 255, 22));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
+
+    // Side-block cell: label above, control below (the control is a widget)
+    void cell(NVGcontext *vg, float cx, float top, const char *txt, bool tint = false)
+    {
+        plate(vg, cx, top, BB_CELL_W, BB_CELL_H, tint);
+        drawText(vg, cx, top + BB_CELL_LABEL, txt, 7.f, colDim(), ALIGN_C, 0.3f);
+    }
+
+    void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col)
+    {
+        drawText(vg, cx, y, txt, 8.f, col, ALIGN_C, 2.f);
+    }
+
     // ------------------------------------------------------------
-    // Panel background
+    // Panel background (static artwork only)
     // ------------------------------------------------------------
     struct BBPanelBackground : TransparentWidget
     {
         BBPanelBackground() { box.size = Vec(BB_PANEL_W, BB_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
-        {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Caption with an underline (side blocks)
-        void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float x1, float x2)
-        {
-            drawText(vg, cx, y, txt, 8.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y + 8.f);
-            nvgLineTo(vg, x2, y + 8.f);
-            nvgStrokeColor(vg, withAlpha(col, 0.35f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Output jack cell: label on top, jack below
-        void outCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-            label(vg, cx, cy - 19.f, txt);
-        }
-
-        // Left block cells: control in the middle, label below
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 17.f, 34.f, 34.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-        void knobCell(NVGcontext *vg, float cx, float cy, float r, const char *txt)
-        {
-            ring(vg, cx, cy, r);
-            label(vg, cx, cy + 25.f, txt);
-        }
-
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
 
-            // Base gradient
             nvgBeginPath(vg);
             nvgRect(vg, 0, 0, BB_PANEL_W, BB_PANEL_H);
             nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, BB_PANEL_H, colBgTop(), colBgBottom()));
             nvgFill(vg);
 
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)BB_PANEL_H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, BB_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
+            drawText(vg, BB_PANEL_W / 2.f, BB_TITLE_Y, "BOUNCING BALLS", 12.f, colText(), ALIGN_C, 3.f);
+            drawText(vg, BB_PANEL_W / 2.f, BB_MAKER_Y, "AGMM", 9.f, colDim(), ALIGN_C, 3.f);
 
-            // Edge highlight
+            // Arena bezel
             nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, BB_PANEL_W - 1.f, BB_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+            nvgRoundedRect(vg, BB_DISP_X - 4.f, BB_DISP_Y - 4.f,
+                           BB_DISP_W + 8.f, BB_DISP_H + 8.f, 5.f);
+            nvgFillColor(vg, nvgRGB(0x0b, 0x0c, 0x0e));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            // Logo + title
-            drawLogo(vg, BB_PANEL_W / 2.f, 13.f);
-            drawText(vg, BB_PANEL_W / 2.f, 31.f, "BOUNCINGBALLS", 13.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-
-            // Display bezel
-            float bx = BB_DISP_X - 5.f, by = BB_DISP_Y - 5.f;
-            float bw = BB_DISP_W + 10.f, bh = BB_DISP_H + 10.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
-
             // Block captions
-            caption(vg, 48.f, 54.f, "CONTROL", colAccent(), 12.f, 84.f);
-            caption(vg, 372.f, 54.f, "OUTPUT", colViolet(), 335.f, 409.f);
+            caption(vg, (BB_LCOL[0] + BB_LCOL[1]) / 2.f, BB_CAPTION_Y, "CONTROL", colAccent());
+            caption(vg, (BB_RCOL[0] + BB_RCOL[1]) / 2.f, BB_CAPTION_Y, "OUTPUT", colViolet());
 
-            // ---- left block ----
+            // ---- left block (label above each control) ----
             const float l0 = BB_LCOL[0], l1 = BB_LCOL[1];
-            knobCell(vg, l0, BB_LROW[0], 18.f, "SPEED");
-            jackCell(vg, l1, BB_LROW[0], "SPD CV");
-            knobCell(vg, l0, BB_LROW[1], 18.f, "ANGLE");
-            knobCell(vg, l1, BB_LROW[1], 13.f, "ANG ATT");
-            jackCell(vg, l0, BB_LROW[2], "ANG CV");
-            plate(vg, l1 - 17.f, BB_LROW[2] - 20.f, 34.f, 40.f); // collide switch
-            label(vg, l1, BB_LROW[2] + 25.f, "COLLIDE");
-            knobCell(vg, l0, BB_LROW[3], 18.f, "BALLS");
-            jackCell(vg, l1, BB_LROW[3], "BALLS CV");
-            knobCell(vg, l0, BB_LROW[4], 17.f, "RESET");
-            jackCell(vg, l1, BB_LROW[4], "RESET IN");
+            cell(vg, l0, BB_ROW_TOP[0], "SPEED");
+            cell(vg, l1, BB_ROW_TOP[0], "SPD CV");
+            cell(vg, l0, BB_ROW_TOP[1], "ANGLE");
+            cell(vg, l1, BB_ROW_TOP[1], "ANG ATT");
+            cell(vg, l0, BB_ROW_TOP[2], "ANG CV");
+            cell(vg, l1, BB_ROW_TOP[2], "COLLIDE");
+            cell(vg, l0, BB_ROW_TOP[3], "BALLS");
+            cell(vg, l1, BB_ROW_TOP[3], "BAL CV");
+            cell(vg, l0, BB_ROW_TOP[4], "RESET");
+            cell(vg, l1, BB_ROW_TOP[4], "RST IN");
 
-            // ---- right block ----
+            // ---- right block (outputs, tinted) ----
             const float r0 = BB_RCOL[0], r1 = BB_RCOL[1];
-            outCell(vg, r0, BB_ROUT[0], "X");
-            outCell(vg, r1, BB_ROUT[0], "Y");
-            outCell(vg, r0, BB_ROUT[1], "GATE X");
-            outCell(vg, r1, BB_ROUT[1], "GATE Y");
-            outCell(vg, r0, BB_ROUT[2], "V/OCT X");
-            outCell(vg, r1, BB_ROUT[2], "V/OCT Y");
-            outCell(vg, r0, BB_ROUT[3], "COLL");
-            outCell(vg, r1, BB_ROUT[3], "WALL");
+            cell(vg, r0, BB_ROW_TOP[0], "X", true);
+            cell(vg, r1, BB_ROW_TOP[0], "Y", true);
+            cell(vg, r0, BB_ROW_TOP[1], "GATE X", true);
+            cell(vg, r1, BB_ROW_TOP[1], "GATE Y", true);
+            cell(vg, r0, BB_ROW_TOP[2], "V/OCT X", true);
+            cell(vg, r1, BB_ROW_TOP[2], "V/OCT Y", true);
+            cell(vg, r0, BB_ROW_TOP[3], "COLL", true);
+            cell(vg, r1, BB_ROW_TOP[3], "WALL", true);
 
-            // ---- LED plate under the display ----
-            plate(vg, BB_DISP_X, 278.f, BB_DISP_W, 34.f);
-            drawText(vg, 302.f, BB_LED_Y1, "COLL", 6.f, colAccent(),
-                     NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
-            drawText(vg, 302.f, BB_LED_Y2, "WALL", 6.f, colViolet(),
-                     NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+            // ---- LED plate under the arena ----
+            plate(vg, BB_DISP_X + BB_DISP_W / 2.f, BB_LED_PLATE_Y, BB_DISP_W, BB_LED_PLATE_H);
+            drawText(vg, BB_DISP_X + 7.f, BB_LED_Y1, "COLL", 7.f, colAccent(), ALIGN_L, 0.5f);
+            drawText(vg, BB_DISP_X + 7.f, BB_LED_Y2, "WALL", 7.f, colViolet(), ALIGN_L, 0.5f);
 
             // ---- speed bars plate ----
-            plate(vg, 34.f, 316.f, 352.f, 48.f);
-            drawText(vg, 44.f, 322.f, "BALL SPEED", 6.f, colAccent(),
-                     NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.5f);
+            plate(vg, BB_PANEL_W / 2.f, BB_SPEED_PLATE_Y, 352.f, BB_SPEED_PLATE_H);
+            drawText(vg, 44.f, BB_SPEED_PLATE_Y + 8.f, "BALL SPEED", 7.f, colAccent(), ALIGN_L, 1.5f);
 
             Widget::draw(args);
         }
     };
 
     // ------------------------------------------------------------
-    // Arena display
+    // Arena display (no text over the playfield)
     // ------------------------------------------------------------
     struct BBDisplayWidget : TransparentWidget
     {
@@ -937,7 +836,7 @@ namespace
             box.size = Vec(BB_DISP_W, BB_DISP_H);
         }
 
-        // Static background: metal rail, glass playfield, grid, rail ticks
+        // Static layer: rail, playfield, grid, axes
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -945,12 +844,9 @@ namespace
 
             // Rail
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0, 0, W, H, 4.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H,
-                                               nvgRGB(0x3a, 0x41, 0x4c), nvgRGB(0x14, 0x17, 0x1c)));
+            nvgRoundedRect(vg, 0, 0, W, H, 3.f);
+            nvgFillColor(vg, nvgRGB(0x1c, 0x20, 0x26));
             nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f, 4.f);
             nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 40));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
@@ -958,43 +854,11 @@ namespace
             // Playfield
             nvgBeginPath(vg);
             nvgRect(vg, m, m, W - 2.f * m, H - 2.f * m);
-            nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, 20.f, 150.f,
-                                               nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x0a)));
+            nvgFillColor(vg, nvgRGB(0x05, 0x08, 0x0c));
             nvgFill(vg);
-
-            // Inner shadow where the rail meets the glass
-            nvgBeginPath(vg);
-            nvgRect(vg, m + 0.5f, m + 0.5f, W - 2.f * m - 1.f, H - 2.f * m - 1.f);
             nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 200));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
-
-            // Rail ticks every 2 V and corner rivets
-            nvgBeginPath(vg);
-            for (int k = -5; k <= 5; ++k)
-            {
-                float p = cx + k * 20.f + 0.5f;
-                nvgMoveTo(vg, p, 1.5f);
-                nvgLineTo(vg, p, 4.f);
-                nvgMoveTo(vg, p, H - 4.f);
-                nvgLineTo(vg, p, H - 1.5f);
-                float q = cy + k * 20.f + 0.5f;
-                nvgMoveTo(vg, 1.5f, q);
-                nvgLineTo(vg, 4.f, q);
-                nvgMoveTo(vg, W - 4.f, q);
-                nvgLineTo(vg, W - 1.5f, q);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0xc9, 0xd1, 0xdc, 90));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgCircle(vg, 3.f, 3.f, 1.2f);
-            nvgCircle(vg, W - 3.f, 3.f, 1.2f);
-            nvgCircle(vg, 3.f, H - 3.f, 1.2f);
-            nvgCircle(vg, W - 3.f, H - 3.f, 1.2f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 90));
-            nvgFill(vg);
 
             // Grid every 2 V
             nvgBeginPath(vg);
@@ -1028,15 +892,16 @@ namespace
 
         void drawLayer(const DrawArgs &args, int layer) override
         {
-            if (layer != 1)
-            {
-                Widget::drawLayer(args, layer);
-                return;
-            }
-            NVGcontext *vg = args.vg;
+            if (layer == 1)
+                drawLive(args.vg);
+            Widget::drawLayer(args, layer);
+        }
+
+        void drawLive(NVGcontext *vg)
+        {
             const float W = BB_DISP_W, H = BB_DISP_H, cx = W / 2.f, cy = H / 2.f;
             const float S = BB_SCALE, m = BB_MARGIN;
-            const float R = 4.4f; // ball radius in pixels
+            const float R = 4.f; // ball radius in pixels
 
             // ---- gather state (live, or a sample scene in the module browser) ----
             int n;
@@ -1045,8 +910,6 @@ namespace
             int ws[BB_N];
             float tx[BB_N][BB_TRAIL_N], ty[BB_N][BB_TRAIL_N];
             int tn = 0;
-            float spdKnob, angDeg;
-            bool coll;
 
             for (int i = 0; i < BB_N; ++i)
             {
@@ -1085,9 +948,6 @@ namespace
                         ty[i][k] = cy - module->trailY[i][idx] * S;
                     }
                 }
-                spdKnob = (float)module->speedBase;
-                angDeg = (float)(module->angleBase * 180.0 / M_PI);
-                coll = module->params[BouncingBalls::COLLISIONS_SWITCH_PARAM].getValue() > 0.5f;
             }
             else
             {
@@ -1121,9 +981,6 @@ namespace
                 xp[3] = 3.f;
                 fyc[6] = 0.6f;
                 yp[6] = -4.f;
-                spdKnob = 5.f;
-                angDeg = 0.f;
-                coll = true;
             }
 
             // ---- wall hit flashes on the rail ----
@@ -1160,23 +1017,12 @@ namespace
                     x0 = lo;
                     x1 = hi;
                 }
-                for (int pass = 0; pass < 2; ++pass)
-                {
-                    nvgBeginPath(vg);
-                    nvgMoveTo(vg, x0, y0);
-                    nvgLineTo(vg, x1, y1);
-                    if (pass == 0)
-                    {
-                        nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.6f), 0.28f * f));
-                        nvgStrokeWidth(vg, 7.f);
-                    }
-                    else
-                    {
-                        nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.85f), f));
-                        nvgStrokeWidth(vg, 1.8f);
-                    }
-                    nvgStroke(vg);
-                }
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, x0, y0);
+                nvgLineTo(vg, x1, y1);
+                nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.8f), f));
+                nvgStrokeWidth(vg, 2.f);
+                nvgStroke(vg);
             }
 
             // ---- axis crossing flashes (gate triggers) ----
@@ -1195,45 +1041,19 @@ namespace
                     nvgStrokeColor(vg, withAlpha(c, 0.9f * f));
                     nvgStrokeWidth(vg, 1.2f);
                     nvgStroke(vg);
-                    nvgBeginPath(vg);
-                    nvgCircle(vg, ax, ay, 1.8f);
-                    nvgFillColor(vg, withAlpha(c, f));
-                    nvgFill(vg);
                 }
             }
 
             // ---- trails ----
             for (int i = 0; i < n; ++i)
-            {
-                NVGcolor c = ballColor(i, 0.85f, 0.6f);
-                drawTrail(vg, tx[i], ty[i], tn, c, 4.f, 0.12f);
-                drawTrail(vg, tx[i], ty[i], tn, c, 1.2f, 0.55f);
-            }
+                drawTrail(vg, tx[i], ty[i], tn, ballColor(i, 0.85f, 0.6f), 1.5f, 0.5f);
 
-            // ---- shadows ----
-            nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i)
-                nvgCircle(vg, cx + px[i] * S + 1.8f, cy - py[i] * S + 2.6f, R);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgFill(vg);
-
-            // ---- heading ticks, halos and balls ----
+            // ---- balls (flat) with a heading tick ----
             for (int i = 0; i < n; ++i)
             {
                 float bx = cx + px[i] * S, by = cy - py[i] * S;
                 float sp = std::sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
-                float energy = std::min(sp / 24.f, 1.f);
-                NVGcolor c = ballColor(i, 0.85f, 0.6f);
 
-                // Halo
-                float ha = 0.10f + 0.22f * energy + 0.30f * fc[i];
-                nvgBeginPath(vg);
-                nvgCircle(vg, bx, by, R * 3.f);
-                nvgFillPaint(vg, nvgRadialGradient(vg, bx, by, R * 0.6f, R * 3.f,
-                                                   withAlpha(c, ha), withAlpha(c, 0.f)));
-                nvgFill(vg);
-
-                // Heading tick
                 if (sp > 0.05f)
                 {
                     float dx = vx[i] / sp, dy = -vy[i] / sp;
@@ -1241,16 +1061,19 @@ namespace
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, bx + dx * (R + 1.5f), by + dy * (R + 1.5f));
                     nvgLineTo(vg, bx + dx * (R + 1.5f + len), by + dy * (R + 1.5f + len));
-                    nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.85f), 0.55f));
+                    nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.85f), 0.6f));
                     nvgStrokeWidth(vg, 1.2f);
                     nvgLineCap(vg, NVG_ROUND);
                     nvgStroke(vg);
                 }
 
-                drawBall(vg, bx, by, R,
-                         ballColor(i, 0.9f, 0.86f),
-                         ballColor(i, 0.8f, 0.42f),
-                         ballColor(i, 0.8f, 0.16f));
+                nvgBeginPath(vg);
+                nvgCircle(vg, bx, by, R);
+                nvgFillColor(vg, ballColor(i, 0.85f, 0.58f));
+                nvgFill(vg);
+                nvgStrokeColor(vg, ballColor(i, 0.8f, 0.2f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
             }
 
             // ---- collision rings ----
@@ -1265,34 +1088,43 @@ namespace
                 nvgStrokeWidth(vg, 1.5f);
                 nvgStroke(vg);
             }
+        }
+    };
 
-            // ---- scanlines ----
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)H; y += 3)
-                nvgRect(vg, 0, y + 1, W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
+    // ------------------------------------------------------------
+    // Readout row under the arena (balls / speed / angle / collisions)
+    // ------------------------------------------------------------
+    struct BBReadoutWidget : TransparentWidget
+    {
+        BouncingBalls *module = nullptr;
 
-            // ---- glass reflection ----
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H * 0.35f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.35f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
+        BBReadoutWidget(BouncingBalls *m) : module(m)
+        {
+            box.pos = Vec(BB_DISP_X, BB_READ_Y - 6.f);
+            box.size = Vec(BB_DISP_W, 12.f);
+        }
 
-            // ---- readouts ----
-            char buf[32];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 200);
-            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 220);
-            snprintf(buf, sizeof(buf), "BALLS %02d", n);
-            drawText(vg, 11.f, 15.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "SPD %4.1f", spdKnob);
-            drawText(vg, W - 11.f, 15.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "ANG %+4.0f", angDeg);
-            drawText(vg, 11.f, H - 15.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, W - 11.f, H - 15.f, coll ? "COLL ON" : "COLL OFF", 7.f,
-                     coll ? c1 : cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer == 1)
+            {
+                NVGcontext *vg = args.vg;
+                int n = module ? module->numBalls : 8;
+                float spd = module ? (float)module->speedBase : 5.f;
+                float ang = module ? (float)(module->angleBase * 180.0 / M_PI) : 0.f;
+                bool coll = module ? module->params[BouncingBalls::COLLISIONS_SWITCH_PARAM].getValue() > 0.5f : true;
 
+                const float y = 6.f, slot = BB_DISP_W / 4.f;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "BALLS %02d", n);
+                drawText(vg, slot * 0.5f, y, buf, 7.f, colAccent(), ALIGN_C, 0.5f);
+                snprintf(buf, sizeof(buf), "SPD %.1f", spd);
+                drawText(vg, slot * 1.5f, y, buf, 7.f, colAccent(), ALIGN_C, 0.5f);
+                snprintf(buf, sizeof(buf), "ANG %+.0f", ang);
+                drawText(vg, slot * 2.5f, y, buf, 7.f, colAccent(), ALIGN_C, 0.5f);
+                drawText(vg, slot * 3.5f, y, coll ? "COLL ON" : "COLL OFF", 7.f,
+                         coll ? colAccent() : colDim(), ALIGN_C, 0.5f);
+            }
             Widget::drawLayer(args, layer);
         }
     };
@@ -1325,70 +1157,43 @@ namespace
 
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d", i + 1);
-                drawText(vg, x, BB_BAR_H + 7.f, buf, 6.f, colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
+                drawText(vg, x, BB_BAR_H + 6.f, buf, 7.f, colDim(), ALIGN_C, 0.f);
             }
             Widget::draw(args);
         }
 
         void drawLayer(const DrawArgs &args, int layer) override
         {
-            if (layer != 1)
+            if (layer == 1)
             {
-                Widget::drawLayer(args, layer);
-                return;
-            }
-            NVGcontext *vg = args.vg;
-
-            int n = module ? module->numBalls : 8;
-            for (int i = 0; i < BB_N; ++i)
-            {
-                float x = slot() * (i + 0.5f);
-                if (i >= n)
+                NVGcontext *vg = args.vg;
+                int n = module ? module->numBalls : 8;
+                for (int i = 0; i < BB_N; ++i)
                 {
+                    float x = slot() * (i + 0.5f);
+                    if (i >= n)
+                        continue;
+
+                    float sp;
+                    if (module)
+                    {
+                        float vx = (float)module->velX[i], vy = (float)module->velY[i];
+                        sp = std::sqrt(vx * vx + vy * vy);
+                    }
+                    else
+                    {
+                        sp = 6.f + (float)((i * 5) % 9) * 2.2f;
+                    }
+                    float h = std::min(sp / 28.f, 1.f) * (BB_BAR_H - 2.f);
+                    if (h < 1.f)
+                        h = 1.f;
+
                     nvgBeginPath(vg);
-                    nvgRect(vg, x - 2.f, BB_BAR_H - 1.f, 4.f, 1.f);
-                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 25));
+                    nvgRect(vg, x - 6.f, BB_BAR_H - h, 12.f, h);
+                    nvgFillColor(vg, ballColor(i, 0.85f, 0.55f));
                     nvgFill(vg);
-                    continue;
                 }
-
-                float sp, flash = 0.f;
-                if (module)
-                {
-                    float vx = (float)module->velX[i], vy = (float)module->velY[i];
-                    sp = std::sqrt(vx * vx + vy * vy);
-                    flash = module->flashCol[i];
-                }
-                else
-                {
-                    sp = 6.f + (float)((i * 5) % 9) * 2.2f;
-                }
-                float h = std::min(sp / 28.f, 1.f) * (BB_BAR_H - 2.f);
-                if (h < 1.f)
-                    h = 1.f;
-                float top = BB_BAR_H - h;
-
-                // Glow
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 8.5f, top - 1.5f, 17.f, h + 3.f);
-                nvgFillColor(vg, withAlpha(ballColor(i, 0.9f, 0.6f), 0.12f + 0.2f * flash));
-                nvgFill(vg);
-
-                // Bar
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 6.f, top, 12.f, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, BB_BAR_H, 0, 0,
-                                                   ballColor(i, 0.8f, 0.30f), ballColor(i, 0.9f, 0.66f)));
-                nvgFill(vg);
-
-                // Cap
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 6.f, top, 12.f, 1.5f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 170));
-                nvgFill(vg);
             }
-
             Widget::drawLayer(args, layer);
         }
     };
@@ -1413,37 +1218,41 @@ struct BouncingBallsWidget : ModuleWidget
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
         addChild(new BBDisplayWidget(module));
+        addChild(new BBReadoutWidget(module));
         addChild(new BBBarsWidget(module));
 
-        // ---- left block ----
+        // ---- left block: control centre = plate top + BB_CELL_CTRL ----
         const float l0 = BB_LCOL[0], l1 = BB_LCOL[1];
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, BB_LROW[0]), module, BouncingBalls::SPEED_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, BB_LROW[0]), module, BouncingBalls::SPEED_CV_INPUT));
+        auto ly = [](int row)
+        { return BB_ROW_TOP[row] + BB_CELL_CTRL; };
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, BB_LROW[1]), module, BouncingBalls::ANGLE_PARAM));
-        addParam(createParamCentered<Trimpot>(Vec(l1, BB_LROW[1]), module, BouncingBalls::ANGLE_ATTENUATOR_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, ly(0)), module, BouncingBalls::SPEED_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, ly(0)), module, BouncingBalls::SPEED_CV_INPUT));
 
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l0, BB_LROW[2]), module, BouncingBalls::ANGLE_CV_INPUT));
-        addParam(createParamCentered<CKSS>(Vec(l1, BB_LROW[2]), module, BouncingBalls::COLLISIONS_SWITCH_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, ly(1)), module, BouncingBalls::ANGLE_PARAM));
+        addParam(createParamCentered<Trimpot>(Vec(l1, ly(1)), module, BouncingBalls::ANGLE_ATTENUATOR_PARAM));
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, BB_LROW[3]), module, BouncingBalls::NUM_BALLS_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, BB_LROW[3]), module, BouncingBalls::BALLS_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(l0, ly(2)), module, BouncingBalls::ANGLE_CV_INPUT));
+        addParam(createParamCentered<CKSS>(Vec(l1, ly(2)), module, BouncingBalls::COLLISIONS_SWITCH_PARAM));
 
-        addParam(createParamCentered<VCVButton>(Vec(l0, BB_LROW[4]), module, BouncingBalls::RESET_BUTTON));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, BB_LROW[4]), module, BouncingBalls::RESET_CV_INPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, ly(3)), module, BouncingBalls::NUM_BALLS_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, ly(3)), module, BouncingBalls::BALLS_CV_INPUT));
+
+        addParam(createParamCentered<VCVButton>(Vec(l0, ly(4)), module, BouncingBalls::RESET_BUTTON));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, ly(4)), module, BouncingBalls::RESET_CV_INPUT));
 
         // ---- right block (all outputs are polyphonic) ----
         const float r0 = BB_RCOL[0], r1 = BB_RCOL[1];
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, BB_ROUT[0]), module, BouncingBalls::X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, BB_ROUT[0]), module, BouncingBalls::Y_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, BB_ROUT[1]), module, BouncingBalls::GATE_X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, BB_ROUT[1]), module, BouncingBalls::GATE_Y_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, BB_ROUT[2]), module, BouncingBalls::VOCT_X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, BB_ROUT[2]), module, BouncingBalls::VOCT_Y_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, BB_ROUT[3]), module, BouncingBalls::COLLISION_GATE_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, BB_ROUT[3]), module, BouncingBalls::WALL_HIT_GATE_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, ly(0)), module, BouncingBalls::X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, ly(0)), module, BouncingBalls::Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, ly(1)), module, BouncingBalls::GATE_X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, ly(1)), module, BouncingBalls::GATE_Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, ly(2)), module, BouncingBalls::VOCT_X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, ly(2)), module, BouncingBalls::VOCT_Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, ly(3)), module, BouncingBalls::COLLISION_GATE_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, ly(3)), module, BouncingBalls::WALL_HIT_GATE_OUTPUT));
 
-        // ---- LED rows under the display ----
+        // ---- LED rows under the arena ----
         for (int i = 0; i < 16; ++i)
         {
             addChild(createLightCentered<SmallLight<BBCyanLight>>(
@@ -1461,14 +1270,14 @@ struct BouncingBallsWidget : ModuleWidget
 
         menu->addChild(new ui::MenuSeparator);
 
-        menu->addChild(createSubmenuItem("Voct range", "",
+        menu->addChild(createSubmenuItem("V/oct range", "",
                                          [=](ui::Menu *submenu)
                                          {
                                              const char *rangeNames[] = {"0 to 1", "-1 to 1", "-2 to 2", "-5 to 5", "0 to 5"};
                                              for (int i = 0; i < BouncingBalls::NUM_RANGES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(rangeNames[i],
-                                                                                  (module->voctRange == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->voctRange == i),
                                                                                   [=]()
                                                                                   { module->voctRange = (BouncingBalls::VoctRange)i; }));
                                              }
@@ -1480,7 +1289,7 @@ struct BouncingBallsWidget : ModuleWidget
                                              for (int i = 0; i < BouncingBalls::NUM_GATE_DURS; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(gateNames[i],
-                                                                                  (module->gateDuration == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->gateDuration == i),
                                                                                   [=]()
                                                                                   { module->gateDuration = (BouncingBalls::GateDuration)i; }));
                                              }

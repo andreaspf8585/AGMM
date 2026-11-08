@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -7,15 +8,34 @@
 #include <algorithm>
 
 // ------------------------------------------------------------
-// Layout constants
+// Layout (16 HP = 240 x 380)
 // ------------------------------------------------------------
 static const float DC_W = RACK_GRID_WIDTH * 16; // 240
 static const float DC_H = RACK_GRID_HEIGHT;     // 380
-static const float DC_DX = 20.f, DC_DY = 46.f, DC_DW = 200.f, DC_DH = 96.f;
+
+// Display (bezel is drawn 4 px around it)
+static const float DC_DX = 20.f, DC_DY = 32.f, DC_DW = 200.f, DC_DH = 100.f;
 static const float DC_CHW = 12.5f; // 16 x 12.5 = 200
-static const float DC_LEDY = 162.f;
-static const float DC_KY = 226.f;
-static const float DC_IOY = 332.f;
+// Rows inside the display
+static const float DC_HEAD_Y = 9.f;  // header text row
+static const float DC_PLOT_Y = 18.f; // plot top
+static const float DC_PLOT_H = 64.f; // plot height
+static const float DC_FOOT_Y = 91.f; // footer text row
+
+// LED strip
+static const float DC_LED_TOP = 146.f, DC_LED_H = 16.f;
+static const float DC_LEDY = DC_LED_TOP + DC_LED_H / 2.f;
+
+// Controls
+static const float DC_SEC1_Y = 182.f;
+static const float DC_CTL_TOP = 194.f, DC_CTL_H = 66.f, DC_CTL_W = 88.f;
+static const float DC_KY = DC_CTL_TOP + 40.f; // knob centre (label above, knob 38 px)
+static const float DC_KX0 = 68.f, DC_KX1 = 172.f;
+
+// I/O
+static const float DC_SEC2_Y = 278.f;
+static const float DC_IO_TOP = 290.f, DC_IO_H = 62.f, DC_IO_W = 48.f;
+static const float DC_IOY = DC_IO_TOP + 38.f; // jack centre (label above, jack 24 px)
 static float dcIoX(int i) { return 36.f + 56.f * i; }
 
 // ------------------------------------------------------------
@@ -95,7 +115,7 @@ static const std::vector<DiceScale> &diceScales()
 }
 
 // ------------------------------------------------------------
-// Module
+// Module (DSP unchanged)
 // ------------------------------------------------------------
 struct Dice : Module
 {
@@ -224,13 +244,13 @@ struct Dice : Module
     void dataFromJson(json_t *root) override
     {
         json_t *gt = json_object_get(root, "gateTime");
-        if (gt)
-            gateTime = json_real_value(gt);
+        if (gt && json_is_number(gt))
+            gateTime = clamp((float)json_number_value(gt), 0.001f, 1.f);
         json_t *rr = json_object_get(root, "randomRange");
-        if (rr)
+        if (rr && json_is_integer(rr))
             randomRange = clamp((int)json_integer_value(rr), 0, 3);
         json_t *ss = json_object_get(root, "selectedScale");
-        if (ss)
+        if (ss && json_is_integer(ss))
             selectedScale = clamp((int)json_integer_value(ss), 0, (int)diceScales().size() - 1);
     }
 
@@ -306,173 +326,11 @@ struct Dice : Module
     }
 };
 
+// ------------------------------------------------------------
+// UI
+// ------------------------------------------------------------
 namespace
 {
-
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    // NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
-    // NVGcolor withAlpha(NVGcolor c, float a) { c.a = a; return c; }
-
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    template <typename TBase = GrayModuleLightWidget>
-    struct TDCCyanLight : TBase
-    {
-        TDCCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-    };
-    using DCCyanLight = TDCCyanLight<>;
-
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int)H; y += 3)
-        {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStroke(vg);
-        drawLogo(vg, W / 2.f, 13.f);
-        drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-    }
-
-    void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
-    {
-        float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-    }
-
-    void plate(NVGcontext *vg, float x, float y, float w, float h)
-    {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void ring(NVGcontext *vg, float cx, float cy, float r)
-    {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void label(NVGcontext *vg, float x, float y, const char *t)
-    {
-        drawText(vg, x, y, t, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-    }
-
-    void topCell(NVGcontext *vg, float cx, float cy, const char *t)
-    {
-        plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-        label(vg, cx, cy - 19.f, t);
-    }
-
-    void section(NVGcontext *vg, float W, float y, const char *txt)
-    {
-        float x1 = 14.f, x2 = W - 14.f, cx = W / 2.f;
-        float w = 10.f + (float)strlen(txt) * 7.f;
-        drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, x1, y);
-        nvgLineTo(vg, cx - w / 2.f, y);
-        nvgMoveTo(vg, cx + w / 2.f, y);
-        nvgLineTo(vg, x2, y);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void screenBase(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-        nvgFill(vg);
-    }
-
-    void screenFinish(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int)H; y += 3)
-            nvgRect(vg, 0, y + 1, W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H * 0.3f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-    }
 
     struct DCPanel : TransparentWidget
     {
@@ -480,21 +338,27 @@ namespace
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            drawPanelBase(vg, DC_W, DC_H, "DICE");
-            drawBezel(vg, DC_DX, DC_DY, DC_DW, DC_DH);
+            agmm::panelBase(vg, DC_W, DC_H, "DICE");
+            agmm::bezel(vg, DC_DX, DC_DY, DC_DW, DC_DH);
 
-            plate(vg, DC_DX, 154.f, DC_DW, 16.f); // LED plate
+            // gate LED strip
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, DC_DX, DC_LED_TOP, DC_DW, DC_LED_H, 5.f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 55));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
 
-            section(vg, DC_W, 186.f, "CONTROL");
-            ring(vg, 70.f, DC_KY, 18.f);
-            ring(vg, 170.f, DC_KY, 18.f);
-            label(vg, 70.f, DC_KY + 25.f, "POLYPHONY");
-            label(vg, 170.f, DC_KY + 25.f, "PROBABILITY");
+            agmm::sectionHeader(vg, DC_W, DC_SEC1_Y, "CONTROL");
+            agmm::cell(vg, DC_KX0, DC_CTL_TOP, DC_CTL_W, DC_CTL_H, "POLYPHONY");
+            agmm::cell(vg, DC_KX1, DC_CTL_TOP, DC_CTL_W, DC_CTL_H, "PROBABILITY");
 
-            section(vg, DC_W, 286.f, "I / O");
-            const char *io[4] = {"CLK", "GATES", "RANDOM", "QUANT"};
-            for (int i = 0; i < 4; ++i)
-                topCell(vg, dcIoX(i), DC_IOY, io[i]);
+            agmm::sectionHeader(vg, DC_W, DC_SEC2_Y, "I / O");
+            agmm::cell(vg, dcIoX(0), DC_IO_TOP, DC_IO_W, DC_IO_H, "CLK", false);
+            agmm::cell(vg, dcIoX(1), DC_IO_TOP, DC_IO_W, DC_IO_H, "GATES", true);
+            agmm::cell(vg, dcIoX(2), DC_IO_TOP, DC_IO_W, DC_IO_H, "RANDOM", true);
+            agmm::cell(vg, dcIoX(3), DC_IO_TOP, DC_IO_W, DC_IO_H, "QUANT", true);
             Widget::draw(args);
         }
     };
@@ -508,35 +372,9 @@ namespace
             box.size = Vec(DC_DW, DC_DH);
         }
 
-        static constexpr float CY0 = 20.f, CH = 56.f;
-
         void draw(const DrawArgs &args) override
         {
-            NVGcontext *vg = args.vg;
-            screenBase(vg, DC_DW, DC_DH);
-            for (int c = 0; c < 16; ++c)
-            {
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, c * DC_CHW + 1.5f, CY0, DC_CHW - 3.f, CH, 2.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 9));
-                nvgFill(vg);
-            }
-            float mid = CY0 + CH / 2.f;
-            nvgBeginPath(vg);
-            for (int k = -2; k <= 2; ++k)
-            {
-                float y = mid - k * (CH / 2.f) / 2.f + 0.5f;
-                nvgMoveTo(vg, 0, y);
-                nvgLineTo(vg, DC_DW, y);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, mid + 0.5f);
-            nvgLineTo(vg, DC_DW, mid + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 45));
-            nvgStroke(vg);
+            agmm::screen(args.vg, 0.f, 0.f, DC_DW, DC_DH);
             Widget::draw(args);
         }
 
@@ -548,8 +386,9 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float W = DC_DW, H = DC_DH;
-            const float mid = CY0 + CH / 2.f, amp = CH / 2.f - 2.f; // pixels for 5 V
+            const float W = DC_DW;
+            const float mid = DC_PLOT_Y + DC_PLOT_H / 2.f;
+            const float amp = DC_PLOT_H / 2.f - 3.f; // pixels for 5 V
 
             int poly = 10, scaleIdx = 0, range = 3;
             float quant[16], raw[16], fl[16], gateMs = 10.f, prob = 0.6f;
@@ -576,10 +415,34 @@ namespace
                     fl[c] = (c % 3 == 0) ? 1.f : (c % 5 == 0 ? 0.5f : 0.f);
                 }
             }
-            poly = std::min(std::max(poly, 1), 16);
-            scaleIdx = std::min(std::max(scaleIdx, 0), (int)diceScales().size() - 1);
-            range = std::min(std::max(range, 0), 3);
+            poly = clamp(poly, 1, 16);
+            scaleIdx = clamp(scaleIdx, 0, (int)diceScales().size() - 1);
+            range = clamp(range, 0, 3);
 
+            // ---- plot area (its own frame, no text inside) ----
+            agmm::plotFrame(vg, 0.5f, DC_PLOT_Y, W - 1.f, DC_PLOT_H);
+
+            // channel columns
+            for (int c = 0; c < 16; ++c)
+            {
+                nvgBeginPath(vg);
+                nvgRect(vg, c * DC_CHW + 1.5f, DC_PLOT_Y + 1.f, DC_CHW - 3.f, DC_PLOT_H - 2.f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 8));
+                nvgFill(vg);
+            }
+            // grid: +-2.5 V and 0 V
+            nvgBeginPath(vg);
+            for (int k = -1; k <= 1; ++k)
+            {
+                float y = std::floor(mid - k * amp / 2.f) + 0.5f;
+                nvgMoveTo(vg, 1.f, y);
+                nvgLineTo(vg, W - 1.f, y);
+            }
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // bars
             for (int c = 0; c < 16; ++c)
             {
                 float x = c * DC_CHW + 1.5f, w = DC_CHW - 3.f;
@@ -587,55 +450,50 @@ namespace
                 {
                     nvgBeginPath(vg);
                     nvgRect(vg, x + 2.f, mid, w - 4.f, 1.f);
-                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 30));
                     nvgFill(vg);
                     continue;
                 }
-                float f = fl[c];
+                float f = clamp(fl[c], 0.f, 1.f);
 
-                float yr = mid - std::min(std::max(raw[c] / 5.f, -1.f), 1.f) * amp;
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 0.5f, yr, w + 1.f, 1.f);
-                nvgFillColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 150));
-                nvgFill(vg);
-
-                float yq = mid - std::min(std::max(quant[c] / 5.f, -1.f), 1.f) * amp;
+                // quantized value: bar from zero line
+                float yq = mid - clamp(quant[c] / 5.f, -1.f, 1.f) * amp;
                 float top = std::min(mid, yq);
                 float h = std::max(std::fabs(mid - yq), 1.5f);
-                if (f > 0.02f)
-                {
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x - 1.5f, top - 1.5f, w + 3.f, h + 3.f);
-                    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, (int)(50.f * f)));
-                    nvgFill(vg);
-                }
                 nvgBeginPath(vg);
                 nvgRect(vg, x, top, w, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, mid + amp, 0, mid - amp,
-                                                   nvgRGBA(0x1f, 0x9f, 0xc0, (int)(110 + 120 * f)),
-                                                   nvgRGBA(0x8a, 0xee, 0xff, (int)(110 + 145 * f))));
+                nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, (int)(90 + 150 * f)));
                 nvgFill(vg);
+
+                // raw value: violet tick
+                float yr = mid - clamp(raw[c] / 5.f, -1.f, 1.f) * amp;
                 nvgBeginPath(vg);
-                nvgRect(vg, x, yq - 1.f, w, 2.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, (int)(110 + 145 * f)));
+                nvgRect(vg, x - 0.5f, yr - 0.5f, w + 1.f, 1.f);
+                nvgFillColor(vg, agmm::violet());
                 nvgFill(vg);
             }
 
-            screenFinish(vg, W, H);
-
+            // ---- header row: scale (left), range (right) ----
             static const char *rangeNames[4] = {"0/+1V", "-1/+1V", "-2/+2V", "-5/+5V"};
             char buf[64];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 230);
-            drawText(vg, 6.f, 8.f, diceScales()[scaleIdx].name.c_str(), 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
             snprintf(buf, sizeof(buf), "RNG %s", rangeNames[range]);
-            drawText(vg, W - 6.f, 8.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            const float rngW = agmm::textWidth(vg, buf, 7.f);
+            agmm::text(vg, W - 6.f, DC_HEAD_Y, buf, 7.f, agmm::dim(), agmm::ALIGN_R);
+            // scale name: shorten if it would touch the range readout
+            std::string sname = diceScales()[scaleIdx].name;
+            const float maxW = W - 12.f - rngW - 8.f;
+            while (sname.size() > 3 && agmm::textWidth(vg, sname.c_str(), 7.f) > maxW)
+                sname.pop_back();
+            agmm::text(vg, 6.f, DC_HEAD_Y, sname.c_str(), 7.f, agmm::accent(), agmm::ALIGN_L);
+
+            // ---- footer row: poly / prob / gate ----
             snprintf(buf, sizeof(buf), "POLY %d", poly);
-            drawText(vg, 6.f, H - 8.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            agmm::text(vg, 6.f, DC_FOOT_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_L);
             snprintf(buf, sizeof(buf), "PROB %.0f%%", prob * 100.f);
-            drawText(vg, W / 2.f, H - 8.f, buf, 7.f, c1, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+            agmm::text(vg, W / 2.f, DC_FOOT_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_C);
             snprintf(buf, sizeof(buf), "GATE %.0fMS", gateMs);
-            drawText(vg, W - 6.f, H - 8.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            agmm::text(vg, W - 6.f, DC_FOOT_Y, buf, 7.f, agmm::dim(), agmm::ALIGN_R);
+
             Widget::drawLayer(args, layer);
         }
     };
@@ -657,8 +515,8 @@ struct DiceWidget : ModuleWidget
 
         addChild(new DCDisplay(module));
 
-        addParam(createParamCentered<RoundBlackKnob>(Vec(70.f, DC_KY), module, Dice::PARAM_POLYPHONY));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(170.f, DC_KY), module, Dice::PARAM_PROBABILITY));
+        addParam(createParamCentered<RoundBlackKnob>(Vec(DC_KX0, DC_KY), module, Dice::PARAM_POLYPHONY));
+        addParam(createParamCentered<RoundBlackKnob>(Vec(DC_KX1, DC_KY), module, Dice::PARAM_PROBABILITY));
 
         addInput(createInputCentered<DarkPJ301MPort>(Vec(dcIoX(0), DC_IOY), module, Dice::INPUT_CLOCK));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dcIoX(1), DC_IOY), module, Dice::OUTPUT_GATES));
@@ -666,7 +524,7 @@ struct DiceWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dcIoX(3), DC_IOY), module, Dice::OUTPUT_QUANTIZED));
 
         for (int i = 0; i < 16; ++i)
-            addChild(createLightCentered<SmallLight<DCCyanLight>>(
+            addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
                 Vec(DC_DX + (i + 0.5f) * DC_CHW, DC_LEDY), module, Dice::LIGHT_GATES + i));
     }
 
@@ -684,7 +542,7 @@ struct DiceWidget : ModuleWidget
                                              static const float T[7] = {0.005f, 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f};
                                              static const char *N[7] = {"5 ms", "10 ms", "20 ms", "50 ms", "100 ms", "200 ms", "500 ms"};
                                              for (int i = 0; i < 7; ++i)
-                                                 sub->addChild(createMenuItem(N[i], (module->gateTime == T[i]) ? "✔" : "",
+                                                 sub->addChild(createMenuItem(N[i], CHECKMARK(std::fabs(module->gateTime - T[i]) < 1e-6f),
                                                                               [=]()
                                                                               { module->gateTime = T[i]; }));
                                          }));
@@ -694,7 +552,7 @@ struct DiceWidget : ModuleWidget
                                          {
                                              static const char *N[4] = {"0 to +1 V", "-1 to +1 V", "-2 to +2 V", "-5 to +5 V"};
                                              for (int i = 0; i < 4; ++i)
-                                                 sub->addChild(createMenuItem(N[i], (module->randomRange == i) ? "✔" : "",
+                                                 sub->addChild(createMenuItem(N[i], CHECKMARK(module->randomRange == i),
                                                                               [=]()
                                                                               { module->randomRange = i; }));
                                          }));
@@ -704,7 +562,7 @@ struct DiceWidget : ModuleWidget
                                          {
                                              const auto &sc = diceScales();
                                              for (int i = 0; i < (int)sc.size(); ++i)
-                                                 sub->addChild(createMenuItem(sc[i].name, (module->selectedScale == i) ? "✔" : "",
+                                                 sub->addChild(createMenuItem(sc[i].name, CHECKMARK(module->selectedScale == i),
                                                                               [=]()
                                                                               { module->selectedScale = i; }));
                                          }));
