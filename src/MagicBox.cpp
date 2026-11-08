@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -8,7 +9,12 @@
 #include <memory>
 
 // ------------------------------------------------------------
-// Layout constants
+// Layout (18 HP = 270 x 380)
+// Every control sits in a plate with its label ABOVE it. Display rows:
+//   header (function | status | trigger + time), then
+//   left column: TRANSFER caption, plot, HARMONICS caption, bars, numbers
+//   right column: IN caption, IN scope, OUT caption, OUT scope
+// Captions and readouts have their own rows; nothing is drawn over a plot.
 // ------------------------------------------------------------
 static const int MB_NUM_FUNCS = 20;
 static const int MB_COLS = 128;   // scope columns (min/max pairs)
@@ -19,27 +25,35 @@ static const float MB_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
 // Display
 static const float MB_DISP_W = 230.f;
-static const float MB_DISP_H = 150.f;
+static const float MB_DISP_H = 180.f;
 static const float MB_DISP_X = (MB_PANEL_W - MB_DISP_W) / 2.f; // 20
-static const float MB_DISP_Y = 44.f;
+static const float MB_DISP_Y = 26.f;
+static const float MB_HDR_Y = 8.f;  // header text row centre
+static const float MB_DIV_Y = 16.f; // divider under the header
 
 // Transfer plot + harmonics (display-local)
-static const float MB_TF_X0 = 10.f, MB_TF_Y0 = 18.f, MB_TF_S = 66.f;
-static const float MB_HM_X0 = 10.f, MB_HM_W = 66.f;
-static const float MB_HM_TOP = 108.f, MB_HM_BASE = 137.f, MB_HM_LBL_Y = 143.5f;
+static const float MB_CAP_TF_Y = 22.f;
+static const float MB_TF_X0 = 6.f, MB_TF_Y0 = 28.f, MB_TF_S = 70.f;
+static const float MB_CAP_HM_Y = 106.f;
+static const float MB_HM_X0 = 6.f, MB_HM_W = 70.f;
+static const float MB_HM_TOP = 114.f, MB_HM_BASE = 160.f, MB_HM_LBL_Y = 167.f;
 
 // Scopes (display-local)
 static const float MB_SC_X0 = 90.f, MB_SC_X1 = 222.f;
-static const float MB_SCI_Y0 = 18.f, MB_SCI_Y1 = 76.f;  // IN
-static const float MB_SCO_Y0 = 85.f, MB_SCO_Y1 = 143.f; // OUT
+static const float MB_CAP_IN_Y = 22.f, MB_CAP_OUT_Y = 100.f;
+static const float MB_SCI_Y0 = 28.f, MB_SCI_Y1 = 92.f;   // IN
+static const float MB_SCO_Y0 = 106.f, MB_SCO_Y1 = 170.f; // OUT
 
-// Controls
-static const float MB_SECTION_CTRL = 214.f;
-static const float MB_KNOB_Y = 246.f;
+// Controls: five knob plates (label +10, knob centre +32)
+static const float MB_SECTION_CTRL = 220.f;
+static const float MB_CTRL_TOP = 228.f, MB_CTRL_H = 52.f, MB_CTRL_W = 46.f;
+static const float MB_KNOB_Y = MB_CTRL_TOP + 32.f;
+static const float MB_KX[5] = {35.f, 85.f, 135.f, 185.f, 235.f};
 
-// I/O
-static const float MB_SECTION_IO = 306.f;
-static const float MB_IO_Y = 346.f;
+// I/O: six jack plates (label +10, jack centre +29)
+static const float MB_SECTION_IO = 292.f;
+static const float MB_IO_TOP = 300.f, MB_IO_H = 44.f, MB_IO_W = 38.f;
+static const float MB_IO_Y = MB_IO_TOP + 29.f;
 static const float MB_IO_X[6] = {30.f, 72.f, 114.f, 156.f, 198.f, 240.f};
 
 // ------------------------------------------------------------
@@ -294,10 +308,14 @@ struct MagicBox : Module
 
         configOutput(OUT_L_OUTPUT, "Left");
         configOutput(OUT_R_OUTPUT, "Right");
+
+        configBypass(IN_L_INPUT, OUT_L_OUTPUT);
+        configBypass(IN_R_INPUT, OUT_R_OUTPUT);
     }
 
-    void onReset() override
+    void onReset(const ResetEvent &e) override
     {
+        Module::onReset(e);
         autoLevel = true;
         dcBlock = true;
         peak[0] = peak[1] = 0.f;
@@ -525,55 +543,23 @@ struct MagicBox : Module
 };
 
 // ------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace)
+// UI (anonymous namespace: names cannot clash with other module files)
 // ------------------------------------------------------------
 namespace
 {
 
-    NVGcolor colBgTop() { return nvgRGB(0x25, 0x28, 0x30); }
-    NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-    NVGcolor colText() { return nvgRGB(0xd6, 0xdc, 0xe6); }
-    NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa5); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colBright() { return nvgRGB(0x7a, 0xec, 0xff); }
-    NVGcolor colWarm() { return nvgRGB(0xff, 0x9c, 0x6a); }
-
-    NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
-
     struct MBKnob
     {
         int param;
-        float x;
-        bool bipolar;
-        int ticks;
         const char *label;
     };
     const MBKnob MB_KNOBS[5] = {
-        {MagicBox::FUNC_PARAM, 35.f, false, 20, "FUNCTION"},
-        {MagicBox::TIME_PARAM, 85.f, false, 11, "TIME"},
-        {MagicBox::DRIVE_PARAM, 135.f, true, 11, "DRIVE"},
-        {MagicBox::MIX_PARAM, 185.f, false, 11, "MIX"},
-        {MagicBox::LEVEL_PARAM, 235.f, false, 11, "LEVEL"},
+        {MagicBox::FUNC_PARAM, "FUNCTION"},
+        {MagicBox::TIME_PARAM, "TIME"},
+        {MagicBox::DRIVE_PARAM, "DRIVE"},
+        {MagicBox::MIX_PARAM, "MIX"},
+        {MagicBox::LEVEL_PARAM, "LEVEL"},
     };
-
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
 
     void dashedLine(NVGcontext *vg, float x0, float y0, float x1, float y1,
                     float dash, float gap, NVGcolor col)
@@ -595,56 +581,6 @@ namespace
         nvgStroke(vg);
     }
 
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    void drawKnobTicks(NVGcontext *vg, float cx, float cy, float r0, float r1, int n = 11)
-    {
-        nvgLineCap(vg, NVG_ROUND);
-        for (int i = 0; i < n; ++i)
-        {
-            float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-            bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-            float ra = major ? r0 - 1.5f : r0;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-            nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-            nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-            nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
-            nvgStroke(vg);
-        }
-    }
-
     // ------------------------------------------------------------
     // Panel background
     // ------------------------------------------------------------
@@ -652,223 +588,24 @@ namespace
     {
         MBPanelBackground() { box.size = Vec(MB_PANEL_W, MB_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
-        {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                               nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-                                               nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void section(NVGcontext *vg, float y, const char *txt)
-        {
-            float x1 = 12.f, x2 = MB_PANEL_W - 12.f, cx = MB_PANEL_W / 2.f;
-            float w = 14.f + (float)strlen(txt) * 7.f;
-            drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y);
-            nvgLineTo(vg, cx - w / 2.f, y);
-            nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-                                                 nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, cx + w / 2.f, y);
-            nvgLineTo(vg, x2, y);
-            nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-                                                 nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt, bool isOutput)
-        {
-            const float w = 30.f, h = 44.f;
-            float x = cx - w / 2.f, y = cy - 27.f;
-            plate(vg, x, y, w, h);
-
-            NVGcolor c = isOutput ? nvgRGBA(0x3d, 0xe0, 0xff, 170) : nvgRGBA(0xff, 0x9c, 0x6a, 170);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
-            nvgFillColor(vg, c);
-            nvgFill(vg);
-
-            label(vg, cx, cy - 19.f, txt);
-        }
-
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
+            agmm::panelBase(vg, MB_PANEL_W, MB_PANEL_H, "MAGICBOX");
+            agmm::bezel(vg, MB_DISP_X, MB_DISP_Y, MB_DISP_W, MB_DISP_H);
 
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, MB_PANEL_W, MB_PANEL_H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, MB_PANEL_H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
-
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)MB_PANEL_H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, MB_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
-
-            // Corner vignette
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, MB_PANEL_W, MB_PANEL_H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, MB_PANEL_W / 2.f, MB_PANEL_H * 0.4f,
-                                               MB_PANEL_H * 0.35f, MB_PANEL_H * 0.85f,
-                                               nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-            nvgFill(vg);
-
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, MB_PANEL_W - 1.f, MB_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // Top accent line
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, MB_PANEL_W, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, MB_PANEL_W, 0,
-                                               nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-            nvgFill(vg);
-
-            // Logo + title
-            drawLogo(vg, MB_PANEL_W / 2.f, 15.f);
-            drawText(vg, MB_PANEL_W / 2.f, 32.f, "MAGICBOX", 12.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-            // ---- Display bezel (metallic, recessed) ----
-            float bx = MB_DISP_X - 5.f, by = MB_DISP_Y - 5.f;
-            float bw = MB_DISP_W + 10.f, bh = MB_DISP_H + 10.f;
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
-
-            // ---- Knobs ----
-            section(vg, MB_SECTION_CTRL, "CONTROL");
+            // ---- controls ----
+            agmm::sectionHeader(vg, MB_PANEL_W, MB_SECTION_CTRL, "CONTROL", 12.f);
             for (int k = 0; k < 5; ++k)
-            {
-                const MBKnob &kn = MB_KNOBS[k];
-                ring(vg, kn.x, MB_KNOB_Y, 17.f);
-                drawKnobTicks(vg, kn.x, MB_KNOB_Y, 21.f, 24.f, kn.ticks);
-                label(vg, kn.x, MB_KNOB_Y + 29.f, kn.label);
-            }
+                agmm::cell(vg, MB_KX[k], MB_CTRL_TOP, MB_CTRL_W, MB_CTRL_H, MB_KNOBS[k].label, false, 7.f);
 
-            // ---- I/O ----
-            section(vg, MB_SECTION_IO, "I / O");
+            // ---- I/O: inputs plain, outputs tinted ----
+            agmm::sectionHeader(vg, MB_PANEL_W, MB_SECTION_IO, "I / O", 12.f);
             const char *io[6] = {"IN L", "IN R", "FN CV", "TM CV", "OUT L", "OUT R"};
             for (int i = 0; i < 6; ++i)
-                jackCell(vg, MB_IO_X[i], MB_IO_Y, io[i], i >= 4);
+                agmm::cell(vg, MB_IO_X[i], MB_IO_TOP, MB_IO_W, MB_IO_H, io[i], i >= 4, 7.f);
 
             Widget::draw(args);
-        }
-    };
-
-    // ------------------------------------------------------------
-    // Live value arcs around the knobs
-    // ------------------------------------------------------------
-    struct MBKnobArcs : TransparentWidget
-    {
-        MagicBox *module = nullptr;
-
-        MBKnobArcs(MagicBox *m) : module(m) { box.size = Vec(MB_PANEL_W, MB_PANEL_H); }
-
-        void draw(const DrawArgs &args) override
-        {
-            NVGcontext *vg = args.vg;
-            const float R = 17.2f;
-            const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
-            const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
-
-            for (int k = 0; k < 5; ++k)
-            {
-                const MBKnob &kn = MB_KNOBS[k];
-
-                nvgBeginPath(vg);
-                nvgArc(vg, kn.x, MB_KNOB_Y, R, a0, a1, NVG_CW);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-                nvgStrokeWidth(vg, 2.f);
-                nvgLineCap(vg, NVG_ROUND);
-                nvgStroke(vg);
-
-                if (!module)
-                    continue;
-                float v = module->paramQuantities[kn.param]->getScaledValue(); // 0..1
-                float from = kn.bipolar ? 0.5f : 0.f;
-                float lo = std::min(from, v), hi = std::max(from, v);
-                if (hi - lo < 0.004f)
-                    continue;
-
-                float s = a0 + (a1 - a0) * lo;
-                float e = a0 + (a1 - a0) * hi;
-                NVGcolor col = (kn.bipolar && v < 0.5f) ? colWarm() : colAccent();
-
-                nvgBeginPath(vg);
-                nvgArc(vg, kn.x, MB_KNOB_Y, R, s, e, NVG_CW);
-                nvgStrokeColor(vg, withA(col, 0.18f));
-                nvgStrokeWidth(vg, 5.f);
-                nvgStroke(vg);
-
-                nvgBeginPath(vg);
-                nvgArc(vg, kn.x, MB_KNOB_Y, R, s, e, NVG_CW);
-                nvgStrokeColor(vg, withA(col, 0.95f));
-                nvgStrokeWidth(vg, 2.f);
-                nvgStroke(vg);
-            }
         }
     };
 
@@ -897,13 +634,7 @@ namespace
         {
             float w = x1 - x0, yc = (y0 + y1) * 0.5f, hh = scopeHH(y0, y1);
 
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x0, y0, w, y1 - y0, 3.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 5));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            agmm::plotFrame(vg, x0, y0, w, y1 - y0);
 
             for (int i = 1; i < 4; ++i)
             {
@@ -940,28 +671,20 @@ namespace
         {
             NVGcontext *vg = args.vg;
 
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0, 0, MB_DISP_W, MB_DISP_H, 4.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, MB_DISP_H,
-                                               nvgRGB(0x0a, 0x16, 0x1f), nvgRGB(0x03, 0x06, 0x09)));
-            nvgFill(vg);
+            agmm::screen(vg, 0.f, 0.f, MB_DISP_W, MB_DISP_H);
 
+            // Divider under the header row
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0.5f, 0.5f, MB_DISP_W - 1.f, MB_DISP_H - 1.f, 4.f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgMoveTo(vg, 0.f, MB_DIV_Y + 0.5f);
+            nvgLineTo(vg, MB_DISP_W, MB_DIV_Y + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 24));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
             // Transfer plot frame
             {
                 const float X0 = MB_TF_X0, Y0 = MB_TF_Y0, S = MB_TF_S;
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, X0, Y0, S, S, 3.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 5));
-                nvgFill(vg);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
+                agmm::plotFrame(vg, X0, Y0, S, S);
 
                 for (int i = 1; i < 4; ++i)
                 {
@@ -981,7 +704,7 @@ namespace
                            nvgRGBA(255, 255, 255, 34));
             }
 
-            // Harmonic grid (-12, -24, -36 dB) and number row
+            // Harmonic grid and number row
             {
                 float hgt = MB_HM_BASE - MB_HM_TOP;
                 for (int i = 0; i <= 4; ++i)
@@ -999,14 +722,14 @@ namespace
                 {
                     char b[4];
                     snprintf(b, sizeof(b), "%d", k + 1);
-                    drawText(vg, MB_HM_X0 + ((float)k + 0.5f) * pitch, MB_HM_LBL_Y, b, 5.f,
-                             nvgRGBA(0x8a, 0x95, 0xa5, 190), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                    agmm::text(vg, MB_HM_X0 + ((float)k + 0.5f) * pitch, MB_HM_LBL_Y, b, 7.f,
+                               agmm::dim(), agmm::ALIGN_C, 0.f);
                 }
             }
 
-            NVGcolor lc = nvgRGBA(0x8a, 0x95, 0xa5, 170);
-            drawText(vg, MB_TF_X0, 90.5f, "TRANSFER", 5.2f, lc, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, MB_TF_X0, 101.f, "HARMONICS", 5.2f, lc, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            // Captions (own rows above their plots)
+            agmm::text(vg, MB_TF_X0, MB_CAP_TF_Y, "TRANSFER", 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
+            agmm::text(vg, MB_TF_X0, MB_CAP_HM_Y, "HARMONICS", 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
 
             scopeFrame(vg, MB_SC_X0, MB_SCI_Y0, MB_SC_X1, MB_SCI_Y1);
             scopeFrame(vg, MB_SC_X0, MB_SCO_Y0, MB_SC_X1, MB_SCO_Y1);
@@ -1085,7 +808,7 @@ namespace
                     nvgLineTo(vg, xMap(i), yMap(mn[ch][i]));
                 }
                 nvgClosePath(vg);
-                nvgFillColor(vg, withA(col, 0.16f * alpha));
+                nvgFillColor(vg, agmm::withA(col, 0.16f * alpha));
                 nvgFill(vg);
 
                 nvgLineCap(vg, NVG_ROUND);
@@ -1093,48 +816,37 @@ namespace
                 for (int pass = 0; pass < 2; ++pass)
                 {
                     float (*arr)[MB_COLS] = (pass == 0) ? mx : mn;
-                    for (int layerI = 0; layerI < 2; ++layerI)
+                    nvgBeginPath(vg);
+                    bool first = true;
+                    for (int i = a; i < b; ++i)
                     {
-                        nvgBeginPath(vg);
-                        bool first = true;
-                        for (int i = a; i < b; ++i)
+                        if (!valid[i])
+                            continue;
+                        float x = xMap(i), y = yMap(arr[ch][i]);
+                        if (first)
                         {
-                            if (!valid[i])
-                                continue;
-                            float x = xMap(i), y = yMap(arr[ch][i]);
-                            if (first)
-                            {
-                                nvgMoveTo(vg, x, y);
-                                first = false;
-                            }
-                            else
-                                nvgLineTo(vg, x, y);
-                        }
-                        if (layerI == 0)
-                        {
-                            nvgStrokeColor(vg, withA(col, 0.12f * alpha));
-                            nvgStrokeWidth(vg, 3.2f);
+                            nvgMoveTo(vg, x, y);
+                            first = false;
                         }
                         else
-                        {
-                            nvgStrokeColor(vg, withA(col, 0.95f * alpha));
-                            nvgStrokeWidth(vg, 1.1f);
-                        }
-                        nvgStroke(vg);
+                            nvgLineTo(vg, x, y);
                     }
+                    nvgStrokeColor(vg, agmm::withA(col, 0.95f * alpha));
+                    nvgStrokeWidth(vg, 1.1f);
+                    nvgStroke(vg);
                 }
             };
 
             int split = dimOld ? cursor : MB_COLS;
             if (showR)
             {
-                trace(chR, 0, split, colWarm(), 0.9f);
+                trace(chR, 0, split, agmm::warm(), 0.9f);
                 if (dimOld)
-                    trace(chR, std::max(split - 1, 0), MB_COLS, colWarm(), 0.30f);
+                    trace(chR, std::max(split - 1, 0), MB_COLS, agmm::warm(), 0.30f);
             }
-            trace(chL, 0, split, colBright(), 1.f);
+            trace(chL, 0, split, agmm::bright(), 1.f);
             if (dimOld)
-                trace(chL, std::max(split - 1, 0), MB_COLS, colBright(), 0.32f);
+                trace(chL, std::max(split - 1, 0), MB_COLS, agmm::bright(), 0.32f);
 
             // sweep cursor
             if (dimOld && cursor < MB_COLS)
@@ -1253,7 +965,7 @@ namespace
                     nvgLineTo(vg, cx[i], cy[i]);
                 nvgLineTo(vg, cx[N - 1], py(0.f));
                 nvgClosePath(vg);
-                nvgFillColor(vg, withA(colAccent(), 0.10f));
+                nvgFillColor(vg, agmm::withA(agmm::accent(), 0.10f));
                 nvgFill(vg);
 
                 nvgLineCap(vg, NVG_ROUND);
@@ -1262,14 +974,7 @@ namespace
                 nvgMoveTo(vg, cx[0], cy[0]);
                 for (int i = 1; i < N; ++i)
                     nvgLineTo(vg, cx[i], cy[i]);
-                nvgStrokeColor(vg, withA(colAccent(), 0.16f));
-                nvgStrokeWidth(vg, 4.f);
-                nvgStroke(vg);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, cx[0], cy[0]);
-                for (int i = 1; i < N; ++i)
-                    nvgLineTo(vg, cx[i], cy[i]);
-                nvgStrokeColor(vg, withA(colBright(), 0.95f));
+                nvgStrokeColor(vg, agmm::withA(agmm::bright(), 0.95f));
                 nvgStrokeWidth(vg, 1.3f);
                 nvgStroke(vg);
 
@@ -1280,18 +985,14 @@ namespace
                     float age = (float)(i + 1) / (float)trCount;
                     nvgBeginPath(vg);
                     nvgCircle(vg, px(trN[idx]), py(trY[idx]), 1.1f);
-                    nvgFillColor(vg, withA(colWarm(), 0.55f * age * age));
+                    nvgFillColor(vg, agmm::withA(agmm::warm(), 0.55f * age * age));
                     nvgFill(vg);
                 }
 
                 // live point with guides
                 float mxp = px(opN), myp = py(opY);
-                dashedLine(vg, mxp + 0.5f, py(0.f), mxp + 0.5f, myp, 2.f, 2.f, withA(colWarm(), 0.5f));
-                dashedLine(vg, px(0.f), myp + 0.5f, mxp, myp + 0.5f, 2.f, 2.f, withA(colBright(), 0.5f));
-                nvgBeginPath(vg);
-                nvgCircle(vg, mxp, myp, 5.f);
-                nvgFillColor(vg, withA(colBright(), 0.25f));
-                nvgFill(vg);
+                dashedLine(vg, mxp + 0.5f, py(0.f), mxp + 0.5f, myp, 2.f, 2.f, agmm::withA(agmm::warm(), 0.5f));
+                dashedLine(vg, px(0.f), myp + 0.5f, mxp, myp + 0.5f, 2.f, 2.f, agmm::withA(agmm::bright(), 0.5f));
                 nvgBeginPath(vg);
                 nvgCircle(vg, mxp, myp, 2.3f);
                 nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.97f));
@@ -1300,7 +1001,7 @@ namespace
                 nvgRestore(vg);
             }
 
-            // ================= harmonic bars =================
+            // ================= harmonic bars (flat) =================
             {
                 float pitch = MB_HM_W / 8.f, bw = pitch - 2.5f;
                 float hgt = MB_HM_BASE - MB_HM_TOP;
@@ -1311,25 +1012,13 @@ namespace
                     float h = f * hgt;
                     float x = MB_HM_X0 + (float)k * pitch + (pitch - bw) * 0.5f;
                     bool odd = (k % 2 == 0); // harmonics 1, 3, 5, 7
-                    NVGcolor col = odd ? colAccent() : colWarm();
-                    NVGcolor hi = odd ? colBright() : nvgRGB(0xff, 0xc8, 0xa8);
+                    NVGcolor col = odd ? agmm::accent() : agmm::warm();
                     if (h < 0.5f)
                         continue;
 
                     nvgBeginPath(vg);
-                    nvgRoundedRect(vg, x - 1.5f, MB_HM_BASE - h - 1.5f, bw + 3.f, h + 1.5f, 2.f);
-                    nvgFillColor(vg, withA(col, 0.12f));
-                    nvgFill(vg);
-
-                    nvgBeginPath(vg);
                     nvgRect(vg, x, MB_HM_BASE - h, bw, h);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, MB_HM_BASE, 0, MB_HM_BASE - h,
-                                                       withA(col, 0.25f), withA(col, 0.95f)));
-                    nvgFill(vg);
-
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x - 0.5f, MB_HM_BASE - h - 0.5f, bw + 1.f, 1.5f);
-                    nvgFillColor(vg, withA(hi, 0.95f));
+                    nvgFillColor(vg, agmm::withA(col, 0.85f));
                     nvgFill(vg);
                 }
             }
@@ -1340,58 +1029,29 @@ namespace
             drawScope(vg, MB_SC_X0, MB_SCI_Y0, MB_SC_X1, MB_SCI_Y1, mn, mx, valid, 0, 1, rConn, cursor, dimOld);
             drawScope(vg, MB_SC_X0, MB_SCO_Y0, MB_SC_X1, MB_SCO_Y1, mn, mx, valid, 2, 3, rConn, cursor, dimOld);
 
-            // scope labels
+            // scope captions: their own rows above each scope
             {
                 char buf[32];
-                NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 210);
-                NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
-
-                drawText(vg, MB_SC_X0 + 4.f, MB_SCI_Y0 + 6.f, rConn ? "IN L/R" : "IN", 5.5f, cd,
-                         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+                agmm::text(vg, MB_SC_X0, MB_CAP_IN_Y, rConn ? "IN L/R" : "IN", 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
                 snprintf(buf, sizeof(buf), "PK %.1fV", peakIn);
-                drawText(vg, MB_SC_X1 - 4.f, MB_SCI_Y0 + 6.f, buf, 5.5f, c1,
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+                agmm::text(vg, MB_SC_X1, MB_CAP_IN_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_R, 0.5f);
 
-                drawText(vg, MB_SC_X0 + 4.f, MB_SCO_Y0 + 6.f, rConn ? "OUT L/R" : "OUT", 5.5f, cd,
-                         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+                agmm::text(vg, MB_SC_X0, MB_CAP_OUT_Y, rConn ? "OUT L/R" : "OUT", 7.f, agmm::dim(), agmm::ALIGN_L, 0.5f);
                 snprintf(buf, sizeof(buf), "PK %.1fV", peakOut);
-                drawText(vg, MB_SC_X1 - 4.f, MB_SCO_Y0 + 6.f, buf, 5.5f, c1,
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+                agmm::text(vg, MB_SC_X1, MB_CAP_OUT_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_R, 0.5f);
 
-                // limiter lamp
-                float lx = (MB_SC_X0 + MB_SC_X1) * 0.5f + 8.f, ly = MB_SCO_Y0 + 6.f;
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, lx - 12.f, ly - 4.f, 24.f, 8.f, 2.5f);
-                if (limitF > 0.02f)
-                {
-                    nvgFillColor(vg, withA(colWarm(), 0.20f + 0.45f * limitF));
-                    nvgFill(vg);
-                    nvgStrokeColor(vg, withA(colWarm(), 0.9f));
-                }
-                else
-                {
-                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-                }
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                drawText(vg, lx, ly + 0.5f, "LIMIT", 5.2f,
-                         limitF > 0.02f ? colWarm() : nvgRGBA(0x8a, 0x95, 0xa5, 150),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.6f);
+                // limiter chip between the two texts
+                agmm::chip(vg, 140.f, MB_CAP_OUT_Y - 5.5f, 30.f, 11.f, "LIMIT", limitF > 0.02f, agmm::warm());
             }
 
-            // ================= header readouts =================
+            // ================= header row =================
             {
                 char buf[48];
-                NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 230);
-                NVGcolor cm = nvgRGBA(0xff, 0x9c, 0x6a, 230);
-                NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 230);
-
-                drawText(vg, 6.f, 8.f, MB_NAMES[func], 7.5f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+                agmm::text(vg, 6.f, MB_HDR_Y, MB_NAMES[func], 8.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
 
                 snprintf(buf, sizeof(buf), "%s%s%s", autoLvl ? "AUTO" : "FIXED",
-                         dcB ? "+DC" : "", lConn || rConn ? "" : "  NO IN");
-                drawText(vg, MB_DISP_W / 2.f + 6.f, 8.f, buf, 6.f, cd,
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                         dcB ? "+DC" : "", lConn || rConn ? "" : " NO IN");
+                agmm::text(vg, 100.f, MB_HDR_Y, buf, 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
 
                 if (timeScale < 0.1f)
                     snprintf(buf, sizeof(buf), "%.1f ms", timeScale * 1000.f);
@@ -1399,33 +1059,12 @@ namespace
                     snprintf(buf, sizeof(buf), "%.0f ms", timeScale * 1000.f);
                 else
                     snprintf(buf, sizeof(buf), "%.2f s", timeScale);
-                drawText(vg, MB_DISP_W - 6.f, 8.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                agmm::text(vg, MB_DISP_W - 6.f, MB_HDR_Y, buf, 7.f, agmm::warm(), agmm::ALIGN_R, 0.5f);
 
-                // trigger status next to the time
-                drawText(vg, MB_DISP_W - 50.f, 8.f, trig ? "TRIG" : "AUTO", 5.5f,
-                         trig ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 170),
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+                // trigger status left of the time
+                agmm::text(vg, MB_DISP_W - 50.f, MB_HDR_Y, trig ? "TRIG" : "FREE", 7.f,
+                           trig ? agmm::bright() : agmm::dim(), agmm::ALIGN_R, 0.5f);
             }
-
-            // ================= scanlines, vignette, glass =================
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)MB_DISP_H; y += 3)
-                nvgRect(vg, 0, y + 1, MB_DISP_W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, MB_DISP_W, MB_DISP_H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, MB_DISP_W / 2.f, MB_DISP_H / 2.f,
-                                               MB_DISP_W * 0.45f, MB_DISP_W * 0.88f,
-                                               nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 115)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, MB_DISP_W, MB_DISP_H * 0.30f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, MB_DISP_H * 0.30f,
-                                               nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
 
             nvgRestore(vg);
 
@@ -1446,7 +1085,6 @@ struct MagicBoxWidget : ModuleWidget
         box.size = Vec(MB_PANEL_W, MB_PANEL_H);
 
         addChild(new MBPanelBackground());
-        addChild(new MBKnobArcs(module));
 
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
@@ -1459,7 +1097,7 @@ struct MagicBoxWidget : ModuleWidget
         for (int k = 0; k < 5; ++k)
         {
             addParam(createParamCentered<RoundSmallBlackKnob>(
-                Vec(MB_KNOBS[k].x, MB_KNOB_Y), module, MB_KNOBS[k].param));
+                Vec(MB_KX[k], MB_KNOB_Y), module, MB_KNOBS[k].param));
         }
 
         // I/O
@@ -1486,7 +1124,7 @@ struct MagicBoxWidget : ModuleWidget
                                              for (int i = 0; i < MB_NUM_FUNCS; ++i)
                                              {
                                                  std::string t = std::string(MB_NAMES[i]) + "  -  " + MB_DESC[i];
-                                                 submenu->addChild(createMenuItem(t, (cur == i) ? "✔" : "",
+                                                 submenu->addChild(createMenuItem(t, CHECKMARK(cur == i),
                                                                                   [=]()
                                                                                   { module->params[MagicBox::FUNC_PARAM].setValue((float)i); }));
                                              }
