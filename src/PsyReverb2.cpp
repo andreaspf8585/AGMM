@@ -3,6 +3,41 @@
 // Based on Airwindows Galactic / Sapphire Galaxy, extended with damping,
 // predelay, mod, width, freeze, shelving EQ, low cut, ducking, CV + attenuverter
 // per knob, and a Wave / Bars / Spectrum display.
+//
+// ============================================================================
+// OVERVIEW
+// ============================================================================
+// PsyReverb2 is a 26 HP "galactic" reverb: a feedback delay network based on
+// Airwindows Galactic/Sapphire Galaxy, wrapped in an AGMM-styled panel with
+// a full set of extra tone and workflow features:
+//   - 14 main parameters, each with a dedicated CV input and bipolar
+//     attenuverter (input gain, predelay, size, decay, brightness, damping,
+//     mod, width, low/high shelf gain, low cut, ducking, mix, output level).
+//   - Pre-reverb or post-reverb shelving EQ (menu-selectable), low cut,
+//     input ducking, freeze (button latch + gate), tank clear (button +
+//     trigger), and a click-free bypass.
+//   - A 350x56 display switchable between WAVE, BARS and SPECTRUM views,
+//     with header readouts (predelay, size, lo/hi gain, mix) and a status
+//     column showing the active view, FRZ/BYP/CLIP flags, and L/R meters.
+//   - A clickable CV-range cell (bipolar ±5 V or unipolar 0..10 V) and a
+//     right-click menu with the same choice plus view mode, EQ position,
+//     shelf frequencies, soft-limiter and a "clear tank" item.
+//
+// File structure:
+//   1. Small utilities (clampT, sq, cb) and module constants.
+//   2. psyrv namespace: DSP helpers (softLimit, OnePole, Biquad, FFT),
+//      the StereoFrame / StereoQuad / DelayLine data types, and the
+//      Airwindows-style Engine (13 delay lines, 4-quad feedback matrix,
+//      tank stir, damping, predelay, freeze, modulation, stereo widening).
+//   3. P2_CTL control table for the 14 knobs.
+//   4. PsyReverb2Module: parameter/CV reading, smoothing, EQ, low cut,
+//      ducking, freeze/clear handling, process(), and display snapshots.
+//   5. Layout constants (26 HP = 390x380 px).
+//   6. Anonymous-namespace UI: P2PanelBackground, P2DisplayWidget,
+//      P2CvRangeWidget, P2ChoiceItem + addChoice.
+//   7. PsyReverb2Widget: places all controls and the context menu.
+//   8. Model registration.
+// ============================================================================
 
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
@@ -26,9 +61,12 @@ using namespace rack;
 // ---------------------------------------------------------------------
 //  Small utilities
 // ---------------------------------------------------------------------
+// Clamps x into [lo, hi] for any arithmetic type.
 template <typename T>
 inline T clampT(T x, T lo, T hi) { return x < lo ? lo : (x > hi ? hi : x); }
+// Returns x squared.
 inline double sq(double x) { return x * x; }
+// Returns x cubed.
 inline double cb(double x) { return x * x * x; }
 
 // ---------------------------------------------------------------------
@@ -60,6 +98,8 @@ namespace psyrv
 
     // ---- small DSP helpers ----------------------------------------
     // Transparent up to 6 V, smooth knee towards a ceiling of 10 V
+    // Soft-limits a sample: linear up to ±6 V, then a tanh shoulder that
+    // asymptotes to ±10 V.
     inline float softLimit(float x)
     {
         const float k = 6.f, r = 4.f;
@@ -70,10 +110,12 @@ namespace psyrv
         return x < 0.f ? -y : y;
     }
 
+    // Simple one-pole low-pass with a settable cutoff.
     struct OnePole
     {
         float z = 0.f;
         float coeff = 1.f;
+        // Sets the low-pass cutoff in Hz (clamped to [1, 0.45*fs]).
         void setCutoff(float freq, float sr)
         {
             if (freq < 1.f)
@@ -82,6 +124,7 @@ namespace psyrv
                 freq = sr * 0.45f;
             coeff = 1.f - std::exp(-P2_TWO_PI * freq / sr);
         }
+        // Processes one sample and returns the filtered output.
         float process(float in)
         {
             z += coeff * (in - z);
@@ -90,11 +133,15 @@ namespace psyrv
     };
 
     // RBJ shelving biquad, slope S = 1, transposed direct form II
+    // A 2nd-order shelving filter. Coefficients can be shared between L and
+    // R via copyCoeffs() while each channel keeps its own internal state.
     struct Biquad
     {
         float b0 = 1.f, b1 = 0.f, b2 = 0.f, a1 = 0.f, a2 = 0.f;
         float z1 = 0.f, z2 = 0.f;
 
+        // Processes one sample (transposed direct form II) and returns the
+        // filtered output.
         float process(float x)
         {
             float y = b0 * x + z1;
@@ -102,6 +149,7 @@ namespace psyrv
             z2 = b2 * x - a2 * y;
             return y;
         }
+        // Copies coefficients (but not internal state) from another biquad.
         void copyCoeffs(const Biquad &o)
         {
             b0 = o.b0;
@@ -111,6 +159,8 @@ namespace psyrv
             a2 = o.a2;
         }
 
+        // Configures the biquad as an RBJ low shelf at `freq` Hz with `dB`
+        // gain.
         void setLowShelf(float freq, float dB, float sr)
         {
             freq = clampT(freq, 10.f, sr * 0.45f);
@@ -127,6 +177,8 @@ namespace psyrv
             a2 = ((A + 1.f) + (A - 1.f) * cw - tsa) / a0;
         }
 
+        // Configures the biquad as an RBJ high shelf at `freq` Hz with `dB`
+        // gain.
         void setHighShelf(float freq, float dB, float sr)
         {
             freq = clampT(freq, 10.f, sr * 0.45f);
@@ -145,6 +197,8 @@ namespace psyrv
     };
 
     // Small radix-2 FFT (display only, UI thread)
+    // Precomputes the twiddle factors, Hann window and bit-reversal table for
+    // an N-point forward FFT.
     struct FFT
     {
         static constexpr int N = P2_FFT_N;
@@ -153,6 +207,7 @@ namespace psyrv
         float window[N];
         int rev[N];
 
+        // Precomputes twiddles, window and bit-reversal permutation.
         FFT()
         {
             static_assert((1 << LOG2N) == N, "FFT size mismatch");
@@ -172,6 +227,7 @@ namespace psyrv
             }
         }
 
+        // Forward FFT of windowed `in`, writing complex output into re/im.
         void forward(const float *in, float *re, float *im) const
         {
             for (int i = 0; i < N; ++i)
@@ -201,56 +257,79 @@ namespace psyrv
     };
 
     // ---- reverb engine (unchanged) ---------------------------------
+    // A stereo sample: two doubles for L/R. Supports the small set of vector
+    // operations the tank uses.
     struct StereoFrame
     {
         double ch[2];
         StereoFrame() : ch{0.0, 0.0} {}
         StereoFrame(double l, double r) : ch{l, r} {}
+        // Zeroes both channels.
         void clear() { ch[0] = ch[1] = 0.0; }
+        // Element-wise addition.
         StereoFrame operator+(const StereoFrame &o) const { return {ch[0] + o.ch[0], ch[1] + o.ch[1]}; }
+        // Element-wise subtraction.
         StereoFrame operator-(const StereoFrame &o) const { return {ch[0] - o.ch[0], ch[1] - o.ch[1]}; }
+        // Scalar multiplication.
         StereoFrame operator*(double s) const { return {ch[0] * s, ch[1] * s}; }
+        // Scalar division.
         StereoFrame operator/(double d) const { return {ch[0] / d, ch[1] / d}; }
+        // Returns a copy with L and R swapped.
         StereoFrame flip() const { return {ch[1], ch[0]}; }
     };
 
+    // Four stereo frames forming a quad (the tank uses groups of 4 lines).
     struct StereoQuad
     {
         StereoFrame q[4];
+        // Zeroes all four frames.
         void clear()
         {
             for (int i = 0; i < 4; i++)
                 q[i].clear();
         }
+        // Returns the element-wise sum of the four frames.
         StereoFrame sum() const { return q[0] + q[1] + q[2] + q[3]; }
     };
 
+    // Circular delay line of StereoFrames with head/tail access. `count` is
+    // the write index; `delay` is the effective length in frames; `tail()`
+    // returns the read point.
     struct DelayLine
     {
         std::vector<StereoFrame> buf;
         int count = 1;
         int delay = 1;
+        // Zeroes all frames and resets the write index.
         void clear()
         {
             count = 1;
             for (auto &f : buf)
                 f.clear();
         }
+        // Advances the write index (wrapping).
         void advance()
         {
             ++count;
             if (count < 0 || count > delay)
                 count = 0;
         }
+        // Returns the read index for the current length.
         int reverse(int length) const
         {
             const int off = (length > delay) ? (delay + 1) : 0;
             return length - off;
         }
+        // Returns a reference to the frame at the write head.
         StereoFrame &head() { return buf.at(count); }
+        // Returns a copy of the frame at the read (tail) position.
         StereoFrame tail() { return buf.at(reverse(count)); }
     };
 
+    // The galactic-style reverb tank: 12 fixed delay lines grouped into 3
+    // quads (feedback), plus a 13th modulated tank line for the phasor read,
+    // a shared predelay buffer, per-channel feedback/damp state, and IIR
+    // smoothing filters.
     struct Engine
     {
         float decayKnob = 0.5f;
@@ -283,6 +362,8 @@ namespace psyrv
             7607, 4217, 2269, 1597,
             3407, 1823, 859, 331};
 
+        // Allocates every delay line and the predelay buffer at its maximum
+        // size, then calls initialize() to prime the RNG and clear state.
         Engine()
         {
             delay[0].buf.resize(9700);
@@ -302,6 +383,8 @@ namespace psyrv
             initialize();
         }
 
+        // Resets the RNG seeds, clears all delay lines, feedback/damp/IIR
+        // state, the lastRef history and the predelay buffer.
         void initialize()
         {
             fpd[0] = 2756923396u;
@@ -322,17 +405,28 @@ namespace psyrv
             predelayWrite = 0;
         }
 
+        // Sets the decay knob (clamped 0..1).
         void setDecay(double v) { decayKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the size knob (clamped 0..1).
         void setSize(double v) { sizeKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the brightness knob (clamped 0..1).
         void setBright(double v) { brightKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the damping knob (clamped 0..1).
         void setDamp(double v) { dampKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the predelay knob (clamped 0..1).
         void setPredelay(double v) { predelayKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the modulation knob (clamped 0..1).
         void setMod(double v) { modKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the width knob (clamped 0..1).
         void setWidth(double v) { widthKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the internal wet mix knob (clamped 0..1).
         void setMix(double v) { mixKnob = clampT<float>(v, 0.f, 1.f); }
+        // Sets the freeze flag.
         void setFreeze(bool v) { freeze = v; }
 
     private:
+        // Adds a tiny pseudo-random dither to `x`, scaled by the magnitude
+        // of the sample, using the given 32-bit PRNG state.
         static double dither(double x, uint32_t &f)
         {
             int expon;
@@ -343,12 +437,15 @@ namespace psyrv
             return x + ((double(f) - uint32_t(0x7fffffff)) * 5.5e-36l * std::exp2(expon + 62.0));
         }
 
+        // Writes a frame into the head of the given delay line and advances
+        // its write index.
         void writeTank(int idx, const StereoFrame &f)
         {
             delay[idx].head() = f;
             delay[idx].advance();
         }
 
+        // Reads the tails of four consecutive delay lines into a quad.
         StereoQuad readQuad(int start)
         {
             StereoQuad q;
@@ -359,6 +456,8 @@ namespace psyrv
             return q;
         }
 
+        // Hadamard-like feedback mixing: each frame is replaced by itself
+        // minus the sum of the other three frames (energy-preserving).
         static StereoQuad stir(const StereoQuad &f)
         {
             StereoQuad g;
@@ -369,6 +468,8 @@ namespace psyrv
             return g;
         }
 
+        // Stirs a quad and writes the four resulting frames into four
+        // consecutive delay lines starting at `start`.
         void writeQuad(int start, const StereoQuad &f)
         {
             const StereoQuad g = stir(f);
@@ -376,12 +477,16 @@ namespace psyrv
                 writeTank(start + i, g.q[i]);
         }
 
+        // Reflects `in` into a quad of delay lines, adding the flipped
+        // feedback (with `regen` gain) to each frame.
         void reflect(int start, const StereoFrame &in, double regen)
         {
             for (int i = 0; i < 4; i++)
                 writeTank(start + i, in + feedback.q[i].flip() * regen);
         }
 
+        // Reads the modulated tank line at fractional delay with a phase
+        // offset per channel.
         double interp(int ch, double phaseOffset)
         {
             const double depth = 127.0 * modKnob;
@@ -394,6 +499,9 @@ namespace psyrv
             return b.at(i1).ch[ch & 1] * (1.0 - frac) + b.at(i2).ch[ch & 1] * frac;
         }
 
+        // Updates the short lastRef history with a new sample `s`, using
+        // progressively longer averaging depending on the current cycle
+        // count (helps smooth the multi-rate tank output).
         void mixDown(const StereoFrame &s)
         {
             switch (cycle)
@@ -423,6 +531,8 @@ namespace psyrv
             }
         }
 
+        // Soft-clips to ±(1 + tanh(x∓1)), used in freeze mode to keep the
+        // tank from blowing up.
         static double softClip(double x)
         {
             if (x > 1.0)
@@ -433,6 +543,7 @@ namespace psyrv
         }
 
     public:
+        // Convenience overload of process() using float in/out.
         void process(float sampleRate, float inL, float inR, float &outL, float &outR)
         {
             double ol = 0.0, orr = 0.0;
@@ -444,6 +555,8 @@ namespace psyrv
             outR = static_cast<float>(orr);
         }
 
+        // Main double-precision process(): handles multirate cycling, tank
+        // feedback, damping, freeze, modulation, width, mix and dither.
         void process(double sampleRateHz, double inL, double inR, double &outL, double &outR)
         {
             const double overallscale = sampleRateHz / 44100.0;
@@ -554,6 +667,8 @@ namespace psyrv
 //  Control table (grid order: 6 columns x 3 rows; row 3 holds 2 knobs,
 //  FREEZE, CLEAR, BYPASS and the CV range cell)
 // =====================================================================
+// Metadata for one of the 14 knobs: label, tooltip, range, default, unit,
+// and display scaling.
 struct P2CtlSpec
 {
     const char *name;  // panel label
@@ -694,6 +809,10 @@ struct PsyReverb2Module : Module
     bool dispBypass = false, dispFreeze = false;
     float clipTimer = 0.f;
 
+    // Constructor: configures the 14 knobs and their attenuverters/CV inputs
+    // from P2_CTL, then the three buttons/switches (FREEZE, CLEAR, BYPASS),
+    // the two LEDs, the four audio/trigger inputs, the stereo outputs, and
+    // stereo bypass.
     PsyReverb2Module()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -724,6 +843,8 @@ struct PsyReverb2Module : Module
         configBypass(AUDIO_R_INPUT, AUDIO_R_OUTPUT);
     }
 
+    // Clears the engine, the EQ/low-cut/DC/envelope state, the display
+    // buffers and flash/trigger state, and forces a parameter re-snap.
     void resetState()
     {
         engine.initialize();
@@ -748,6 +869,8 @@ struct PsyReverb2Module : Module
         ctrlCounter = 0;
     }
 
+    // Rack reset hook: releases the freeze latch and resets all DSP/display
+    // state.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -755,6 +878,9 @@ struct PsyReverb2Module : Module
         resetState();
     }
 
+    // (Re)computes all sample-rate-dependent coefficients (DC blocker,
+    // smoothing, envelope attack/release) and clears the biquads, high-pass
+    // and DC state.
     void setupDSP(float sr)
     {
         dspSr = sr;
@@ -772,6 +898,8 @@ struct PsyReverb2Module : Module
         needSnap = true;
     }
 
+    // Returns the effective value of control `i`: knob + CV × attenuverter,
+    // with the CV normalised according to the selected CV range mode.
     float getCtl(int i)
     {
         const P2CtlSpec &s = P2_CTL[i];
@@ -786,6 +914,8 @@ struct PsyReverb2Module : Module
         return clampT(knob + cvScaled * attn * (s.hi - s.lo), s.lo, s.hi);
     }
 
+    // Serialises the CV range, view mode, EQ position, soft-clip flag, shelf
+    // frequencies and the freeze latch.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -799,6 +929,8 @@ struct PsyReverb2Module : Module
         return root;
     }
 
+    // Restores the persisted settings from a patch, clamping each to its
+    // valid range.
     void dataFromJson(json_t *root) override
     {
         if (json_t *j = json_object_get(root, "cvRangeMode"))
@@ -817,6 +949,12 @@ struct PsyReverb2Module : Module
             freezeLatch = json_boolean_value(j);
     }
 
+    // Main audio callback: reads all knobs with their CVs, handles freeze
+    // (latch + gate), clear (button + trigger), smoothing of the main
+    // parameters, control-rate EQ/low-cut updates, then runs the engine,
+    // applies EQ, low cut, ducking, dry/wet, output level, click-free
+    // bypass, and soft limiting, and updates the scope/FFT/meter display
+    // data.
     void process(const ProcessArgs &args) override
     {
         const float sr = args.sampleRate;
@@ -1045,9 +1183,13 @@ static const float P2_ROW_TOP[3] = {98.f, 175.f, 252.f};
 static const float P2_STRIP_TOP = 329.f;
 static const float P2_STRIP_H = 28.f;
 
+// Returns the horizontal centre of control column `col` (0..5).
 static float p2ColX(int col) { return 195.f + ((float)col - 2.5f) * 63.f; }
+// Returns the knob centre y for control row `row` (0..2).
 static float p2KnobY(int row) { return P2_ROW_TOP[row] + 27.f; }
+// Returns the CV/attenuverter y for control row `row` (0..2).
 static float p2JackY(int row) { return P2_ROW_TOP[row] + 60.f; }
+// Returns the vertical centre of the I/O strip.
 static float p2StripY() { return P2_STRIP_TOP + P2_STRIP_H / 2.f; }
 
 // =====================================================================
@@ -1060,10 +1202,16 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the 18 control-cell plates
+    // (14 knobs + FREEZE + CLEAR + BYPASS + CV RANGE), and the six I/O strip
+    // plates (outputs tinted).
     struct P2PanelBackground : TransparentWidget
     {
         P2PanelBackground() { box.size = Vec(P2_PANEL_W, P2_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, the 18 cell plates
+        // with their labels (and CV/ATT captions on the knob cells), and the
+        // six I/O strip plates.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1104,6 +1252,10 @@ namespace
     // ------------------------------------------------------------
     const char *P2_VIS_NAMES[3] = {"WAVE", "BARS", "SPECTRUM"};
 
+    // Live display: click to cycle the view; draws the WAVE scope, the BARS
+    // spectrum, or the continuous SPECTRUM curve, plus L/R meters, header
+    // readouts and the right-hand info column. Uses demo data in the module
+    // browser.
     struct P2DisplayWidget : Widget
     {
         PsyReverb2Module *module = nullptr;
@@ -1115,6 +1267,7 @@ namespace
         float barLvl[P2_BARS];
         float barPeak[P2_BARS];
 
+        // Constructor: positions the widget and clears all analyzer buffers.
         P2DisplayWidget(PsyReverb2Module *m) : module(m)
         {
             box.pos = Vec(P2_DISP_X, P2_DISP_Y);
@@ -1127,6 +1280,7 @@ namespace
                 barLvl[i] = barPeak[i] = 0.f;
         }
 
+        // Left click cycles the display view (WAVE -> BARS -> SPECTRUM).
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1138,8 +1292,13 @@ namespace
             Widget::onButton(e);
         }
 
+        // Returns the module's DSP sample rate, falling back to 48 kHz in the
+        // module browser.
         float sampleRate() const { return (module && module->dspSr > 0.f) ? module->dspSr : 48000.f; }
 
+        // Refreshes the FFT from the module's ring buffer and updates binDb[]
+        // with fast-attack / slow-release smoothing. Uses a plausible demo
+        // spectrum in the module browser.
         void updateSpectrum()
         {
             const int half = P2_FFT_N / 2;
@@ -1171,6 +1330,8 @@ namespace
             }
         }
 
+        // Returns the level in dB of a frequency range [fLo, fHi], using
+        // interpolation for narrow ranges and the max bin for wide ones.
         float levelAt(float fLo, float fHi, float binHz) const
         {
             const int maxB = P2_FFT_N / 2 - 2;
@@ -1192,6 +1353,8 @@ namespace
             return m;
         }
 
+        // Normalises a frequency band's level to 0..1 using the display tilt
+        // and dB floor.
         float bandNorm(float fLo, float fHi, float binHz) const
         {
             float fc = std::sqrt(fLo * fHi);
@@ -1200,6 +1363,8 @@ namespace
         }
 
         // ---- views (plot-local coordinates, 0..sw x 0..P2_PLOT_H) ----
+        // Draws the WAVE view: min/max waveform columns from the scope ring
+        // buffer (or a demo shape), around a centre line.
         void drawWave(NVGcontext *vg, float sw)
         {
             const float mid = P2_PLOT_H / 2.f;
@@ -1239,6 +1404,8 @@ namespace
             nvgFill(vg);
         }
 
+        // Draws the vertical frequency grid lines (100 Hz, 1 kHz, 10 kHz) for
+        // the BARS and SPECTRUM views.
         void drawFreqGrid(NVGcontext *vg, float sw)
         {
             const float fs[3] = {100.f, 1000.f, 10000.f};
@@ -1256,6 +1423,7 @@ namespace
         }
 
         // frequency labels live in their own row under the plot (display-local coordinates)
+        // Draws the 100 / 1K / 10K labels on the axis row below the plot.
         void drawFreqLabels(NVGcontext *vg, float sw)
         {
             const float fs[3] = {100.f, 1000.f, 10000.f};
@@ -1268,6 +1436,8 @@ namespace
             }
         }
 
+        // Draws the BARS view: frequency grid, 24 log-spaced bars with
+        // smooth attack / slow release, and peak-hold caps.
         void drawBars(NVGcontext *vg, float sw)
         {
             const float binHz = sampleRate() / P2_FFT_N;
@@ -1304,6 +1474,8 @@ namespace
             nvgFill(vg);
         }
 
+        // Draws the SPECTRUM view: frequency grid, a filled area and a smooth
+        // outline built from P2_SPEC_COLS log-spaced bands.
         void drawSpectrum(NVGcontext *vg, float sw)
         {
             const float binHz = sampleRate() / P2_FFT_N;
@@ -1345,6 +1517,8 @@ namespace
         }
 
         // ---- static background ----
+        // Draws the display screen, the header divider, the plot frame and
+        // the L/R meter labels.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1365,6 +1539,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: dispatches to the wave/bars/spectrum draw routine,
+        // clips it to the plot, then draws the frequency labels, the L/R
+        // meters, the header readouts (predelay, size, lo/hi gain, mix) and
+        // the right-hand info column (view name and FRZ/BYP/CLIP flags).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1440,16 +1618,20 @@ namespace
     // ------------------------------------------------------------
     // CV range cell (click to toggle). The name is drawn by the panel plate.
     // ------------------------------------------------------------
+    // Clickable cell that toggles the CV range mode (bipolar/unipolar) and
+    // shows the current range and a small range-bar marker.
     struct P2CvRangeWidget : Widget
     {
         PsyReverb2Module *module = nullptr;
 
+        // Constructor: positions the widget over its grid cell.
         P2CvRangeWidget(PsyReverb2Module *m, float cx, float top) : module(m)
         {
             box.pos = Vec(cx - P2_CELL_W / 2.f, top);
             box.size = Vec(P2_CELL_W, P2_CELL_H);
         }
 
+        // Toggles the CV range mode on a left click.
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1463,6 +1645,9 @@ namespace
             Widget::onButton(e);
         }
 
+        // Layer-1 overlay: draws the current range value box, a range-bar
+        // marker (centre for bipolar, left for unipolar) and the "CLICK"
+        // hint.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1506,11 +1691,16 @@ namespace
     // ------------------------------------------------------------
     // Context-menu helpers
     // ------------------------------------------------------------
+    // A generic checkmark menu item driven by lambdas: `isOn` supplies the
+    // current state (for the checkmark), `action` runs on click.
     struct P2ChoiceItem : MenuItem
     {
         std::function<bool()> isOn;
         std::function<void()> action;
+        // Runs the item's action.
         void onAction(const ActionEvent &e) override { action(); }
+        // Updates the checkmark from isOn() (if provided) and forwards to the
+        // base step.
         void step() override
         {
             rightText = CHECKMARK(isOn && isOn());
@@ -1518,6 +1708,8 @@ namespace
         }
     };
 
+    // Creates a P2ChoiceItem with the given label, state query (may be null
+    // for an action-only item) and action, and adds it to `menu`.
     void addChoice(Menu *menu, const std::string &label,
                    std::function<bool()> isOn, std::function<void()> action)
     {
@@ -1530,10 +1722,14 @@ namespace
 } // namespace
 
 // =====================================================================
-//  Widget
+//  Widget: adds the static panel, screws, the live display, the 14
+//  knob/CV/attenuverter rows, the FREEZE/CLEAR/BYPASS controls and lights,
+//  the CV-range cell, and the six I/O strip jacks.
 // =====================================================================
 struct PsyReverb2Widget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, display, the 14 control
+    // rows, the row-3 buttons/switch/CV-range cell, and the six I/O jacks.
     PsyReverb2Widget(PsyReverb2Module *module)
     {
         setModule(module);
@@ -1584,6 +1780,9 @@ struct PsyReverb2Widget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(p2ColX(5) - 16.f, y), module, PsyReverb2Module::AUDIO_R_OUTPUT));
     }
 
+    // Adds the right-click menu: CV range, display mode, EQ position, low
+    // and high shelf frequencies, the output soft limiter toggle, and a
+    // "clear reverb tank" action.
     void appendContextMenu(Menu *menu) override
     {
         PsyReverb2Module *m = dynamic_cast<PsyReverb2Module *>(this->module);

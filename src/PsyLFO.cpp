@@ -7,6 +7,37 @@
 #include <random>
 #include <limits>
 
+// ============================================================
+// PsyLFO
+// ============================================================
+//
+// OVERVIEW
+// --------
+// PsyLFO is a 28 HP chaotic modulation source built from a real double
+// pendulum physics simulation. Two coupled pendulum bobs swing under gravity
+// with configurable mass/length, integrated with RK4 at the audio rate. The
+// module exposes, per pendulum:
+//   - X / Y position outputs (in volts, ±5 V, scaled to the total reach)
+//   - a V/Oct output that latches a new random voltage on every zero
+//     crossing of that pendulum's angle
+//   - a gate output that fires for a selectable duration on the same zero
+//     crossings
+// Global controls are Speed (time-scaling), Gravity, Damping, plus Kick and
+// Reset buttons and their CV inputs. A 200 px circular display draws the
+// double pendulum in real time with fading trails, angle arcs, mass-sized
+// bobs and gate flash rings.
+//
+// File structure:
+//   1. Layout constants (28 HP = 420x380 px).
+//   2. PsyLFO module: pendulum state, random V/Oct, gate timers, RK4 physics,
+//      JSON persistence, and the display trail buffer.
+//   3. Anonymous-namespace UI: colour helpers, drawRod/drawBob/drawHub/
+//      drawTrail, PLPanelBackground, PLDisplayWidget.
+//   4. PsyLFOWidget: places LEDs, knobs, outputs, the global control row,
+//      and the context menu.
+//   5. Model registration.
+// ============================================================
+
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
@@ -31,7 +62,9 @@ static const float PL_CELL_W = 40.f;
 static const float PL_KNOB_TOP = 72.f, PL_KNOB_H = 62.f; // MASS / LENGTH cells
 static const float PL_OUT_TOP[2] = {142.f, 198.f};       // X Y / V/OCT GATE
 static const float PL_OUT_H = 52.f;
+// Returns the y centre of the MASS / LENGTH knob row.
 static float plKnobY() { return PL_KNOB_TOP + 38.f; }
+// Returns the y centre of the output jack row `row` (0 = X/Y, 1 = V/OCT/GATE).
 static float plOutY(int row) { return PL_OUT_TOP[row] + 32.f; }
 
 // Bottom control row: 8 cells
@@ -39,7 +72,9 @@ static const float PL_CTRL_CAP_Y = 268.f;
 static const float PL_CTRL_TOP = 278.f;
 static const float PL_CTRL_H = 52.f;
 static const float PL_CTRL_W = 46.f;
+// Returns the horizontal centre of global-control cell i (0..7).
 static float plCtrlX(int i) { return 35.f + 50.f * (float)i; }
+// Returns the y centre of the global-control row.
 static float plCtrlY() { return PL_CTRL_TOP + 34.f; }
 
 // ------------------------------------------------------------
@@ -149,6 +184,9 @@ struct PsyLFO : Module
     float trailTimer = 0.f;
     float flash1 = 0.f, flash2 = 0.f;
 
+    // Constructor: configures every parameter (with units/ranges), the CV
+    // inputs and outputs, seeds the RNG, randomises the initial pendulum
+    // state, and generates the initial random V/Oct voltages.
     PsyLFO()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -185,6 +223,8 @@ struct PsyLFO : Module
         generateRandomVoct2();
     }
 
+    // Rack reset hook: randomises the pendulum state and clears display/gate
+    // state.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -192,6 +232,8 @@ struct PsyLFO : Module
     }
 
     // Randomise the pendulums and clear the display/gate state
+    // Sets random angles and angular velocities for both pendulums, records
+    // their starting signs, zeroes the gate timers and clears the trails.
     void resetState()
     {
         std::uniform_real_distribution<double> angleDist(-M_PI, M_PI);
@@ -215,6 +257,8 @@ struct PsyLFO : Module
     }
 
     // Random angular impulse
+    // Adds a random angular velocity to each pendulum (used by Kick), which
+    // is enough to destabilise a near-still double pendulum.
     void kick()
     {
         std::uniform_real_distribution<double> d1(-4.0, 4.0);
@@ -224,6 +268,8 @@ struct PsyLFO : Module
     }
 
     // Helper: map random value in [-1,1] to selected range
+    // Scales a raw random value in [-1,1] into the voltage range selected
+    // by the VoctRange enum.
     double scaleVoct(double raw, VoctRange range)
     {
         switch (range)
@@ -243,6 +289,8 @@ struct PsyLFO : Module
         }
     }
 
+    // Generates a new random V/Oct voltage for pendulum 1 in its selected
+    // range.
     void generateRandomVoct1()
     {
         std::uniform_real_distribution<double> randRaw(-1.0, 1.0);
@@ -250,6 +298,8 @@ struct PsyLFO : Module
         voct1Voltage = scaleVoct(raw, voct1Range);
     }
 
+    // Generates a new random V/Oct voltage for pendulum 2 in its selected
+    // range.
     void generateRandomVoct2()
     {
         std::uniform_real_distribution<double> randRaw(-1.0, 1.0);
@@ -257,6 +307,7 @@ struct PsyLFO : Module
         voct2Voltage = scaleVoct(raw, voct2Range);
     }
 
+    // Returns the length in seconds of the requested gate duration.
     double getGateDurationSeconds(GateDuration dur)
     {
         switch (dur)
@@ -280,6 +331,9 @@ struct PsyLFO : Module
         }
     }
 
+    // Reads the global controls (Speed with CV, Mass, Length, Gravity,
+    // Damping) into the simulation state, so the RK4 integration and the
+    // output scaling use the current settings.
     void updateParameters()
     {
         float speedKnob = params[SPEED_PARAM].getValue();
@@ -295,12 +349,17 @@ struct PsyLFO : Module
         damping = params[DAMPING_PARAM].getValue() * 2.0; // 1/s of simulated time
     }
 
+    // Returns true when all four state variables are finite (guards against
+    // numerical blow-ups from the RK4 integrator).
     bool isValid()
     {
         return std::isfinite(theta1) && std::isfinite(theta2) &&
                std::isfinite(omega1) && std::isfinite(omega2);
     }
 
+    // Computes the angular accelerations of the double pendulum for the
+    // given state, using the standard coupled rigid-body equations, plus a
+    // simple linear damping term on each angular velocity.
     void computeDerivatives(double t1, double t2, double w1, double w2,
                             double &dw1, double &dw2)
     {
@@ -326,6 +385,8 @@ struct PsyLFO : Module
         dw2 -= damping * w2;
     }
 
+    // Advances the double-pendulum state by dt seconds using the classical
+    // 4th-order Runge-Kutta scheme, then wraps both angles into [-π, π].
     void rk4(double dt)
     {
         double k1_t1, k1_t2, k1_w1, k1_w2;
@@ -376,6 +437,11 @@ struct PsyLFO : Module
         theta2 -= M_PI;
     }
 
+    // Main audio callback: reads parameters and the Reset / Kick buttons and
+    // CVs, advances the physics, detects zero crossings of each pendulum to
+    // latch new random V/Oct voltages and fire gate pulses, updates the
+    // position / V/Oct / gate outputs and the spin LEDs, and samples the bob
+    // positions into the display trail buffers.
     void process(const ProcessArgs &args) override
     {
         updateParameters();
@@ -472,6 +538,8 @@ struct PsyLFO : Module
     }
 
     // JSON serialisation
+    // Saves the four per-pendulum user settings: V/Oct range and gate
+    // duration for each pendulum.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -482,6 +550,8 @@ struct PsyLFO : Module
         return root;
     }
 
+    // Restores the four per-pendulum settings from a saved patch, clamping
+    // each to its valid enum range.
     void dataFromJson(json_t *root) override
     {
         json_t *j;
@@ -506,10 +576,14 @@ namespace
 {
     namespace ag = agmm;
 
+    // Returns pendulum 1's accent colour (cyan).
     NVGcolor colP1() { return nvgRGB(0x3d, 0xe0, 0xff); } // pendulum 1: cyan
+    // Returns pendulum 2's accent colour (violet).
     NVGcolor colP2() { return nvgRGB(0xb0, 0x5a, 0xff); } // pendulum 2: violet
 
     // Metal rod: dark outline + flat steel core
+    // Draws one pendulum rod as a dark outline underneath a flat steel core
+    // line of width `w`.
     void drawRod(NVGcontext *vg, float x0, float y0, float x1, float y1, float w, NVGcolor steel)
     {
         nvgLineCap(vg, NVG_ROUND);
@@ -529,6 +603,7 @@ namespace
     }
 
     // Flat bob: filled disc with a darker rim
+    // Draws one pendulum bob as a filled disc with a contrasting rim.
     void drawBob(NVGcontext *vg, float cx, float cy, float r, NVGcolor fill, NVGcolor edge)
     {
         nvgBeginPath(vg);
@@ -541,6 +616,8 @@ namespace
     }
 
     // Flat pivot bearing
+    // Draws the central pivot bearing: a dark disc with a small metal
+    // centre cap.
     void drawHub(NVGcontext *vg, float cx, float cy)
     {
         nvgBeginPath(vg);
@@ -558,6 +635,8 @@ namespace
     }
 
     // Fading motion trail (older = thinner and fainter)
+    // Draws a polyline through n points, broken into short segments so the
+    // stroke width and alpha taper off toward the oldest points.
     void drawTrail(NVGcontext *vg, const float *xs, const float *ys, int n, NVGcolor col, float width, float alpha)
     {
         if (n < 2)
@@ -582,11 +661,17 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the two PENDULUM block
+    // captions and their SPIN LED labels, the per-pendulum MASS/LENGTH knob
+    // cells and X/Y/VOCT/GATE output cells (outputs tinted), and the global
+    // CONTROL row.
     struct PLPanelBackground : TransparentWidget
     {
         PLPanelBackground() { box.size = Vec(PL_PANEL_W, PL_PANEL_H); }
 
         // Block caption with hairlines either side of the text
+        // Draws a centred block caption with a hairline on each side, the
+        // hairlines stopping a measured distance from the text.
         static void blockCaption(NVGcontext *vg, float x0, float w, float y, const char *txt, NVGcolor col)
         {
             float cx = x0 + w / 2.f;
@@ -602,6 +687,9 @@ namespace
             nvgStroke(vg);
         }
 
+        // Draws all static panel art: base panel, bezel, both PENDULUM
+        // captions, the SPIN labels, the MASS/LENGTH knob cells, the X/Y/
+        // V/OCT/GATE output cells (tinted), and the global CONTROL row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -643,6 +731,9 @@ namespace
     // ------------------------------------------------------------
     // Pendulum display
     // ------------------------------------------------------------
+    // Live 200x200 circular display that draws the double pendulum in real
+    // time: dial face, degree ring, plumb line, angle arcs, fading trails,
+    // rods, mass-sized bobs, gate flash rings and corner readouts.
     struct PLDisplayWidget : TransparentWidget
     {
         PsyLFO *module = nullptr;
@@ -654,6 +745,9 @@ namespace
         }
 
         // Static background: screen, dial face, degree ring, reference lines
+        // Draws the display screen, the circular dial face, the two
+        // concentric range rings, the cross hair, the degree tick ring (with
+        // longer ticks every 30°), the 0° mark and the dashed plumb line.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -739,6 +833,11 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the live double pendulum — angle arcs,
+        // fading trails for both bobs, the two rods, the gate flash rings,
+        // the mass-sized bobs, the pivot, and the corner readouts (angles,
+        // angular velocities, reach, gravity). Uses a sample pose when there
+        // is no module (module browser).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -904,10 +1003,15 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, screws, the live pendulum display,
+// the two MASS/LENGTH knobs and their SPIN LEDs, the 8 output jacks, and the
+// global control row (speed, gravity, damping, kick, reset and their CVs).
 // ------------------------------------------------------------
 struct PsyLFOWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, the two
+    // pendulums' LEDs, MASS/LENGTH knobs and X/Y/VOCT/GATE outputs, and the
+    // global CONTROL row.
     PsyLFOWidget(PsyLFO *module)
     {
         setModule(module);
@@ -952,6 +1056,10 @@ struct PsyLFOWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(7), y), module, PsyLFO::RESET_CV_INPUT));
     }
 
+    // Adds the right-click menu: "Voct1 range" and "Voct2 range" submenus
+    // (each with a checkmark on the active range, and a re-randomise on
+    // selection), and "Gate1 duration" / "Gate2 duration" submenus (each with
+    // a checkmark on the active duration).
     void appendContextMenu(ui::Menu *menu) override
     {
         PsyLFO *module = dynamic_cast<PsyLFO *>(this->module);

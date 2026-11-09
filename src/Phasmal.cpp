@@ -1,3 +1,30 @@
+// Phasmal.cpp
+// AGMM-styled stereo phaser with feedback, LFO sweep, and a live
+// frequency-response display.
+//
+// ============================================================================
+// OVERVIEW
+// ============================================================================
+// Phasmal is a 20 HP stereo phaser. Its core is a chain of first-order
+// all-pass stages (2, 4, 6, 8, 10 or 12 stages) with global feedback, whose
+// corner frequency is swept by an LFO (sine or triangle). The left and right
+// channels can be swept with a phase offset (stereo spread), and the module
+// provides CV control over rate, depth, center frequency and feedback. A
+// small display shows the exact magnitude response of the current settings
+// (computed from the same maths as the audio path), the current sweep range,
+// and a small LFO scope.
+//
+// File structure:
+//   1. Layout constants (20 HP = 300x380 px).
+//   2. Shared maths helpers (phLfo, phStageCoef, phMagDb) used by both the
+//      DSP and the display.
+//   3. Phasmal module: parameters, CV handling, the phaser DSP, and the
+//      display snapshot (PhasmalViz).
+//   4. Anonymous-namespace UI: PHPanelBackground, PHKnobArcs, PHDisplayWidget.
+//   5. PhasmalWidget: places knobs, jacks, the display and the context menu.
+//   6. Model registration.
+// ============================================================================
+
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -35,6 +62,7 @@ static const float PH_KNOB_X[4] = {45.f, 115.f, 185.f, 255.f};
 static const float PH_CELL_W = 62.f;
 static const float PH_CELL_H = 58.f;
 static const float PH_ROW_TOP[2] = {162.f, 224.f};
+// Returns the knob centre y for control row `row` (0..1).
 static float phKnobY(int row) { return PH_ROW_TOP[row] + 33.f; }
 
 // Jack cells: IN (2) | CV (4) | OUT (2)
@@ -43,11 +71,14 @@ static const float PH_JACK_TOP = 301.f;
 static const float PH_JACK_H = 44.f;
 static const float PH_JACK_W = 30.f;
 static const float PH_IO_X[8] = {22.f, 55.f, 100.f, 133.f, 166.f, 199.f, 245.f, 278.f};
+// Returns the y centre for the input/output jack row.
 static float phJackY() { return PH_JACK_TOP + 28.f; }
 
 // ------------------------------------------------------------
 // Shared helpers (DSP + display use the same maths)
 // ------------------------------------------------------------
+// Snapshot of the phaser's parameters and state, shared between the audio
+// thread (which fills it) and the UI thread (which renders it).
 struct PhasmalViz
 {
     float fcL = 780.f, fcR = 780.f;
@@ -60,6 +91,8 @@ struct PhasmalViz
     float fs = 44100.f;
 };
 
+// Evaluates the LFO waveform at normalised phase p (0..1). Shape 1 is a
+// triangle (with a 90-degree offset) and shape 0 is a sine.
 static inline float phLfo(float p, int shape)
 {
     p -= std::floor(p);
@@ -73,6 +106,8 @@ static inline float phLfo(float p, int shape)
 }
 
 // First-order all-pass coefficient for a given corner frequency
+// Computes the all-pass coefficient a = (tan(pi*fc/fs) - 1) /
+// (tan(pi*fc/fs) + 1) for the given corner frequency and sample rate.
 static inline float phStageCoef(float fc, float fs)
 {
     float t = std::tan((float)M_PI * fc / fs);
@@ -80,6 +115,9 @@ static inline float phStageCoef(float fc, float fs)
 }
 
 // Exact magnitude response (dB) of the digital phaser at frequency f
+// Computes the exact magnitude response (in dB) of the full phaser
+// (all-pass chain plus feedback plus wet/dry mix) at frequency f, using the
+// same parameters as the DSP. Used only for drawing the response curve.
 static inline float phMagDb(float f, float fc, const PhasmalViz &v)
 {
     float fs = v.fs;
@@ -152,6 +190,8 @@ struct Phasmal : Module
     // Read by the display
     PhasmalViz viz;
 
+    // Constructor: configures all parameters (with sensible ranges and
+    // units), CV inputs, stereo outputs, and stereo bypass.
     Phasmal()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -177,6 +217,8 @@ struct Phasmal : Module
         configBypass(IN_R_INPUT, OUT_R_OUTPUT);
     }
 
+    // Rack reset hook: clears the all-pass and feedback state and restarts
+    // the LFO phase.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -185,6 +227,10 @@ struct Phasmal : Module
         phase = 0.f;
     }
 
+    // Main audio callback: reads all parameters plus their CVs, advances the
+    // LFO, computes per-channel sweep frequencies, runs the all-pass chain
+    // with feedback for each channel, and writes the stereo outputs. Also
+    // fills the PhasmalViz snapshot for the display.
     void process(const ProcessArgs &args) override
     {
         const float fs = args.sampleRate;
@@ -203,6 +249,7 @@ struct Phasmal : Module
         int N = 2 * ((int)std::round(params[STAGES_PARAM].getValue()) + 1);
         N = rack::math::clamp(N, 2, 12);
 
+        // Clear all-pass state beyond the new stage count when it decreases.
         if (N != lastN)
         {
             int from = std::min(N, lastN);
@@ -229,6 +276,8 @@ struct Phasmal : Module
         float inR = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getVoltage() : inL;
 
         const float norm = 1.f - 0.5f * std::fabs(fb);
+        // Runs one channel's all-pass chain with feedback and mixes dry/wet,
+        // applying the output level. `c` selects the channel state.
         auto run = [&](int c, float in, float fc)
         {
             float a = phStageCoef(fc, fs);
@@ -263,6 +312,8 @@ struct Phasmal : Module
         viz.fs = fs;
     }
 
+    // Serialises the current LFO shape so a patch reopens with the same
+    // waveform.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -270,6 +321,8 @@ struct Phasmal : Module
         return root;
     }
 
+    // Restores the LFO shape from a saved patch, clamping it to a valid
+    // enum value.
     void dataFromJson(json_t *root) override
     {
         json_t *j = json_object_get(root, "shape");
@@ -291,10 +344,15 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the 8 knob cell plates, the
+    // jack group captions, and the 8 I/O jack cell plates (outputs tinted).
     struct PHPanelBackground : TransparentWidget
     {
         PHPanelBackground() { box.size = Vec(PH_PANEL_W, PH_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, the 8 knob cells
+        // (2 rows x 4 columns), the INPUT/CV INPUT/OUTPUT captions, and the
+        // 8 I/O jack cells (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -325,12 +383,17 @@ namespace
     // ------------------------------------------------------------
     // Live value arcs around the knobs (flat track + flat arc)
     // ------------------------------------------------------------
+    // Draws a flat track arc around every knob plus a coloured arc showing
+    // the current value (bipolar feedback shows the arc from centre in warm
+    // colour when negative).
     struct PHKnobArcs : TransparentWidget
     {
         Phasmal *module = nullptr;
 
         PHKnobArcs(Phasmal *m) : module(m) { box.size = Vec(PH_PANEL_W, PH_PANEL_H); }
 
+        // Draws the value arcs for all 8 knobs. Skips the value arc when the
+        // change from the origin is negligible.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -371,6 +434,10 @@ namespace
     // ------------------------------------------------------------
     // Phaser display: live frequency response + LFO scope
     // ------------------------------------------------------------
+    // Live display: draws the phaser's exact magnitude response (computed via
+    // phMagDb), the current sweep range, the left/right center-frequency
+    // markers, an LFO scope, and header readouts (rate, fc, stages, feedback,
+    // mix). Uses demo values in the module browser.
     struct PHDisplayWidget : TransparentWidget
     {
         Phasmal *module = nullptr;
@@ -381,17 +448,22 @@ namespace
             box.size = Vec(PH_DISP_W, PH_DISP_H);
         }
 
+        // Maps a frequency f (Hz) to an x pixel inside the plot (log scale
+        // from 20 Hz to 20 kHz).
         static float xOfFreq(float f)
         {
             f = rack::math::clamp(f, 20.f, 20000.f);
             return PH_PX0 + (std::log10(f) - 1.30103f) / 3.f * PH_PW;
         }
+        // Maps a dB value to a y pixel inside the plot (linear between
+        // PH_DB_BOT and PH_DB_TOP).
         static float yOfDb(float db)
         {
             db = rack::math::clamp(db, PH_DB_BOT, PH_DB_TOP);
             return PH_PY0 + (PH_DB_TOP - db) / (PH_DB_TOP - PH_DB_BOT) * PH_PH;
         }
 
+        // Draws a single-pixel vertical line at x between y0 and y1.
         static void vline(NVGcontext *vg, float x, float y0, float y1, NVGcolor c)
         {
             nvgBeginPath(vg);
@@ -403,6 +475,9 @@ namespace
         }
 
         // ---- static background: screen + grid + labels ----
+        // Draws the display screen, the header divider, the plot frame, the
+        // log-frequency and dB grids with their labels, and the LFO strip
+        // frame with its caption.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -460,6 +535,9 @@ namespace
         }
 
         // Response curve (optionally filled)
+        // Draws the magnitude response for a given center frequency `fc`,
+        // sampling phMagDb() at NP log-spaced frequencies. Optionally fills
+        // the area under the curve; `widthCore` sets the line width.
         void drawCurve(NVGcontext *vg, const PhasmalViz &v, float fc, NVGcolor col,
                        bool fill, float widthCore)
         {
@@ -494,6 +572,10 @@ namespace
             nvgStroke(vg);
         }
 
+        // Layer-1 overlay: draws the sweep-range band, the L/R response
+        // curves (R only if spread and depth are non-zero), the center-
+        // frequency markers, the LFO scope with its current-position markers,
+        // and the header readouts (rate, fc/stages, feedback/mix).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -614,10 +696,14 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, the knob value arcs, screws, the
+// display, the 8 knobs, the 8 I/O jacks, and the context menu (LFO shape).
 // ------------------------------------------------------------
 struct PhasmalWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, knob value arcs, screws,
+    // display, the 8 knobs (row-major: RATE/DEPTH/CENTER/FEEDBACK then
+    // STAGES/SPREAD/MIX/LEVEL) and the 8 I/O jacks.
     PhasmalWidget(Phasmal *module)
     {
         setModule(module);
@@ -651,6 +737,8 @@ struct PhasmalWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PH_IO_X[7], y), module, Phasmal::OUT_R_OUTPUT));
     }
 
+    // Adds the right-click menu: an "LFO shape" submenu with Sine and
+    // Triangle options and a checkmark on the current shape.
     void appendContextMenu(ui::Menu *menu) override
     {
         Phasmal *module = dynamic_cast<Phasmal *>(this->module);

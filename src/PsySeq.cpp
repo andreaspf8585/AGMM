@@ -5,32 +5,92 @@
 #include <cstring>
 #include <algorithm>
 
+// ============================================================
+// PsySeq
+// ============================================================
+//
+// OVERVIEW
+// --------
+// PsySeq is a 38 HP 8x8 step sequencer with probabilistic node visiting
+// and periodic mutation. Each of the 64 cells has:
+//   - a voltage trimpot (0..1, scaled into a user-selectable voltage range)
+//   - a probability trimpot (0..1) that decides whether the step is visited
+//     on that clock (visited steps update the CV and fire the STEP trigger;
+//     skipped steps hold the previous CV and do not fire).
+// The sequencer supports forward, reverse and random directions, a
+// configurable start step (mapped into the 64-cell grid), and a
+// "random voltage per step" mode that ignores the voltage trimpots and
+// generates a new random voltage on every visited step.
+//
+// In addition, when a forward or reverse cycle completes, the module
+// periodically attempts to mutate all active-step voltages, controlled by a
+// "mutation probability" knob and a "wait cycles" knob that snaps to
+// 0/4/8/16 cycles (0 = every cycle).
+//
+// Outputs: CV out, inverted CV out, a short cycle gate (on each completed
+// forward/reverse cycle), and a short STEP trigger (on each visited clock).
+// Inputs: clock, reset, and a randomize trigger (which randomizes all step
+// voltages). A front-panel RANDOMIZE button does the same.
+//
+// A live 8x8 grid display shows, per cell: the step number, a voltage bar,
+// a probability bar, a skip cross for zero-probability steps, a warm start
+// marker, and a cyan/grey playhead (cyan when the node was visited, grey
+// when it was skipped). A separate status screen shows the current step,
+// HIT/SKIP flag, direction/chip states, current voltage, probability and
+// mutation wait/mutation readouts.
+//
+// File structure:
+//   1. Layout constants (38 HP = 570x380 px).
+//   2. WaitCyclesParamQuantity (snaps the mutation wait knob to 0/4/8/16).
+//   3. PsySeq module: state, mapping, randomization helpers, JSON
+//      persistence, and process().
+//   4. Anonymous-namespace UI: colour helpers, blockHeader, PSPanelBackground,
+//      PSGridWidget, PSStatusWidget.
+//   5. PsySeqWidget: places controls, jacks, the grid, the status screen,
+//      the randomize button and the context menu.
+//   6. Model registration.
+// ============================================================
+
 // ------------------------------------------------------------
-// Layout constants
+// Layout constants (38 HP = 570 px wide)
 // ------------------------------------------------------------
 static const float PS_PANEL_W = RACK_GRID_WIDTH * 38; // 570
 static const float PS_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// 8 x 8 step grid
+// 8 x 8 step grid: cell 36 x 36, pitch 40 x 39
+//   top row: step number (left), skip cross, LED (right)
+//   middle:  voltage trimpot (left), probability trimpot (right)
+//   bottom:  voltage bar (left), probability bar (right)
 static const float PS_GRID_X = 136.f;
-static const float PS_GRID_Y = 55.f;
+static const float PS_GRID_Y = 42.f;
 static const float PS_GRID_W = 316.f;
-static const float PS_GRID_H = 300.f;
+static const float PS_GRID_H = 309.f;
+// Returns the horizontal centre of grid cell column c (0..7).
 static float psCellX(int c) { return PS_GRID_X + c * 40.f + 18.f; } // cell centre
-static float psCellY(int r) { return PS_GRID_Y + r * 38.f + 17.f; }
+// Returns the vertical centre of grid cell row r (0..7).
+static float psCellY(int r) { return PS_GRID_Y + r * 39.f + 18.f; }
 
-// Left control block, status screen, right jack block
-static const float PS_LCOL[2] = {30.f, 90.f};
-static const float PS_LROW[3] = {90.f, 148.f, 206.f};
-static const float PS_SCR_X = 12.f, PS_SCR_Y = 246.f, PS_SCR_W = 108.f, PS_SCR_H = 102.f;
-static const float PS_RCOL[2] = {490.f, 530.f};
-static const float PS_RROW[4] = {100.f, 154.f, 240.f, 294.f};
+// Left control block: 2 columns x 3 rows of 54 x 56 cells, then the status screen
+static const float PS_LCOL[2] = {36.f, 96.f};
+static const float PS_LTOP[3] = {52.f, 112.f, 172.f};
+static const float PS_LCELL_W = 54.f, PS_LCELL_H = 56.f;
+static const float PS_SCR_X = 12.f, PS_SCR_Y = 242.f, PS_SCR_W = 108.f, PS_SCR_H = 104.f;
+
+// Right jack block: 2 columns of 46 x 52 cells
+static const float PS_RCOL[2] = {485.f, 535.f};
+static const float PS_RTOP[4] = {52.f, 112.f, 202.f, 262.f};
+static const float PS_RCELL_W = 46.f, PS_RCELL_H = 52.f;
+static const float PS_OUT_HDR_Y = 40.f, PS_IN_HDR_Y = 190.f;
 
 // ------------------------------------------------------------
 // Custom ParamQuantity for wait cycles that snaps to 0, 4, 8, 16
 // ------------------------------------------------------------
+// ParamQuantity that snaps the mutation-wait parameter to one of the
+// allowed values {0, 4, 8, 16}, picking the nearest allowed value.
 struct WaitCyclesParamQuantity : rack::engine::ParamQuantity
 {
+    // Snaps the requested value to the nearest of {0, 4, 8, 16} before
+    // storing it.
     void setValue(float value) override
     {
         static const float allowed[4] = {0.f, 4.f, 8.f, 16.f};
@@ -116,6 +176,9 @@ struct PsySeq : Module
     float stepFlash = 0.f;
     float mutFlash = 0.f;
 
+    // Constructor: configures all parameters (with snapping where needed),
+    // the 64 voltage and probability trimpots, the 64 lights, the three
+    // inputs, four outputs and the clock->CV bypass.
     PsySeq()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -157,12 +220,17 @@ struct PsySeq : Module
     }
 
     // Position inside the sequence -> knob index (0..63), honouring the start step
+    // Converts a sequence position (0..63) into the absolute 64-cell grid
+    // index, offset by the current start step (1-based, wrapped into 0..63).
     int mapIndex(int pos)
     {
         int start = (int)params[START_PARAM].getValue();
         return (((start - 1 + pos) % 64) + 64) % 64;
     }
 
+    // Returns the voltage for the given grid cell: in random mode it is a
+    // fresh random value inside the voltage range; otherwise it is the
+    // cell's voltage trimpot scaled into the range.
     float computeVoltageForStep(int stepIndex, bool randomMode)
     {
         if (randomMode)
@@ -176,12 +244,16 @@ struct PsySeq : Module
         }
     }
 
+    // Recomputes the held CV output from the current position, using the
+    // current voltage range and random-voltage mode.
     void updateHeldVoltage()
     {
         bool randomMode = params[RANDOM_VOLTAGE_PARAM].getValue() > 0.5f;
         heldVoltage = computeVoltageForStep(mapIndex(position), randomMode);
     }
 
+    // Sets the voltage range and immediately refreshes the held CV (called
+    // from the context menu's "Voltage range" submenu).
     void setVoltageRange(float min, float max)
     {
         voltMin = min;
@@ -189,6 +261,9 @@ struct PsySeq : Module
         updateHeldVoltage();
     }
 
+    // Randomises the voltage trimpots of all 64 cells and refreshes the
+    // held CV (used by the RANDOMIZE button, the randomize input, and the
+    // context menu).
     void randomizeAllStepKnobs()
     {
         for (int i = 0; i < 64; i++)
@@ -196,6 +271,7 @@ struct PsySeq : Module
         updateHeldVoltage();
     }
 
+    // Sets all voltage trimpots to zero and refreshes the held CV.
     void clearAllStepKnobs()
     {
         for (int i = 0; i < 64; i++)
@@ -203,18 +279,22 @@ struct PsySeq : Module
         updateHeldVoltage();
     }
 
+    // Sets every cell's visit probability trimpot to `v`.
     void setAllProbabilities(float v)
     {
         for (int i = 0; i < 64; i++)
             params[PROB_OFFSET + i].setValue(v);
     }
 
+    // Randomises every cell's visit probability trimpot.
     void randomizeAllProbabilities()
     {
         for (int i = 0; i < 64; i++)
             params[PROB_OFFSET + i].setValue(random::uniform());
     }
 
+    // Serialises the voltage range so patches reopen with the same output
+    // scaling.
     json_t *dataToJson() override
     {
         json_t *rootJ = json_object();
@@ -223,17 +303,31 @@ struct PsySeq : Module
         return rootJ;
     }
 
+    // Restores the voltage range from a patch, falling back to -1..1 if the
+    // values are missing or invalid, then refreshes the held CV.
     void dataFromJson(json_t *rootJ) override
     {
         json_t *minJ = json_object_get(rootJ, "voltMin");
         json_t *maxJ = json_object_get(rootJ, "voltMax");
-        if (minJ)
-            voltMin = json_real_value(minJ);
-        if (maxJ)
-            voltMax = json_real_value(maxJ);
+        if (minJ && json_is_number(minJ))
+            voltMin = (float)json_number_value(minJ);
+        if (maxJ && json_is_number(maxJ))
+            voltMax = (float)json_number_value(maxJ);
+        if (!(voltMax > voltMin))
+        {
+            voltMin = -1.f;
+            voltMax = 1.f;
+        }
         updateHeldVoltage();
     }
 
+    // Main audio callback: handles the RANDOMIZE button and trigger, clamps
+    // and reacts to STEPS/START changes, handles RESET, advances the
+    // position on each clock according to direction, applies the per-cell
+    // visit probability, fires the STEP trigger on visited steps, counts
+    // completed cycles and periodically mutates the step voltages, then
+    // updates the CV/inverted CV/cycle gate/step trigger outputs and the
+    // grid LEDs.
     void process(const ProcessArgs &args) override
     {
         // Button randomize
@@ -376,36 +470,15 @@ namespace
 {
     namespace ag = agmm;
 
-    // ------------------------------------------------------------
-    // Theme helpers
-    // ------------------------------------------------------------
-    NVGcolor colProb() { return nvgRGB(0xb0, 0x5a, 0xff); }
-    NVGcolor colHot() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    // Returns the colour used for probability markers and bars (violet).
+    NVGcolor colProb() { return ag::violet(); }
+    // Returns the colour used for the voltage bars and playhead (cyan).
+    NVGcolor colHot() { return ag::accent(); }
 
-    // Small plate used for knobs / switches / ports
-    void plate(NVGcontext *vg, float cx, float cy, float w, float h)
-    {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, cx - w / 2.f, cy - h / 2.f, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // void ring(NVGcontext *vg, float cx, float cy, float r)
-    // {
-    //     nvgBeginPath(vg);
-    //     nvgCircle(vg, cx, cy, r);
-    //     nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    //     nvgFill(vg);
-    //     nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    //     nvgStrokeWidth(vg, 1.f);
-    //     nvgStroke(vg);
-    // }
-
-    void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float halfW)
+    // Block title with hairlines that stop short of the text
+    // Draws a centred block header whose hairlines span from cx-halfW to
+    // cx+halfW, stopping a measured distance from the text.
+    void blockHeader(NVGcontext *vg, float cx, float y, const char *txt, float halfW, NVGcolor col)
     {
         float gap = ag::textWidth(vg, txt, 8.f, 2.f) / 2.f + 6.f;
         ag::text(vg, cx, y, txt, 8.f, col, ag::ALIGN_C, 2.f);
@@ -419,37 +492,19 @@ namespace
         nvgStroke(vg);
     }
 
-    void knobCell(NVGcontext *vg, float cx, float cy, const char *txt)
-    {
-        plate(vg, cx, cy - 6.f, 44.f, 50.f);
-        ag::text(vg, cx, cy + 17.f, txt, 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
-    }
-
-    void switchCell(NVGcontext *vg, float cx, float cy, const char *txt)
-    {
-        plate(vg, cx, cy - 2.f, 44.f, 42.f);
-        ag::text(vg, cx, cy + 17.f, txt, 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
-    }
-
-    void portCell(NVGcontext *vg, float cx, float cy, const char *txt)
-    {
-        plate(vg, cx, cy - 4.f, 38.f, 46.f);
-        ag::text(vg, cx, cy + 18.f, txt, 6.5f, ag::dim(), ag::ALIGN_C, 0.5f);
-    }
-
-    void buttonCell(NVGcontext *vg, float cx, float cy, const char *txt)
-    {
-        plate(vg, cx, cy - 2.f, 38.f, 42.f);
-        ag::text(vg, cx, cy + 17.f, txt, 6.5f, ag::dim(), ag::ALIGN_C, 0.5f);
-    }
-
     // ------------------------------------------------------------
-    // Panel background
+    // Panel background: title, frames, labelled plates, grid legend
     // ------------------------------------------------------------
+    // Static artwork: base panel, display and status-screen bezels, the
+    // grid legend row, the left CONTROL block cells, and the right
+    // OUTPUT/INPUT blocks with their jack cells (outputs tinted).
     struct PSPanelBackground : TransparentWidget
     {
         PSPanelBackground() { box.size = Vec(PS_PANEL_W, PS_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezels, the VOLTAGE/
+        // PROBABILITY/START STEP grid legend, the six CONTROL cells, the
+        // four OUTPUT jack cells (tinted), and the INPUT jack cells.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -458,40 +513,44 @@ namespace
             ag::bezel(vg, PS_GRID_X, PS_GRID_Y, PS_GRID_W, PS_GRID_H);
             ag::bezel(vg, PS_SCR_X, PS_SCR_Y, PS_SCR_W, PS_SCR_H);
 
-            // ---- grid legend ----
+            // ---- grid legend (own row above the grid) ----
+            const float ly = 33.f;
             nvgBeginPath(vg);
-            nvgRect(vg, PS_GRID_X + 2.f, 46.f, 5.f, 5.f);
+            nvgRect(vg, PS_GRID_X + 2.f, ly - 2.5f, 5.f, 5.f);
             nvgFillColor(vg, colHot());
             nvgFill(vg);
-            ag::text(vg, PS_GRID_X + 11.f, 49.f, "VOLTAGE", 6.5f, ag::dim(), ag::ALIGN_L, 1.f);
+            ag::text(vg, PS_GRID_X + 11.f, ly, "VOLTAGE", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
 
             nvgBeginPath(vg);
-            nvgRect(vg, PS_GRID_X + 92.f, 46.f, 5.f, 5.f);
+            nvgRect(vg, PS_GRID_X + 82.f, ly - 2.5f, 5.f, 5.f);
             nvgFillColor(vg, colProb());
             nvgFill(vg);
-            ag::text(vg, PS_GRID_X + 101.f, 49.f, "PROBABILITY", 6.5f, ag::dim(), ag::ALIGN_L, 1.f);
+            ag::text(vg, PS_GRID_X + 91.f, ly, "PROBABILITY", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+
+            nvgBeginPath(vg);
+            nvgRect(vg, PS_GRID_X + 176.f, ly - 2.5f, 5.f, 5.f);
+            nvgFillColor(vg, ag::warm());
+            nvgFill(vg);
+            ag::text(vg, PS_GRID_X + 185.f, ly, "START STEP", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
 
             // ---- left block ----
-            caption(vg, 60.f, 55.f, "CONTROL", ag::accent(), 48.f);
-            knobCell(vg, PS_LCOL[0], PS_LROW[0], "STEPS");
-            knobCell(vg, PS_LCOL[1], PS_LROW[0], "START");
-            switchCell(vg, PS_LCOL[0], PS_LROW[1], "DIRECTION");
-            switchCell(vg, PS_LCOL[1], PS_LROW[1], "RAND V");
-            knobCell(vg, PS_LCOL[0], PS_LROW[2], "WAIT");
-            knobCell(vg, PS_LCOL[1], PS_LROW[2], "MUTATE");
+            ag::sectionHeader(vg, 132.f, 40.f, "CONTROL", 9.f);
+            const char *lab[6] = {"STEPS", "START", "DIRECTION", "RAND V", "WAIT", "MUTATE"};
+            for (int i = 0; i < 6; ++i)
+                ag::cell(vg, PS_LCOL[i % 2], PS_LTOP[i / 2], PS_LCELL_W, PS_LCELL_H, lab[i]);
 
             // ---- right block ----
-            caption(vg, 510.f, 55.f, "OUTPUT", colProb(), 38.f);
-            portCell(vg, PS_RCOL[0], PS_RROW[0], "CV OUT");
-            portCell(vg, PS_RCOL[1], PS_RROW[0], "STEP");
-            portCell(vg, PS_RCOL[0], PS_RROW[1], "CYCLE");
-            portCell(vg, PS_RCOL[1], PS_RROW[1], "CV INV");
+            blockHeader(vg, 510.f, PS_OUT_HDR_Y, "OUTPUT", 48.f, colProb());
+            ag::cell(vg, PS_RCOL[0], PS_RTOP[0], PS_RCELL_W, PS_RCELL_H, "CV OUT", true);
+            ag::cell(vg, PS_RCOL[1], PS_RTOP[0], PS_RCELL_W, PS_RCELL_H, "STEP", true);
+            ag::cell(vg, PS_RCOL[0], PS_RTOP[1], PS_RCELL_W, PS_RCELL_H, "CYCLE", true);
+            ag::cell(vg, PS_RCOL[1], PS_RTOP[1], PS_RCELL_W, PS_RCELL_H, "CV INV", true);
 
-            caption(vg, 510.f, 194.f, "INPUT", ag::accent(), 38.f);
-            portCell(vg, PS_RCOL[0], PS_RROW[2], "CLK");
-            portCell(vg, PS_RCOL[1], PS_RROW[2], "RESET");
-            portCell(vg, PS_RCOL[0], PS_RROW[3], "RAND IN");
-            buttonCell(vg, PS_RCOL[1], PS_RROW[3], "RAND");
+            blockHeader(vg, 510.f, PS_IN_HDR_Y, "INPUT", 48.f, ag::accent());
+            ag::cell(vg, PS_RCOL[0], PS_RTOP[2], PS_RCELL_W, PS_RCELL_H, "CLK");
+            ag::cell(vg, PS_RCOL[1], PS_RTOP[2], PS_RCELL_W, PS_RCELL_H, "RESET");
+            ag::cell(vg, PS_RCOL[0], PS_RTOP[3], PS_RCELL_W, PS_RCELL_H, "RAND IN");
+            ag::cell(vg, PS_RCOL[1], PS_RTOP[3], PS_RCELL_W, PS_RCELL_H, "RAND");
 
             Widget::draw(args);
         }
@@ -500,6 +559,10 @@ namespace
     // ------------------------------------------------------------
     // Step grid: cells, active range, playhead, value + probability bars
     // ------------------------------------------------------------
+    // Live 8x8 grid display: draws the 64 cell backgrounds with their step
+    // numbers on layer 0, and on layer 1 the active-range tint, mutation
+    // flash, voltage bar, probability bar, zero-probability cross, start
+    // marker and playhead ring.
     struct PSGridWidget : TransparentWidget
     {
         PsySeq *module = nullptr;
@@ -510,16 +573,17 @@ namespace
             box.size = Vec(PS_GRID_W, PS_GRID_H);
         }
 
+        // Static layer: draws the 64 rounded cell backgrounds and step
+        // numbers.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
             for (int i = 0; i < 64; ++i)
             {
-                float x = (i % 8) * 40.f, y = (i / 8) * 38.f;
+                float x = (i % 8) * 40.f, y = (i / 8) * 39.f;
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, y, 36.f, 34.f, 4.f);
-                nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + 34.f,
-                                                   nvgRGBA(255, 255, 255, 12), nvgRGBA(0, 0, 0, 60)));
+                nvgRoundedRect(vg, x, y, 36.f, 36.f, 4.f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 8));
                 nvgFill(vg);
                 nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 20));
                 nvgStrokeWidth(vg, 1.f);
@@ -527,11 +591,16 @@ namespace
 
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d", i + 1);
-                ag::text(vg, x + 3.5f, y + 5.5f, buf, 5.5f, ag::dim(), ag::ALIGN_L, 0.f);
+                ag::text(vg, x + 3.f, y + 6.f, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.f);
             }
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: for each cell, draws active-range tint and
+        // mutation flash, the voltage and probability bars, a skip cross if
+        // the probability is zero, the start marker, and the playhead ring
+        // (cyan if visited, grey if skipped). Uses demo data when there is
+        // no module.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -580,13 +649,13 @@ namespace
 
             for (int i = 0; i < 64; ++i)
             {
-                float x = (i % 8) * 40.f, y = (i / 8) * 38.f;
+                float x = (i % 8) * 40.f, y = (i / 8) * 39.f;
                 int rel = (((i - (start - 1)) % 64) + 64) % 64;
                 bool active = rel < steps;
 
-                // Cell tint
+                // Cell tint: active range lightly tinted, inactive darkened
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, y, 36.f, 34.f, 4.f);
+                nvgRoundedRect(vg, x, y, 36.f, 36.f, 4.f);
                 if (active)
                 {
                     nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 12));
@@ -603,57 +672,54 @@ namespace
                     nvgFill(vg);
                 }
 
-                // ---- voltage bar (left) ----
+                // ---- voltage bar (bottom left, under the voltage trimpot) ----
                 float kv = std::min(std::max(knob[i], 0.f), 1.f);
                 nvgBeginPath(vg);
-                nvgRect(vg, x + 3.f, y + 30.f, 12.f, 2.5f);
+                nvgRect(vg, x + 2.f, y + 31.f, 13.f, 2.5f);
                 nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
                 nvgFill(vg);
                 if (kv > 0.005f)
                 {
                     float a = randMode ? 0.18f : (active ? 0.95f : 0.3f);
                     nvgBeginPath(vg);
-                    nvgRect(vg, x + 3.f, y + 30.f, 12.f * kv, 2.5f);
+                    nvgRect(vg, x + 2.f, y + 31.f, 13.f * kv, 2.5f);
                     nvgFillColor(vg, ag::withA(colHot(), a));
                     nvgFill(vg);
                 }
 
-                // ---- probability bar (right) ----
+                // ---- probability bar (bottom right, under the probability trimpot) ----
                 float pv = std::min(std::max(prob[i], 0.f), 1.f);
                 nvgBeginPath(vg);
-                nvgRect(vg, x + 21.f, y + 30.f, 12.f, 2.5f);
+                nvgRect(vg, x + 21.f, y + 31.f, 13.f, 2.5f);
                 nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
                 nvgFill(vg);
                 if (pv > 0.005f)
                 {
                     nvgBeginPath(vg);
-                    nvgRect(vg, x + 21.f, y + 30.f, 12.f * pv, 2.5f);
+                    nvgRect(vg, x + 21.f, y + 31.f, 13.f * pv, 2.5f);
                     nvgFillColor(vg, ag::withA(colProb(), active ? 0.95f : 0.35f));
                     nvgFill(vg);
                 }
 
-                // Zero-probability cell: tiny cross in the corner
+                // Zero-probability cell: small cross in the top row, between number and LED
                 if (pv < 0.005f)
                 {
                     nvgBeginPath(vg);
-                    nvgMoveTo(vg, x + 22.f, y + 20.f);
-                    nvgLineTo(vg, x + 26.f, y + 24.f);
-                    nvgMoveTo(vg, x + 26.f, y + 20.f);
-                    nvgLineTo(vg, x + 22.f, y + 24.f);
-                    nvgStrokeColor(vg, nvgRGBA(0xff, 0x60, 0x60, 120));
+                    nvgMoveTo(vg, x + 16.5f, y + 3.5f);
+                    nvgLineTo(vg, x + 21.5f, y + 8.5f);
+                    nvgMoveTo(vg, x + 21.5f, y + 3.5f);
+                    nvgLineTo(vg, x + 16.5f, y + 8.5f);
+                    nvgStrokeColor(vg, nvgRGBA(0xff, 0x60, 0x60, 160));
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
 
-                // Start marker
+                // Start marker: warm bar along the top edge
                 if (i == start - 1)
                 {
                     nvgBeginPath(vg);
-                    nvgMoveTo(vg, x + 1.f, y + 1.f);
-                    nvgLineTo(vg, x + 9.f, y + 1.f);
-                    nvgLineTo(vg, x + 1.f, y + 9.f);
-                    nvgClosePath(vg);
-                    nvgFillColor(vg, colProb());
+                    nvgRect(vg, x + 4.f, y + 1.f, 18.f, 1.5f);
+                    nvgFillColor(vg, ag::warm());
                     nvgFill(vg);
                 }
 
@@ -661,29 +727,15 @@ namespace
                 if (i == cur)
                 {
                     NVGcolor ringCol = visited ? colHot() : nvgRGB(0x6a, 0x74, 0x82);
-                    int ringA = visited ? (int)(30 + 70 * flash) : 40;
-
                     nvgBeginPath(vg);
-                    nvgRoundedRect(vg, x - 2.f, y - 2.f, 40.f, 38.f, 6.f);
-                    nvgFillColor(vg, ag::withA(ringCol, ringA / 255.f));
-                    nvgFill(vg);
-
-                    nvgBeginPath(vg);
-                    nvgRoundedRect(vg, x, y, 36.f, 34.f, 4.f);
+                    nvgRoundedRect(vg, x, y, 36.f, 36.f, 4.f);
                     nvgFillColor(vg, ag::withA(ringCol, visited ? (25 + 45 * flash) / 255.f : 0.12f));
                     nvgFill(vg);
-                    nvgStrokeColor(vg, visited ? nvgRGB(0x8a, 0xee, 0xff) : nvgRGB(0x7a, 0x85, 0x94));
+                    nvgStrokeColor(vg, visited ? ag::bright() : nvgRGB(0x7a, 0x85, 0x94));
                     nvgStrokeWidth(vg, 1.4f);
                     nvgStroke(vg);
                 }
             }
-
-            // Glass reflection
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, PS_GRID_W, PS_GRID_H * 0.25f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, PS_GRID_H * 0.25f,
-                                               nvgRGBA(255, 255, 255, 12), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
 
             Widget::drawLayer(args, layer);
         }
@@ -692,6 +744,9 @@ namespace
     // ------------------------------------------------------------
     // Status screen
     // ------------------------------------------------------------
+    // Live status screen: shows the current step / total, HIT/SKIP flag,
+    // direction/RAND V/MUT chips, a voltage bar, the current voltage,
+    // probability and the mutation wait/mutation readouts.
     struct PSStatusWidget : TransparentWidget
     {
         PsySeq *module = nullptr;
@@ -702,12 +757,15 @@ namespace
             box.size = Vec(PS_SCR_W, PS_SCR_H);
         }
 
+        // Static layer: fills the screen area with the flat screen colour.
         void draw(const DrawArgs &args) override
         {
             ag::screen(args.vg, 0.f, 0.f, PS_SCR_W, PS_SCR_H);
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the status text and voltage bar. Uses demo
+        // values in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -716,7 +774,7 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float W = PS_SCR_W, H = PS_SCR_H;
+            const float W = PS_SCR_W;
 
             int steps, pos, dir, wait, cyc, curIdx;
             float volt, vmin, vmax, mut, flash, prob;
@@ -758,78 +816,53 @@ namespace
             steps = std::max(steps, 1);
 
             char buf[48];
-            // NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
 
-            ag::text(vg, 6.f, 8.f, "STEP", 6.5f, ag::dim(), ag::ALIGN_L, 1.f);
+            // Row 1: labels
+            ag::text(vg, 6.f, 8.f, "STEP", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "OF %d", steps);
-            ag::text(vg, W - 6.f, 8.f, buf, 6.5f, ag::dim(), ag::ALIGN_R, 1.f);
+            ag::text(vg, W - 6.f, 8.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
 
+            // Row 2: step number (left) and HIT / SKIP flag (right)
             snprintf(buf, sizeof(buf), "%02d", pos + 1);
-            ag::text(vg, W / 2.f, 28.f, buf, 22.f,
-                     nvgRGBA(0x8a, 0xee, 0xff, (int)(190 + 65 * flash)),
-                     ag::ALIGN_C, 2.f);
+            ag::text(vg, 6.f, 27.f, buf, 22.f,
+                     ag::withA(ag::bright(), (190.f + 65.f * flash) / 255.f), ag::ALIGN_L, 1.f);
+            ag::text(vg, W - 6.f, 27.f, visited ? "HIT" : "SKIP", 7.f,
+                     visited ? colHot() : nvgRGB(0xff, 0x70, 0x70), ag::ALIGN_R, 0.5f);
 
-            // HIT / SKIP flag
-            ag::text(vg, W - 7.f, 28.f, visited ? "HIT" : "SKIP", 6.f,
-                     visited ? colHot() : nvgRGB(0xff, 0x70, 0x70), ag::ALIGN_R, 0.8f);
-
+            // Row 3: chips sized from their text
             static const char *dirNames[3] = {"FWD", "REV", "RND"};
-            auto chip = [&](float x, float w, const char *txt, bool on, NVGcolor col)
+            const char *chipTxt[3] = {dirNames[dir], "RAND V", "MUT"};
+            const bool chipOn[3] = {true, rnd, mut > 0.001f};
+            const NVGcolor chipCol[3] = {ag::accent(), colProb(), colProb()};
+            float cx0 = 6.f;
+            for (int k = 0; k < 3; ++k)
             {
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, x, 43.f, w, 11.f, 3.f);
-                if (on)
-                {
-                    nvgFillColor(vg, ag::withA(col, 0.25f));
-                    nvgFill(vg);
-                    nvgStrokeColor(vg, ag::withA(col, 0.9f));
-                }
-                else
-                {
-                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-                }
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                ag::text(vg, x + w / 2.f, 48.5f, txt, 6.f, on ? col : ag::dim(),
-                         ag::ALIGN_C, 0.8f);
-            };
-            chip(6.f, 28.f, dirNames[dir], true, ag::accent());
-            chip(38.f, 28.f, "RAND V", rnd, colProb());
-            chip(70.f, 24.f, "MUT", mut > 0.001f, colProb());
+                float w = ag::textWidth(vg, chipTxt[k], 7.f, 0.5f) + 8.f;
+                ag::chip(vg, cx0, 41.f, w, 12.f, chipTxt[k], chipOn[k], chipCol[k]);
+                cx0 += w + 4.f;
+            }
 
-            // Voltage meter
+            // Row 4: voltage meter (flat)
             float t = (vmax > vmin) ? (volt - vmin) / (vmax - vmin) : 0.5f;
             t = std::min(std::max(t, 0.f), 1.f);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 8.f, 61.f, 84.f, 5.f, 2.f);
+            nvgRect(vg, 8.f, 61.f, W - 16.f, 4.f);
             nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
             nvgFill(vg);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 8.f, 61.f, std::max(84.f * t, 2.f), 5.f, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 8.f, 0, 92.f, 0, colHot(), colProb()));
+            nvgRect(vg, 8.f, 61.f, std::max((W - 16.f) * t, 2.f), 4.f);
+            nvgFillColor(vg, colHot());
             nvgFill(vg);
 
+            // Rows 5-7: readouts
             snprintf(buf, sizeof(buf), "%+.2fV", volt);
-            ag::text(vg, W / 2.f, 77.f, buf, 9.f, nvgRGBA(0xff, 0xe6, 0x80, 230), ag::ALIGN_C, 1.f);
+            ag::text(vg, W / 2.f, 76.f, buf, 9.f, nvgRGBA(0xff, 0xe6, 0x80, 230), ag::ALIGN_C, 0.5f);
 
             snprintf(buf, sizeof(buf), "PROB %.0f%%", prob * 100.f);
-            ag::text(vg, W / 2.f, 89.f, buf, 7.f, colProb(), ag::ALIGN_C, 0.8f);
+            ag::text(vg, W / 2.f, 88.f, buf, 7.f, colProb(), ag::ALIGN_C, 0.5f);
 
             snprintf(buf, sizeof(buf), "WAIT %d/%d  MUT %.0f%%", cyc, wait, mut * 100.f);
-            ag::text(vg, W / 2.f, 99.f, buf, 6.f, ag::dim(), ag::ALIGN_C, 0.5f);
-
-            // Scanlines + gloss
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)H; y += 3)
-                nvgRect(vg, 0, y + 1, W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H * 0.3f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
+            ag::text(vg, W / 2.f, 98.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.f);
 
             Widget::drawLayer(args, layer);
         }
@@ -838,10 +871,16 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, screws, the 8x8 grid and status
+// screen, the six CONTROL knobs/switches, the eight right-block jacks/button
+// and the 64 grid LEDs, plus the right-click menu.
 // ------------------------------------------------------------
 struct PsySeqWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, grid, status
+    // screen, the six CONTROL cells, the eight right-block jacks and the
+    // RANDOMIZE button, and the 64 per-cell LEDs plus voltage and
+    // probability trimpots.
     PsySeqWidget(PsySeq *module)
     {
         setModule(module);
@@ -857,35 +896,40 @@ struct PsySeqWidget : ModuleWidget
         addChild(new PSGridWidget(module));
         addChild(new PSStatusWidget(module));
 
-        // ---- left block ----
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[0], PS_LROW[0]), module, PsySeq::STEPS_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[1], PS_LROW[0]), module, PsySeq::START_PARAM));
-        addParam(createParamCentered<CKSSThree>(Vec(PS_LCOL[0], PS_LROW[1]), module, PsySeq::DIRECTION_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(PS_LCOL[1], PS_LROW[1]), module, PsySeq::RANDOM_VOLTAGE_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[0], PS_LROW[2]), module, PsySeq::MUTATION_WAIT_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[1], PS_LROW[2]), module, PsySeq::MUTATION_PARAM));
+        // ---- left block: control sits 35 px below each cell's top edge ----
+        const float ky[3] = {PS_LTOP[0] + 35.f, PS_LTOP[1] + 35.f, PS_LTOP[2] + 35.f};
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[0], ky[0]), module, PsySeq::STEPS_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[1], ky[0]), module, PsySeq::START_PARAM));
+        addParam(createParamCentered<CKSSThree>(Vec(PS_LCOL[0], ky[1]), module, PsySeq::DIRECTION_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(PS_LCOL[1], ky[1]), module, PsySeq::RANDOM_VOLTAGE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[0], ky[2]), module, PsySeq::MUTATION_WAIT_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[1], ky[2]), module, PsySeq::MUTATION_PARAM));
 
-        // ---- right block ----
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], PS_RROW[0]), module, PsySeq::OUTPUT_OUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], PS_RROW[0]), module, PsySeq::STEP_TRIGGER_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], PS_RROW[1]), module, PsySeq::CYCLE_GATE_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], PS_RROW[1]), module, PsySeq::INV_OUTPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], PS_RROW[2]), module, PsySeq::CLOCK_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], PS_RROW[2]), module, PsySeq::RESET_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], PS_RROW[3]), module, PsySeq::RANDOMIZE_TRIGGER_INPUT));
-        addParam(createParamCentered<VCVButton>(Vec(PS_RCOL[1], PS_RROW[3]), module, PsySeq::RANDOMIZE_BUTTON));
+        // ---- right block: jacks sit 32 px below each cell's top edge ----
+        const float jy[4] = {PS_RTOP[0] + 32.f, PS_RTOP[1] + 32.f, PS_RTOP[2] + 32.f, PS_RTOP[3] + 32.f};
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], jy[0]), module, PsySeq::OUTPUT_OUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], jy[0]), module, PsySeq::STEP_TRIGGER_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], jy[1]), module, PsySeq::CYCLE_GATE_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], jy[1]), module, PsySeq::INV_OUTPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], jy[2]), module, PsySeq::CLOCK_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[1], jy[2]), module, PsySeq::RESET_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], jy[3]), module, PsySeq::RANDOMIZE_TRIGGER_INPUT));
+        addParam(createParamCentered<VCVButton>(Vec(PS_RCOL[1], jy[3]), module, PsySeq::RANDOMIZE_BUTTON));
 
         // ---- 8 x 8 grid: LED top-right, voltage trimpot left, probability trimpot right ----
         for (int i = 0; i < 64; ++i)
         {
             float cx = psCellX(i % 8), cy = psCellY(i / 8);
             addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
-                Vec(cx + 12.f, cy - 11.f), module, PsySeq::LIGHT_OFFSET + i));
-            addParam(createParamCentered<Trimpot>(Vec(cx - 9.f, cy + 5.f), module, PsySeq::KNOB_OFFSET + i));
-            addParam(createParamCentered<Trimpot>(Vec(cx + 9.f, cy + 5.f), module, PsySeq::PROB_OFFSET + i));
+                Vec(cx + 12.f, cy - 12.5f), module, PsySeq::LIGHT_OFFSET + i));
+            addParam(createParamCentered<Trimpot>(Vec(cx - 9.25f, cy + 1.5f), module, PsySeq::KNOB_OFFSET + i));
+            addParam(createParamCentered<Trimpot>(Vec(cx + 9.25f, cy + 1.5f), module, PsySeq::PROB_OFFSET + i));
         }
     }
 
+    // Adds the right-click menu: the voltage range submenu, "randomize/clear
+    // all step voltages", and "all probabilities 100% / randomize all
+    // probabilities".
     void appendContextMenu(ui::Menu *menu) override
     {
         PsySeq *module = dynamic_cast<PsySeq *>(this->module);
@@ -902,7 +946,7 @@ struct PsySeqWidget : ModuleWidget
                                              {
                                                  bool cur = (module->voltMin == R[i][0] && module->voltMax == R[i][1]);
                                                  sub->addChild(createMenuItem(string::f("%g to %g V", R[i][0], R[i][1]),
-                                                                              cur ? "✔" : "",
+                                                                              CHECKMARK(cur),
                                                                               [=]()
                                                                               { module->setVoltageRange(R[i][0], R[i][1]); }));
                                              }

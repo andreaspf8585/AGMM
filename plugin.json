@@ -122,7 +122,8 @@
       "name": "LSDrone",
       "description": "drone",
       "tags": [
-        "Oscillator","Effect"
+        "Oscillator",
+        "Effect"
       ]
     },
     {
@@ -130,7 +131,8 @@
       "name": "Pharmakon",
       "description": "drone",
       "tags": [
-        "Granular","Effect"
+        "Granular",
+        "Effect"
       ]
     },
     {
@@ -424,6 +426,14 @@
       "description": "LFO based on 3 body problem",
       "tags": [
         "LFO"
+      ]
+    },
+    {
+      "slug": "Ladder",
+      "name": "Ladder",
+      "description": "VCO Jacob's Ladder",
+      "tags": [
+        "VCO"
       ]
     }
   ]

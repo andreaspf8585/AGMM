@@ -10,6 +10,47 @@
 #include <string>
 #include <vector>
 
+// ============================================================================
+// Quantara
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Quantara is a 24 HP polyphonic pitch quantizer. It takes a polyphonic
+// 1 V/oct input and snaps each voice to the nearest (or nearest-above /
+// nearest-below) note of a selectable scale, with optional glide and a
+// semitone transpose. Each voice emits a short note-change trigger whenever
+// its quantized note changes.
+//
+// Quantization can either run continuously (unclocked) or as a sample & hold
+// on every rising clock edge. The module supports:
+//   - 16 built-in scales plus a user-editable custom scale.
+//   - Root transposition via knob + 1 V/oct CV.
+//   - Scale selection via knob + 0..10 V CV.
+//   - Semitone transpose via knob + 1 V/oct CV.
+//   - Glide (portamento) between successive output pitches.
+//   - Three quantize modes: nearest, down (floor), up (ceil).
+//
+// The display combines:
+//   - a 12-note pitch-class wheel showing the scale polygon, root note,
+//     active voices and their correction lines,
+//   - a transfer staircase plot of input-vs-output semitones with the
+//     active channel highlighted plus a short trail,
+//   - a clickable mini keyboard for toggling notes of the custom scale
+//     (clicking a key edits the custom scale and switches to it).
+//
+// File structure:
+//   1. Constants and layout (24 HP = 360x380 px).
+//   2. Scale tables, note names and the shared quantizer maths.
+//   3. Quantara module: parameters / CV, polyphonic quantize+glide DSP,
+//      caching, JSON persistence, display snapshots.
+//   4. Anonymous-namespace UI: colour helpers, QZPanelBackground,
+//      QZKnobArcs, QZDisplayWidget (wheel + staircase + keyboard).
+//   5. QuantaraWidget: places controls, jacks and the display, plus the
+//      right-click menu (scale, quantize mode, custom-scale actions).
+//   6. Model registration.
+// ============================================================================
+
 // ------------------------------------------------------------
 // Constants
 // ------------------------------------------------------------
@@ -21,36 +62,39 @@ static const float QZ_TRAIL_HZ = 60.f;
 static const float QZ_PANEL_W = RACK_GRID_WIDTH * 24; // 360
 static const float QZ_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Display
+// Display (228 x 140): header row, wheel + transfer plot, keyboard, caption row
 static const float QZ_DISP_W = 228.f;
 static const float QZ_DISP_H = 140.f;
 static const float QZ_DISP_X = (QZ_PANEL_W - QZ_DISP_W) / 2.f; // 66
 static const float QZ_DISP_Y = 44.f;
 
-// Pitch-class wheel (display-local)
-static const float QZ_WC_X = 47.f, QZ_WC_Y = 58.f, QZ_WC_R = 29.f;
+// Pitch-class wheel (display-local); note labels sit 9 px outside the ring
+static const float QZ_WC_X = 44.f, QZ_WC_Y = 55.5f, QZ_WC_R = 26.f;
 
 // Transfer plot (display-local)
-static const float QZ_PX0 = 106.f, QZ_PX1 = 220.f;
-static const float QZ_PY0 = 21.f, QZ_PY1 = 94.f;
+static const float QZ_PX0 = 100.f, QZ_PX1 = 220.f;
+static const float QZ_PY0 = 19.f, QZ_PY1 = 93.f;
 
 // Keyboard (display-local)
 static const float QZ_KB_X0 = 12.f, QZ_KB_X1 = 216.f;
-static const float QZ_KB_Y0 = 102.f, QZ_KB_WH = 30.f, QZ_KB_BH = 18.f, QZ_KB_BW = 17.f;
+static const float QZ_KB_Y0 = 100.f, QZ_KB_WH = 24.f, QZ_KB_BH = 14.f, QZ_KB_BW = 17.f;
 
-// Side knobs: ROOT, SCALE (left) / SHIFT, GLIDE (right)
-static const float QZ_KNOB_X[4] = {28.f, 28.f, 332.f, 332.f};
-static const float QZ_KNOB_Y[4] = {84.f, 150.f, 84.f, 150.f};
+// Side cells: ROOT, SCALE (left) / SHIFT, GLIDE (right); knob 36 px below the cell top
+static const float QZ_SIDE_W = 50.f, QZ_SIDE_H = 62.f;
+static const float QZ_KNOB_X[4] = {33.f, 33.f, 327.f, 327.f};
+static const float QZ_SIDE_TOP[4] = {44.f, 122.f, 44.f, 122.f};
+static const float QZ_KNOB_Y[4] = {80.f, 158.f, 80.f, 158.f};
 
-// CV row
+// CV row and I/O row: 52 x 52 cells, jack 32 px below the cell top
+static const float QZ_CELL_W = 52.f, QZ_CELL_H = 52.f;
 static const float QZ_CV_SEC_Y = 204.f;
-static const float QZ_CV_Y = 240.f;
+static const float QZ_CV_TOP = 214.f;
 static const float QZ_CV_X[5] = {60.f, 120.f, 180.f, 240.f, 300.f};
-
-// I/O row
-static const float QZ_IO_SEC_Y = 276.f;
-static const float QZ_IO_Y = 322.f;
+static const float QZ_IO_SEC_Y = 282.f;
+static const float QZ_IO_TOP = 292.f;
 static const float QZ_IO_X[3] = {120.f, 180.f, 240.f};
+// Returns the jack centre y for the I/O cell whose top edge is `top`.
+static inline float qzJackY(float top) { return top + 32.f; }
 
 // ------------------------------------------------------------
 // Scales and quantizer maths (shared by DSP and display)
@@ -89,14 +133,18 @@ static const uint16_t QZ_SCALE_MASK[QZ_NUM_SCALES - 1] = {
     0x5B3  // 0 1 4 5 7 8 10
 };
 
+// Returns a positive modulo into 0..b-1 (works for negative a).
 static inline int qzMod(int a, int b) { return ((a % b) + b) % b; }
 
+// Rotates a 12-bit relative mask by `root` semitones (circular shift,
+// wrapping bits around), giving a mask of absolute pitch classes.
 static inline uint16_t qzRot(uint16_t rel, int root)
 {
     root = qzMod(root, 12);
     return (uint16_t)((((int)rel << root) | ((int)rel >> (12 - root))) & 0xFFF);
 }
 
+// Returns the number of set bits in a 12-bit mask.
 static inline int qzCount(uint16_t m)
 {
     int n = 0;
@@ -106,6 +154,9 @@ static inline int qzCount(uint16_t m)
 }
 
 // n = pitch in semitones (float), mask = absolute pitch classes, mode 0 nearest / 1 down / 2 up
+// Quantizes a (fractional) semitone value to the nearest allowed note, or
+// the closest allowed note at or below (mode 1) / at or above (mode 2) it.
+// If the mask is empty the input is simply rounded (bypass behaviour).
 static inline int qzQuant(float n, uint16_t mask, int mode)
 {
     if (mask == 0)
@@ -147,6 +198,8 @@ static inline int qzQuant(float n, uint16_t mask, int mode)
 // ------------------------------------------------------------
 // Module
 // ------------------------------------------------------------
+// Polyphonic pitch quantizer with glide, transpose, clocked sample & hold
+// and a user-editable custom scale.
 struct Quantara : Module
 {
     enum ParamId
@@ -218,6 +271,10 @@ struct Quantara : Module
     int trailCount = 0;
     float trailTimer = 0.f;
 
+    // Constructor: configures the root / scale / shift / glide parameters
+    // (with the display names built from the scale tables), the six inputs,
+    // the stereo (poly) outputs and the bypass, then marks every voice as
+    // not yet quantized.
     Quantara()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -246,12 +303,17 @@ struct Quantara : Module
         configOutput(OUT_OUTPUT, "Quantized pitch (1 V/oct, polyphonic)");
         configOutput(TRIG_OUTPUT, "Note change trigger (polyphonic)");
 
+        configBypass(IN_INPUT, OUT_OUTPUT);
+
         for (int c = 0; c < QZ_MAX_CH; ++c)
             lastNote[c] = INT_MIN;
     }
 
-    void onReset() override
+    // Rack reset hook: clears the custom scale, quantize mode, per-voice
+    // DSP/cache state, flashes and trail buffer.
+    void onReset(const ResetEvent &e) override
     {
+        Module::onReset(e);
         userMask = 0xAB5;
         mode = MODE_NEAREST;
         std::memset(heldIn, 0, sizeof(heldIn));
@@ -266,12 +328,17 @@ struct Quantara : Module
         trailTimer = 0.f;
     }
 
+    // Returns the relative (root-agnostic) 12-bit scale mask for scale index
+    // `s`: a built-in mask for presets 0..15, or the custom mask otherwise.
     uint16_t relMaskFor(int s) const
     {
         return (s >= 0 && s < QZ_NUM_SCALES - 1) ? QZ_SCALE_MASK[s] : (uint16_t)(userMask & 0xFFF);
     }
 
     // Toggle one absolute pitch class; edits the custom scale
+    // Flips the bit for absolute pitch class `absPc` in the custom scale
+    // (relative to the current display root) and switches the scale
+    // parameter to "Custom". Called by clicking the on-display keyboard.
     void toggleNote(int absPc)
     {
         int bit = qzMod(absPc - vRoot, 12);
@@ -281,6 +348,11 @@ struct Quantara : Module
         params[SCALE_PARAM].setValue((float)(QZ_NUM_SCALES - 1));
     }
 
+    // Main audio callback: reads all parameters + CVs, computes the absolute
+    // scale mask and a cache key, handles the optional clock sample & hold,
+    // then per channel quantizes the input (with caching), applies glide,
+    // adds the transpose and writes the pitch + trigger outputs. Also
+    // updates the display snapshot and trail buffer.
     void process(const ProcessArgs &args) override
     {
         const float dt = args.sampleTime;
@@ -394,6 +466,7 @@ struct Quantara : Module
         }
     }
 
+    // Serialises the custom scale mask and the quantize mode.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -402,13 +475,15 @@ struct Quantara : Module
         return root;
     }
 
+    // Restores the custom scale mask (12-bit) and the quantize mode from a
+    // patch, clamping each to its valid range.
     void dataFromJson(json_t *root) override
     {
         json_t *j = json_object_get(root, "userMask");
-        if (j)
+        if (j && json_is_integer(j))
             userMask = (uint16_t)(json_integer_value(j) & 0xFFF);
         j = json_object_get(root, "mode");
-        if (j)
+        if (j && json_is_integer(j))
             mode = rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_MODES - 1);
     }
 };
@@ -420,79 +495,33 @@ namespace
 {
     namespace ag = agmm;
 
+    // Returns the bright highlight colour used for active notes / line work.
     NVGcolor colBright() { return nvgRGB(0x7a, 0xec, 0xff); }
-    NVGcolor colWarm() { return nvgRGB(0xff, 0x9c, 0x6a); }
+    // Returns the warm accent colour used for the root note / input markers.
+    NVGcolor colWarm() { return ag::warm(); }
 
     const int QZ_WPC[7] = {0, 2, 4, 5, 7, 9, 11}; // white keys
     const int QZ_BPC[5] = {1, 3, 6, 8, 10};       // black keys
     const int QZ_BIDX[5] = {0, 1, 3, 4, 5};       // white key to the left of each black key
 
+    // Maps a semitone value t (0..12) to an x pixel inside the transfer plot.
     inline float qzPx(float t) { return QZ_PX0 + t / 12.f * (QZ_PX1 - QZ_PX0); }
+    // Maps a semitone value v (-1..13) to a y pixel inside the transfer plot
+    // (higher notes higher on the plot).
     inline float qzPy(float v) { return QZ_PY1 - (v + 1.f) / 14.f * (QZ_PY1 - QZ_PY0); }
 
-    void plate(NVGcontext *vg, float cx, float cy, float w, float h)
-    {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, cx - w / 2.f, cy - h / 2.f, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void ring(NVGcontext *vg, float cx, float cy, float r)
-    {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-                                           nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // Tick arc around a knob (n ticks across the 270 degree sweep)
-    void drawKnobTicks(NVGcontext *vg, float cx, float cy, float r0, float r1, int n = 11)
-    {
-        nvgLineCap(vg, NVG_ROUND);
-        for (int i = 0; i < n; ++i)
-        {
-            float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-            bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-            float ra = major ? r0 - 1.5f : r0;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-            nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-            nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-            nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
-            nvgStroke(vg);
-        }
-    }
-
     // ------------------------------------------------------------
-    // Panel background
+    // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the four side knob cells,
+    // the CV INPUTS row, the I/O row (outputs tinted), and the footer text.
     struct QZPanelBackground : TransparentWidget
     {
         QZPanelBackground() { box.size = Vec(QZ_PANEL_W, QZ_PANEL_H); }
 
-        // kind: 0 = input (orange), 1 = output (cyan)
-        void portCell(NVGcontext *vg, float cx, float cy, const char *txt, int kind)
-        {
-            const float w = 30.f, h = 44.f;
-            plate(vg, cx, cy - 4.f, w, h);
-
-            NVGcolor c = (kind == 0) ? nvgRGBA(0xff, 0x9c, 0x6a, 170) : nvgRGBA(0x3d, 0xe0, 0xff, 170);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - w / 2.f + 6.f, cy - 4.f - h / 2.f + 1.5f, w - 12.f, 1.8f, 0.9f);
-            nvgFillColor(vg, c);
-            nvgFill(vg);
-
-            ag::text(vg, cx, cy - 19.f, txt, 7.f, ag::dim(), ag::ALIGN_C, 1.f);
-        }
-
+        // Draws all static panel art: base panel, bezel, side ROOT/SCALE/
+        // SHIFT/GLIDE cells, the five CV INPUTS cells, the three I/O cells
+        // (outputs tinted) and the "1 V/OCT - POLYPHONIC - 12 NOTE" footer.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -502,43 +531,42 @@ namespace
 
             // ---- side knobs ----
             const char *knobL[4] = {"ROOT", "SCALE", "SHIFT", "GLIDE"};
-            const int knobN[4] = {12, 17, 9, 11};
             for (int k = 0; k < 4; ++k)
-            {
-                ring(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k], 17.f);
-                drawKnobTicks(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k], 21.f, 24.f, knobN[k]);
-                ag::text(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k] + 29.f, knobL[k], 7.f, ag::dim(), ag::ALIGN_C, 1.f);
-            }
+                ag::cell(vg, QZ_KNOB_X[k], QZ_SIDE_TOP[k], QZ_SIDE_W, QZ_SIDE_H, knobL[k]);
 
             // ---- CV inputs ----
             ag::sectionHeader(vg, QZ_PANEL_W, QZ_CV_SEC_Y, "CV INPUTS");
             const char *cv[5] = {"CLOCK", "ROOT", "SCALE", "SHIFT", "GLIDE"};
             for (int i = 0; i < 5; ++i)
-                portCell(vg, QZ_CV_X[i], QZ_CV_Y, cv[i], 0);
+                ag::cell(vg, QZ_CV_X[i], QZ_CV_TOP, QZ_CELL_W, QZ_CELL_H, cv[i]);
 
-            // ---- I/O ----
+            // ---- I/O (outputs tinted) ----
             ag::sectionHeader(vg, QZ_PANEL_W, QZ_IO_SEC_Y, "I / O");
             const char *io[3] = {"IN", "OUT", "TRIG"};
-            const int ioKind[3] = {0, 1, 1};
             for (int i = 0; i < 3; ++i)
-                portCell(vg, QZ_IO_X[i], QZ_IO_Y, io[i], ioKind[i]);
+                ag::cell(vg, QZ_IO_X[i], QZ_IO_TOP, QZ_CELL_W, QZ_CELL_H, io[i], i > 0);
 
-            ag::text(vg, QZ_PANEL_W / 2.f, 350.f, "1 V/OCT  -  POLYPHONIC  -  12 NOTE", 6.f,
-                     ag::withA(ag::dim(), 0.6f), ag::ALIGN_C, 1.5f);
+            ag::text(vg, QZ_PANEL_W / 2.f, 354.f, "1 V/OCT  -  POLYPHONIC  -  12 NOTE", 7.f,
+                     ag::withA(ag::dim(), 0.7f), ag::ALIGN_C, 1.f);
 
             Widget::draw(args);
         }
     };
 
     // ------------------------------------------------------------
-    // Live value arcs around the knobs
+    // Live value arcs around the knobs (flat, hairline-width)
     // ------------------------------------------------------------
+    // Draws a track arc around each of the four side knobs plus a coloured
+    // arc showing the current value; the SHIFT arc is bipolar (from centre,
+    // warm when negative).
     struct QZKnobArcs : TransparentWidget
     {
         Quantara *module = nullptr;
 
         QZKnobArcs(Quantara *m) : module(m) { box.size = Vec(QZ_PANEL_W, QZ_PANEL_H); }
 
+        // Draws the value arcs for the four knobs (skipping any arc whose
+        // change from the origin is negligible).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -572,12 +600,6 @@ namespace
 
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, R, s, e, NVG_CW);
-                nvgStrokeColor(vg, ag::withA(col, 0.18f));
-                nvgStrokeWidth(vg, 5.f);
-                nvgStroke(vg);
-
-                nvgBeginPath(vg);
-                nvgArc(vg, cx, cy, R, s, e, NVG_CW);
                 nvgStrokeColor(vg, ag::withA(col, 0.95f));
                 nvgStrokeWidth(vg, 2.f);
                 nvgStroke(vg);
@@ -588,6 +610,9 @@ namespace
     // ------------------------------------------------------------
     // Display: pitch-class wheel + transfer staircase + clickable keyboard
     // ------------------------------------------------------------
+    // Live display combining the pitch-class wheel, the transfer staircase
+    // and the clickable scale keyboard. Falls back to demo data in the
+    // module browser.
     struct QZDisplayWidget : Widget
     {
         Quantara *module = nullptr;
@@ -600,6 +625,9 @@ namespace
         }
 
         // ---- keyboard hit test ----
+        // Returns the pitch class under point p, or -1 if p is not over the
+        // keyboard (black keys are checked first, then the white key under
+        // the horizontal position).
         int keyAt(Vec p) const
         {
             const float ww = (QZ_KB_X1 - QZ_KB_X0) / 7.f;
@@ -619,6 +647,8 @@ namespace
         }
 
         // ---- mouse ----
+        // Left-click over a key toggles that pitch class in the custom
+        // scale (and switches the module to the custom scale).
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
@@ -634,6 +664,8 @@ namespace
             Widget::onButton(e);
         }
 
+        // Updates the hover key (used for the hovered-key highlight) and
+        // consumes the event when over a key.
         void onHover(const HoverEvent &e) override
         {
             hoverKey = keyAt(e.pos);
@@ -643,6 +675,7 @@ namespace
                 Widget::onHover(e);
         }
 
+        // Clears the hover key when the pointer leaves the widget.
         void onLeave(const LeaveEvent &e) override
         {
             hoverKey = -1;
@@ -650,11 +683,22 @@ namespace
         }
 
         // ---- static background ----
+        // Draws the display screen, the header divider, the wheel's two
+        // rings, the transfer plot frame, the plot grids (semitone and
+        // octave lines), and the keyboard backdrop.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
 
             ag::screen(vg, 0.f, 0.f, QZ_DISP_W, QZ_DISP_H);
+
+            // Header hairline: the readouts live above it
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 6.f, 14.5f);
+            nvgLineTo(vg, QZ_DISP_W - 6.f, 14.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
 
             // Wheel rings
             nvgBeginPath(vg);
@@ -668,13 +712,7 @@ namespace
             nvgStroke(vg);
 
             // Plot frame
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, QZ_PX0, QZ_PY0, QZ_PX1 - QZ_PX0, QZ_PY1 - QZ_PY0, 2.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 4));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            ag::plotFrame(vg, QZ_PX0, QZ_PY0, QZ_PX1 - QZ_PX0, QZ_PY1 - QZ_PY0);
 
             // Plot grid: one line per semitone, brighter on octaves
             for (int t = 1; t < 12; ++t)
@@ -709,6 +747,12 @@ namespace
         }
 
         // ---- live content ----
+        // Layer-1 overlay: draws the pitch-class wheel (scale polygon,
+        // correction lines, note dots/labels, centre count), the transfer
+        // staircase (ticks, identity line, staircase curve, trail and
+        // channel markers), the keyboard (scale/root/active-key tinting,
+        // hover outline, root bar, note letters), and the header readouts
+        // plus the caption row.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -784,6 +828,8 @@ namespace
             }
             nCh = rack::math::clamp(nCh, 0, QZ_MAX_CH);
             scale = rack::math::clamp(scale, 0, QZ_NUM_SCALES - 1);
+            mode = rack::math::clamp(mode, 0, (int)Quantara::NUM_MODES - 1);
+            trCount = rack::math::clamp(trCount, 0, QZ_TRAIL_N);
 
             bool act[12] = {};
             for (int c = 0; c < nCh; ++c)
@@ -795,6 +841,8 @@ namespace
             // ================= pitch-class wheel =================
             {
                 const float cx = QZ_WC_X, cy = QZ_WC_Y, R = QZ_WC_R;
+                // Returns the 2D position (x, y) on the wheel at a
+                // fractional pitch class `pcf` and radius `rad`.
                 auto pcPos = [&](float pcf, float rad, float &x, float &y)
                 {
                     float a = pcf / 12.f * 2.f * (float)M_PI - (float)M_PI / 2.f;
@@ -844,7 +892,7 @@ namespace
                     nvgMoveTo(vg, mx, my);
                     nvgLineTo(vg, tx, ty);
                     nvgStrokeColor(vg, ag::withA(colWarm(), c == 0 ? 0.65f : 0.25f));
-                    nvgStrokeWidth(vg, c == 0 ? 1.1f : 0.8f);
+                    nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
 
                     nvgBeginPath(vg);
@@ -853,7 +901,7 @@ namespace
                     nvgFill(vg);
                 }
 
-                // note dots + labels
+                // note dots + labels (labels sit 9 px outside the ring)
                 for (int pc = 0; pc < 12; ++pc)
                 {
                     bool in = (mask >> pc) & 1;
@@ -868,7 +916,7 @@ namespace
                     if (act[pc])
                     {
                         nvgBeginPath(vg);
-                        nvgCircle(vg, x, y, 8.f);
+                        nvgCircle(vg, x, y, 6.5f);
                         nvgFillColor(vg, ag::withA(col, 0.22f + 0.30f * f));
                         nvgFill(vg);
                     }
@@ -893,8 +941,8 @@ namespace
                         nvgStroke(vg);
                     }
 
-                    ag::text(vg, lx, ly, QZ_NOTE_NAMES[pc], 5.5f,
-                             isRoot ? colWarm() : (in ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 130)),
+                    ag::text(vg, lx, ly, QZ_NOTE_NAMES[pc], 7.f,
+                             isRoot ? colWarm() : (in ? colBright() : ag::withA(ag::dim(), 0.55f)),
                              ag::ALIGN_C, 0.f);
                 }
 
@@ -905,9 +953,9 @@ namespace
                     snprintf(b, sizeof(b), "%d", cnt);
                 else
                     snprintf(b, sizeof(b), "--");
-                ag::text(vg, cx, cy - 1.5f, b, 13.f, colBright(), ag::ALIGN_C, 0.f);
-                ag::text(vg, cx, cy + 8.f, cnt > 0 ? "NOTES" : "BYPASS", 5.f, ag::dim(),
-                         ag::ALIGN_C, 1.f);
+                ag::text(vg, cx, cy - 4.f, b, 13.f, colBright(), ag::ALIGN_C, 0.f);
+                ag::text(vg, cx, cy + 8.f, cnt > 0 ? "NOTES" : "BYPASS", 7.f, ag::dim(),
+                         ag::ALIGN_C, 0.f);
             }
 
             // ================= transfer staircase =================
@@ -925,7 +973,7 @@ namespace
                     nvgMoveTo(vg, QZ_PX1 - 4.f, y + 0.5f);
                     nvgLineTo(vg, QZ_PX1, y + 0.5f);
                     nvgStrokeColor(vg, ag::withA(ag::accent(), 0.55f));
-                    nvgStrokeWidth(vg, 1.2f);
+                    nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
                 for (int t = 0; t <= 12; ++t)
@@ -937,7 +985,7 @@ namespace
                     nvgMoveTo(vg, x + 0.5f, QZ_PY1 - 4.f);
                     nvgLineTo(vg, x + 0.5f, QZ_PY1);
                     nvgStrokeColor(vg, ag::withA(ag::accent(), 0.55f));
-                    nvgStrokeWidth(vg, 1.2f);
+                    nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
 
@@ -970,19 +1018,11 @@ namespace
                     nvgLineTo(vg, sx[i], sy[i]);
                 nvgLineTo(vg, sx[NP - 1], QZ_PY1);
                 nvgClosePath(vg);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, QZ_PY0, 0, QZ_PY1,
-                                                   ag::withA(ag::accent(), 0.18f), ag::withA(ag::accent(), 0.02f)));
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.10f));
                 nvgFill(vg);
 
                 nvgLineCap(vg, NVG_ROUND);
                 nvgLineJoin(vg, NVG_ROUND);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, sx[0], sy[0]);
-                for (int i = 1; i < NP; ++i)
-                    nvgLineTo(vg, sx[i], sy[i]);
-                nvgStrokeColor(vg, ag::withA(ag::accent(), 0.14f));
-                nvgStrokeWidth(vg, 4.5f);
-                nvgStroke(vg);
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, sx[0], sy[0]);
                 for (int i = 1; i < NP; ++i)
@@ -1034,13 +1074,12 @@ namespace
                         nvgStroke(vg);
 
                         nvgBeginPath(vg);
-                        nvgCircle(vg, x, y, 5.f);
-                        nvgFillColor(vg, ag::withA(colBright(), 0.25f));
-                        nvgFill(vg);
-                        nvgBeginPath(vg);
-                        nvgCircle(vg, x, y, 2.4f);
+                        nvgCircle(vg, x, y, 3.2f);
                         nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.97f));
                         nvgFill(vg);
+                        nvgStrokeColor(vg, ag::withA(colBright(), 0.9f));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
                     }
                     else
                     {
@@ -1052,16 +1091,14 @@ namespace
                 }
 
                 nvgRestore(vg);
-
-                const char *mn[3] = {"NEAREST", "DOWN", "UP"};
-                ag::text(vg, QZ_PX0 + 3.f, QZ_PY0 + 5.f, mn[rack::math::clamp(mode, 0, 2)], 5.5f,
-                         nvgRGBA(0x8a, 0x95, 0xa5, 190), ag::ALIGN_L, 1.f);
             }
 
             // ================= keyboard =================
             {
                 const float ww = (QZ_KB_X1 - QZ_KB_X0) / 7.f;
 
+                // Draws one mini-keyboard key with scale/root/active tint,
+                // hover outline, root bar and (for white keys) the note name.
                 auto drawKey = [&](float x, float y, float w, float h, int pc, bool black)
                 {
                     bool in = (mask >> pc) & 1;
@@ -1069,14 +1106,6 @@ namespace
                     bool a = act[pc];
                     float f = pcFlash[pc];
                     bool hv = (hoverKey == pc);
-
-                    if (a)
-                    {
-                        nvgBeginPath(vg);
-                        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 3.f);
-                        nvgFillColor(vg, ag::withA(ag::accent(), 0.14f + 0.28f * f));
-                        nvgFill(vg);
-                    }
 
                     nvgBeginPath(vg);
                     nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
@@ -1088,8 +1117,7 @@ namespace
                         NVGcolor tint = isRoot ? colWarm() : ag::accent();
                         nvgBeginPath(vg);
                         nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                        nvgFillPaint(vg, nvgLinearGradient(vg, 0, y, 0, y + h,
-                                                           ag::withA(tint, 0.10f), ag::withA(tint, 0.42f)));
+                        nvgFillColor(vg, ag::withA(tint, 0.28f));
                         nvgFill(vg);
                     }
                     if (a)
@@ -1116,8 +1144,9 @@ namespace
                     }
                     if (!black)
                     {
-                        ag::text(vg, x + w / 2.f, y + h - 8.f, QZ_NOTE_NAMES[pc], 6.f,
-                                 in ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 150),
+                        // single-letter name, centred in the key above the root bar
+                        ag::text(vg, x + w / 2.f, y + h - 9.f, QZ_NOTE_NAMES[pc], 7.f,
+                                 in ? colBright() : ag::withA(ag::dim(), 0.6f),
                                  ag::ALIGN_C, 0.f);
                     }
                 };
@@ -1131,7 +1160,7 @@ namespace
                 }
             }
 
-            // ================= readouts =================
+            // ================= header readouts + caption row =================
             {
                 char buf[48];
                 NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
@@ -1140,60 +1169,38 @@ namespace
 
                 // clock lamp
                 nvgBeginPath(vg);
-                nvgCircle(vg, 8.f, 7.f, 5.f);
-                nvgFillColor(vg, ag::withA(ag::accent(), 0.20f * clockFlash));
-                nvgFill(vg);
-                nvgBeginPath(vg);
-                nvgCircle(vg, 8.f, 7.f, 2.2f);
+                nvgCircle(vg, 8.f, 7.f, 2.8f);
                 nvgFillColor(vg, ag::withA(ag::accent(), (clocked ? 0.25f : 0.12f) + 0.75f * clockFlash));
                 nvgFill(vg);
 
                 snprintf(buf, sizeof(buf), "%s %s", QZ_NOTE_NAMES[qzMod(root, 12)], QZ_SCALE_SHORT[scale]);
-                ag::text(vg, 15.f, 7.f, buf, 7.f, c1, ag::ALIGN_L, 1.f);
+                ag::text(vg, 15.f, 7.f, buf, 7.f, c1, ag::ALIGN_L, 0.5f);
 
                 snprintf(buf, sizeof(buf), "SHIFT %+d", shift);
-                ag::text(vg, QZ_DISP_W / 2.f + 14.f, 7.f, buf, 7.f, cm, ag::ALIGN_C, 1.f);
+                ag::text(vg, QZ_DISP_W / 2.f + 36.f, 7.f, buf, 7.f, cm, ag::ALIGN_C, 0.5f);
 
                 if (nCh > 0)
                     snprintf(buf, sizeof(buf), "CH %d %s", nCh, clocked ? "HOLD" : "LIVE");
                 else
                     snprintf(buf, sizeof(buf), "NO INPUT");
-                ag::text(vg, QZ_DISP_W - 5.f, 7.f, buf, 7.f, cd, ag::ALIGN_R, 1.f);
+                ag::text(vg, QZ_DISP_W - 6.f, 7.f, buf, 7.f, cd, ag::ALIGN_R, 0.5f);
 
-                // caption
+                // caption row under the keyboard: hint / hover text, quantize mode on the right
                 if (hoverKey >= 0)
                 {
                     bool on = (mask >> hoverKey) & 1;
-                    snprintf(buf, sizeof(buf), "%s %s  -  CLICK TO TOGGLE",
+                    snprintf(buf, sizeof(buf), "%s %s - CLICK TO TOGGLE",
                              QZ_NOTE_NAMES[hoverKey], on ? "ON" : "OFF");
-                    ag::text(vg, QZ_DISP_W / 2.f, 136.5f, buf, 5.5f, c1, ag::ALIGN_C, 1.f);
+                    ag::text(vg, 8.f, 134.f, buf, 7.f, c1, ag::ALIGN_L, 0.5f);
                 }
                 else
                 {
-                    ag::text(vg, QZ_DISP_W / 2.f, 136.5f, "CLICK KEYS TO EDIT THE SCALE", 5.5f,
-                             nvgRGBA(0x8a, 0x95, 0xa5, 150), ag::ALIGN_C, 1.f);
+                    ag::text(vg, 8.f, 134.f, "CLICK KEYS TO EDIT SCALE", 7.f,
+                             ag::withA(ag::dim(), 0.7f), ag::ALIGN_L, 0.5f);
                 }
+                static const char *mn[3] = {"NEAREST", "DOWN", "UP"};
+                ag::text(vg, QZ_DISP_W - 6.f, 134.f, mn[mode], 7.f, ag::violet(), ag::ALIGN_R, 0.5f);
             }
-
-            // ================= scanlines, vignette, glass =================
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)QZ_DISP_H; y += 3)
-                nvgRect(vg, 0, y + 1, QZ_DISP_W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, QZ_DISP_W, QZ_DISP_H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, QZ_DISP_W / 2.f, QZ_DISP_H / 2.f,
-                                               QZ_DISP_W * 0.45f, QZ_DISP_W * 0.85f,
-                                               nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 120)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, QZ_DISP_W, QZ_DISP_H * 0.30f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, QZ_DISP_H * 0.30f,
-                                               nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
 
             nvgRestore(vg);
 
@@ -1204,10 +1211,16 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, knob value arcs, screws, the live
+// display, the four side knobs, the five CV input jacks and the three I/O
+// jacks, plus the right-click menu.
 // ------------------------------------------------------------
 struct QuantaraWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, knob value arcs, screws,
+    // display, the four side knobs (ROOT / SCALE / SHIFT / GLIDE), the five
+    // CV inputs (CLOCK / ROOT / SCALE / SHIFT / GLIDE) and the three I/O
+    // jacks (IN / OUT / TRIG).
     QuantaraWidget(Quantara *module)
     {
         setModule(module);
@@ -1231,18 +1244,24 @@ struct QuantaraWidget : ModuleWidget
         }
 
         // CV row
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[0], QZ_CV_Y), module, Quantara::CLOCK_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[1], QZ_CV_Y), module, Quantara::ROOT_CV_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[2], QZ_CV_Y), module, Quantara::SCALE_CV_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[3], QZ_CV_Y), module, Quantara::SHIFT_CV_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[4], QZ_CV_Y), module, Quantara::GLIDE_CV_INPUT));
+        const float cvY = qzJackY(QZ_CV_TOP);
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[0], cvY), module, Quantara::CLOCK_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[1], cvY), module, Quantara::ROOT_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[2], cvY), module, Quantara::SCALE_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[3], cvY), module, Quantara::SHIFT_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_CV_X[4], cvY), module, Quantara::GLIDE_CV_INPUT));
 
         // I/O row
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[0], QZ_IO_Y), module, Quantara::IN_INPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[1], QZ_IO_Y), module, Quantara::OUT_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[2], QZ_IO_Y), module, Quantara::TRIG_OUTPUT));
+        const float ioY = qzJackY(QZ_IO_TOP);
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[0], ioY), module, Quantara::IN_INPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[1], ioY), module, Quantara::OUT_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(QZ_IO_X[2], ioY), module, Quantara::TRIG_OUTPUT));
     }
 
+    // Adds the right-click menu: a "Scale" submenu with all scale names, a
+    // "Quantize mode" submenu (nearest / down / up), and a "Custom scale"
+    // submenu with "Copy current scale", "Clear all notes" and "All notes on"
+    // actions.
     void appendContextMenu(ui::Menu *menu) override
     {
         Quantara *module = dynamic_cast<Quantara *>(this->module);
@@ -1257,7 +1276,7 @@ struct QuantaraWidget : ModuleWidget
                                              for (int i = 0; i < QZ_NUM_SCALES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(QZ_SCALE_FULL[i],
-                                                                                  (module->vScale == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->vScale == i),
                                                                                   [=]()
                                                                                   { module->params[Quantara::SCALE_PARAM].setValue((float)i); }));
                                              }
@@ -1270,7 +1289,7 @@ struct QuantaraWidget : ModuleWidget
                                              for (int i = 0; i < Quantara::NUM_MODES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(names[i],
-                                                                                  (module->mode == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->mode == i),
                                                                                   [=]()
                                                                                   { module->mode = i; }));
                                              }

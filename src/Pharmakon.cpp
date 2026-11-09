@@ -11,22 +11,57 @@
 using namespace rack;
 
 // ============================================================
+//  Pharmakon
+// ============================================================
+//
+// OVERVIEW
+// --------
+// Pharmakon is a 26 HP stereo multi-FX module combining a modulated stereo
+// delay (with ping-pong option and detune/chorus tap), a small Schroeder
+// reverb, a distortion stage, a two-band shelving EQ, an output low-pass with
+// "spacy" LFO modulation, and an M/S stereo width control. Each of its 16 main
+// parameters has a dedicated CV input and attenuverter, and the display can
+// show the output waveform, a bar spectrum, or a continuous spectrum curve.
+//
+// Signal flow (audio path):
+//   in -> input gain -> DC block -> distortion -> delay (feedback, bright,
+//   ping-pong, detune) -> reverb (mix) -> M/S width -> EQ -> spacy LPF ->
+//   dry/wet -> output level -> EQ (optional post) -> bypass blend -> soft
+//   limit -> out.
+//
+// File structure:
+//   1. Constants, helpers (phClamp, phMapFreq, phSoftLimit), layout constants.
+//   2. Control table (PH_CTL) describing the 16 knobs.
+//   3. DSP building blocks: PHDelay, PHOnePole, PHBiquad, PHReverb.
+//   4. PHFFT: a small radix-2 FFT used only by the UI.
+//   5. Pharmakon module: parameter smoothing, the full audio chain, scope and
+//      analyzer data, and JSON persistence.
+//   6. Anonymous-namespace UI: PHPanelBackground, PHDisplayWidget,
+//      PHCvRangeWidget, PHChoiceItem, addChoice.
+//   7. PharmakonWidget: places all controls and the context menu.
+//   8. Model registration.
+// ============================================================
+
+// ============================================================
 //  Constants & helpers
 // ============================================================
 static constexpr float PH_PI = 3.14159265358979323846f;
 static constexpr float PH_TWO_PI = 2.0f * PH_PI;
 
+// Clamps v into [lo, hi].
 static inline float phClamp(float v, float lo, float hi)
 {
     return std::max(lo, std::min(v, hi));
 }
 
+// Maps a normalised value t (0..1) exponentially to [minFreq, maxFreq].
 static inline float phMapFreq(float t, float minFreq, float maxFreq)
 {
     return minFreq * std::pow(maxFreq / minFreq, t);
 }
 
 // Transparent up to 6 V, smooth knee towards a hard ceiling of 10 V
+// Soft-limits x: linear below ±6 V, then a tanh shoulder asymptoting to ±10 V.
 static inline float phSoftLimit(float x)
 {
     const float k = 6.f, r = 4.f;
@@ -69,9 +104,13 @@ static const float PH_ROW_TOP[3] = {98.f, 175.f, 252.f};
 static const float PH_STRIP_TOP = 329.f;
 static const float PH_STRIP_H = 28.f;
 
+// Horizontal centre of control column `col` (0..5) in the 6-column grid.
 static float phColX(int col) { return 195.f + ((float)col - 2.5f) * 63.f; }
+// Knob centre y for control row `row` (0..2).
 static float phKnobY(int row) { return PH_ROW_TOP[row] + 27.f; }
+// CV jack / attenuverter y for control row `row` (0..2).
 static float phJackY(int row) { return PH_ROW_TOP[row] + 60.f; }
+// Vertical centre of the I/O strip.
 static float phStripY() { return PH_STRIP_TOP + PH_STRIP_H / 2.f; }
 
 // ------------------------------------------------------------
@@ -115,6 +154,8 @@ struct PHDelay
     int writePos = 0;
     float sampleRate = 44100.f;
 
+    // Allocates the buffer to exactly `samples` slots (minimum 8), storing
+    // the current sample rate for second->sample conversions.
     void initSamples(int samples, float sr)
     {
         sampleRate = sr;
@@ -123,17 +164,21 @@ struct PHDelay
         writePos = 0;
     }
 
+    // Allocates the buffer for up to `maxDelaySec` seconds at sample rate sr
+    // (with a small safety margin).
     void init(float maxDelaySec, float sr)
     {
         initSamples((int)(maxDelaySec * sr) + 4, sr);
     }
 
+    // Zeroes the buffer and resets the write position.
     void clear()
     {
         std::fill(buf.begin(), buf.end(), 0.f);
         writePos = 0;
     }
 
+    // Writes one sample at the write head and advances it (wrapping).
     void write(float s)
     {
         if (size <= 1)
@@ -144,6 +189,8 @@ struct PHDelay
     }
 
     // delay in samples; minimum is 1 sample because we read before we write
+    // Reads the buffer `d` samples behind the write head using linear
+    // interpolation, clamped to a safe range inside the buffer.
     float readSamples(float d) const
     {
         if (size <= 1)
@@ -162,6 +209,7 @@ struct PHDelay
         return buf[idx] * (1.f - frac) + buf[next] * frac;
     }
 
+    // Reads the buffer at a delay given in seconds.
     float read(float delaySec) const { return readSamples(delaySec * sampleRate); }
 };
 
@@ -173,6 +221,7 @@ struct PHOnePole
     float z = 0.f;
     float coeff = 1.f;
 
+    // Sets the one-pole cutoff in Hz, clamped to [1 Hz, 0.45*fs].
     void setCutoff(float freq, float sr)
     {
         if (freq < 1.f)
@@ -181,6 +230,8 @@ struct PHOnePole
             freq = sr * 0.45f;
         coeff = 1.f - std::exp(-PH_TWO_PI * freq / sr);
     }
+    // Processes one sample through the one-pole low-pass and returns the
+    // filtered output.
     float process(float in)
     {
         z += coeff * (in - z);
@@ -196,6 +247,8 @@ struct PHBiquad
     float b0 = 1.f, b1 = 0.f, b2 = 0.f, a1 = 0.f, a2 = 0.f;
     float z1 = 0.f, z2 = 0.f;
 
+    // Processes one sample through the biquad (direct form II transposed) and
+    // returns the filtered output.
     float process(float x)
     {
         float y = b0 * x + z1;
@@ -204,6 +257,8 @@ struct PHBiquad
         return y;
     }
 
+    // Copies only the filter coefficients (not the internal state) from `o`.
+    // Used to share coefficients between the L and R channels.
     void copyCoeffs(const PHBiquad &o)
     {
         b0 = o.b0;
@@ -213,6 +268,8 @@ struct PHBiquad
         a2 = o.a2;
     }
 
+    // Configures the biquad as an RBJ low shelf with corner `freq` Hz and
+    // `dB` gain, at sample rate sr.
     void setLowShelf(float freq, float dB, float sr)
     {
         freq = phClamp(freq, 10.f, sr * 0.45f);
@@ -229,6 +286,8 @@ struct PHBiquad
         a2 = ((A + 1.f) + (A - 1.f) * cw - tsa) / a0;
     }
 
+    // Configures the biquad as an RBJ high shelf with corner `freq` Hz and
+    // `dB` gain, at sample rate sr.
     void setHighShelf(float freq, float dB, float sr)
     {
         freq = phClamp(freq, 10.f, sr * 0.45f);
@@ -251,6 +310,7 @@ struct PHBiquad
 // ------------------------------------------------------------
 struct PHReverb
 {
+    // Comb filter: a damped feedback delay.
     struct Comb
     {
         PHDelay delay;
@@ -258,6 +318,8 @@ struct PHReverb
         float feedback = 0.f;
         PHOnePole lpf;
 
+        // Allocates the comb's delay line to `samples` slots and resets its
+        // damping filter.
         void init(int samples, float sr)
         {
             len = std::max(samples, 8);
@@ -265,6 +327,8 @@ struct PHReverb
             lpf.setCutoff(16000.f, sr);
             lpf.z = 0.f;
         }
+        // Runs one sample through the comb: reads the delayed output, damps
+        // it, and writes input + feedback back in.
         float process(float in)
         {
             float out = delay.readSamples((float)len);
@@ -274,17 +338,20 @@ struct PHReverb
         }
     };
 
+    // Schroeder all-pass used for diffusion.
     struct Allpass
     {
         PHDelay delay;
         int len = 8;
         float gain = 0.7f;
 
+        // Allocates the all-pass delay line to `samples` slots.
         void init(int samples, float sr)
         {
             len = std::max(samples, 8);
             delay.initSamples(len + 4, sr);
         }
+        // Runs one sample through the all-pass and returns its output.
         float process(float in)
         {
             float dly = delay.readSamples((float)len);
@@ -298,6 +365,8 @@ struct PHReverb
     Allpass allpassL[2], allpassR[2];
     float sampleRate = 44100.f;
 
+    // Allocates all combs and all-passes for the given sample rate, with
+    // slightly offset L/R delays for a wider stereo image.
     void init(float sr)
     {
         sampleRate = sr;
@@ -317,6 +386,8 @@ struct PHReverb
         }
     }
 
+    // Sets the reverb decay (0..1) and brightness (0..1), deriving the comb
+    // feedback and the comb damping cutoff.
     void setDecay(float decay, float brightness)
     {
         float fb = 0.6f + decay * 0.38f;
@@ -329,6 +400,8 @@ struct PHReverb
         }
     }
 
+    // Runs one stereo sample through the four parallel combs and two series
+    // all-passes per channel, writing the wet L/R outputs.
     void process(float inL, float inR, float &outL, float &outR)
     {
         float wetL = 0.f, wetR = 0.f;
@@ -360,6 +433,8 @@ struct PHFFT
     float window[N];
     int rev[N];
 
+    // Precomputes the twiddle factors, the Hann window, and the bit-reversal
+    // permutation table for an N-point FFT.
     PHFFT()
     {
         static_assert((1 << LOG2N) == N, "FFT size mismatch");
@@ -379,6 +454,8 @@ struct PHFFT
         }
     }
 
+    // Performs an in-place radix-2 forward FFT of `in`, writing the complex
+    // result into `re` and `im`. The input is windowed with a Hann window.
     void forward(const float *in, float *re, float *im) const
     {
         for (int i = 0; i < N; ++i)
@@ -514,6 +591,8 @@ struct Pharmakon : Module
     bool dispBypass = false, dispFreeze = false;
     float clipTimer = 0.f;
 
+    // Constructor: configures all 16 knobs and attenuverters from the PH_CTL
+    // table, the three switches (ping-pong, bypass, freeze), and the I/O.
     Pharmakon()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -540,6 +619,8 @@ struct Pharmakon : Module
     }
 
     // (Re)build everything that depends on the sample rate. Called from process().
+    // Reallocates all delay/reverb lines, resets filter/DC/LFO state, and
+    // recomputes the smoothing and DC-block coefficients.
     void setupDSP(float sr)
     {
         dspSr = sr;
@@ -566,6 +647,9 @@ struct Pharmakon : Module
         needSnap = true;
     }
 
+    // Returns the effective value of control `i`: the knob plus its CV scaled
+    // by the attenuverter (which sweeps the full parameter range at ±1),
+    // clamped to the parameter's [lo, hi] limits.
     float getCtl(int i)
     {
         const PHCtlSpec &s = PH_CTL[i];
@@ -580,6 +664,8 @@ struct Pharmakon : Module
         return phClamp(knob + cvScaled * attn * (s.hi - s.lo), s.lo, s.hi);
     }
 
+    // Serialises the CV range, view mode, EQ position, soft-clip toggle and
+    // the two shelf frequencies.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -592,6 +678,8 @@ struct Pharmakon : Module
         return root;
     }
 
+    // Restores the persisted settings from a patch, clamping each value to
+    // its valid range.
     void dataFromJson(json_t *root) override
     {
         if (json_t *j = json_object_get(root, "cvRangeMode"))
@@ -608,6 +696,12 @@ struct Pharmakon : Module
             hiFreq = phClamp((float)json_number_value(j), 1000.f, 12000.f);
     }
 
+    // Main audio callback: reads all controls (with CV/attenuverter),
+    // smooths them, runs the full DSP chain (input gain, DC block, distortion,
+    // delay with feedback/freeze/ping-pong/detune, reverb, M/S width, EQ,
+    // spacy LPF, dry/wet, output level, optional post EQ, click-free bypass,
+    // soft limiter), writes the outputs, and updates the scope and analyzer
+    // ring buffers.
     void process(const ProcessArgs &args) override
     {
         const float sr = args.sampleRate;
@@ -845,10 +939,15 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the 18 control cells (16
+    // knobs plus the FREEZE and CV RANGE cells), and the I/O strip plates.
     struct PHPanelBackground : TransparentWidget
     {
         PHPanelBackground() { box.size = Vec(PH_PANEL_W, PH_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, the 18 cell plates
+        // with their labels/CV/ATT captions, and the six I/O strip plates
+        // (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -890,6 +989,9 @@ namespace
     // ------------------------------------------------------------
     const char *PH_VIS_NAMES[3] = {"WAVE", "BARS", "SPECTRUM"};
 
+    // Live display: shows the output waveform, a bar spectrum, or a
+    // continuous spectrum curve (click to cycle), plus L/R meters, header
+    // readouts and the right-hand info column (view name and status flags).
     struct PHDisplayWidget : Widget
     {
         Pharmakon *module = nullptr;
@@ -901,6 +1003,7 @@ namespace
         float barLvl[PH_BARS];
         float barPeak[PH_BARS];
 
+        // Constructor: positions the widget and clears the analyzer buffers.
         PHDisplayWidget(Pharmakon *m) : module(m)
         {
             box.pos = Vec(PH_DISP_X, PH_DISP_Y);
@@ -913,6 +1016,7 @@ namespace
                 barLvl[i] = barPeak[i] = 0.f;
         }
 
+        // Left click cycles the display view mode (WAVE -> BARS -> SPECTRUM).
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -925,8 +1029,12 @@ namespace
         }
 
         // ---- analysis ----
+        // Returns the module's DSP sample rate (or 48 kHz as a fallback).
         float sampleRate() const { return (module && module->dspSr > 0.f) ? module->dspSr : 48000.f; }
 
+        // Runs an FFT on the latest window from the module's ring buffer and
+        // updates binDb[] with fast-attack/slow-release smoothing. In the
+        // module browser it synthesises a plausible pink-ish spectrum.
         void updateSpectrum()
         {
             const int half = PH_FFT_N / 2;
@@ -960,6 +1068,9 @@ namespace
             }
         }
 
+        // Returns the level in dB of a frequency range [fLo, fHi]: an
+        // interpolated single bin for narrow ranges, or the maximum bin for
+        // wide ones.
         float levelAt(float fLo, float fHi, float binHz) const
         {
             const int maxB = PH_FFT_N / 2 - 2;
@@ -981,6 +1092,8 @@ namespace
             return m;
         }
 
+        // Returns a 0..1 normalised height for a frequency range, applying
+        // the display tilt and the dB floor.
         float bandNorm(float fLo, float fHi, float binHz) const
         {
             float fc = std::sqrt(fLo * fHi);
@@ -989,6 +1102,9 @@ namespace
         }
 
         // ---- views (plot-local coordinates, 0..sw x 0..PH_PLOT_H) ----
+        // Draws the WAVE view: min/max waveform columns from the scope ring
+        // buffer (or a demo shape when there is no module), around a centre
+        // line.
         void drawWave(NVGcontext *vg, float sw)
         {
             const float mid = PH_PLOT_H / 2.f;
@@ -1028,6 +1144,8 @@ namespace
             nvgFill(vg);
         }
 
+        // Draws the vertical frequency grid lines (100 Hz, 1 kHz, 10 kHz) for
+        // the BARS and SPECTRUM views.
         void drawFreqGrid(NVGcontext *vg, float sw)
         {
             const float fs[3] = {100.f, 1000.f, 10000.f};
@@ -1045,6 +1163,7 @@ namespace
         }
 
         // frequency labels live in their own row under the plot (display-local coordinates)
+        // Draws the 100 / 1K / 10K labels on the axis row below the plot.
         void drawFreqLabels(NVGcontext *vg, float sw)
         {
             const float fs[3] = {100.f, 1000.f, 10000.f};
@@ -1057,6 +1176,8 @@ namespace
             }
         }
 
+        // Draws the BARS view: frequency grid, 24 log-spaced bars with
+        // smooth attack / slow release, and peak-hold caps.
         void drawBars(NVGcontext *vg, float sw)
         {
             const float binHz = sampleRate() / PH_FFT_N;
@@ -1094,6 +1215,8 @@ namespace
             nvgFill(vg);
         }
 
+        // Draws the SPECTRUM view: frequency grid, a filled area and a smooth
+        // outline built from PH_SPEC_COLS log-spaced bands.
         void drawSpectrum(NVGcontext *vg, float sw)
         {
             const float binHz = sampleRate() / PH_FFT_N;
@@ -1137,6 +1260,8 @@ namespace
         }
 
         // ---- static background ----
+        // Draws the display screen, the header divider, the plot frame, and
+        // the L/R meter labels.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1159,6 +1284,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: dispatches to the wave/bars/spectrum draw routine,
+        // clips it to the plot, adds the frequency labels for the analyzer
+        // views, draws the L/R meters, the header readouts and the right-hand
+        // info column (view name and status flags).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1233,16 +1362,20 @@ namespace
     // ------------------------------------------------------------
     // CV range cell (click to toggle). The name is drawn by the panel plate.
     // ------------------------------------------------------------
+    // Clickable cell that toggles the module's CV range mode and shows the
+    // current range ("-5/+5V" or "0/+10V") with a small range-bar marker.
     struct PHCvRangeWidget : Widget
     {
         Pharmakon *module = nullptr;
 
+        // Constructor: positions the widget over its grid cell.
         PHCvRangeWidget(Pharmakon *m, float cx, float top) : module(m)
         {
             box.pos = Vec(cx - PH_CELL_W / 2.f, top);
             box.size = Vec(PH_CELL_W, PH_CELL_H);
         }
 
+        // Toggles the CV range mode on a left click.
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1256,6 +1389,9 @@ namespace
             Widget::onButton(e);
         }
 
+        // Layer-1 overlay: draws the current range value box, a small
+        // range-bar marker (centre for bipolar, left for unipolar), and the
+        // "CLICK" hint.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1301,11 +1437,15 @@ namespace
     // ------------------------------------------------------------
     // Context-menu helper
     // ------------------------------------------------------------
+    // A generic checkmark menu item driven by lambdas: `isOn` supplies the
+    // current state (for the checkmark), `action` runs on click.
     struct PHChoiceItem : MenuItem
     {
         std::function<bool()> isOn;
         std::function<void()> action;
+        // Runs the item's action.
         void onAction(const ActionEvent &e) override { action(); }
+        // Updates the checkmark from isOn() and forwards to the base step.
         void step() override
         {
             rightText = CHECKMARK(isOn());
@@ -1313,6 +1453,8 @@ namespace
         }
     };
 
+    // Creates a PHChoiceItem with the given label, state query and action,
+    // and adds it to `menu`.
     void addChoice(Menu *menu, const std::string &label,
                    std::function<bool()> isOn, std::function<void()> action)
     {
@@ -1325,10 +1467,16 @@ namespace
 } // namespace
 
 // ============================================================
-//  Module widget
+//  Module widget: adds the static panel, screws, the live display, the 16
+//  knob/CV/attenuverter triplets, the FREEZE switch, the CV-range cell, the
+//  I/O strip jacks/switches, and the context menu.
 // ============================================================
 struct PharmakonWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, the 16
+    // control rows (knob + CV jack + attenuverter), the FREEZE switch, the
+    // CV-range cell, and the I/O strip (inputs, ping-pong/bypass switches,
+    // outputs).
     PharmakonWidget(Pharmakon *module)
     {
         setModule(module);
@@ -1369,6 +1517,9 @@ struct PharmakonWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(phColX(5) - 16.f, y), module, Pharmakon::OUTPUT_RIGHT));
     }
 
+    // Adds the right-click menu: CV range, display mode, EQ position, low
+    // shelf frequency, high shelf frequency, and the output soft limiter
+    // toggle, all as checkmarked choices.
     void appendContextMenu(Menu *menu) override
     {
         Pharmakon *m = dynamic_cast<Pharmakon *>(this->module);

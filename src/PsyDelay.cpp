@@ -7,6 +7,38 @@
 #include <random>
 #include <algorithm>
 
+// ============================================================
+// PsyDelay
+// ============================================================
+//
+// OVERVIEW
+// --------
+// PsyDelay is a 36 HP psychedelic stereo delay with a rich set of
+// self-modulation features. Its core is a modulated stereo delay line
+// (up to 2 seconds) with feedback, reverse playback, ping-pong and phase-flip
+// stereo routing, plus an input gate and a chain of character effects on the
+// wet path:
+//
+//   in -> input gate -> delay (with time modulation, reverse, cross-mod,
+//   glitch, ring mod, sample-rate reduction, bitcrush, feedback/howl,
+//   freeze) -> drive -> colour LPF -> phase flip / ping-pong -> dry/wet mix
+//   -> out.
+//
+// Every switch has a corresponding LED, and the central display shows the
+// entire delay-line contents as a mirrored bar timeline, the current read
+// tap position, the tap triangle and a "now" marker, along with state chips
+// and numeric readouts.
+//
+// File structure:
+//   1. Layout constants (36 HP = 540x380 px).
+//   2. pdSoftLimit() feedback-path limiter.
+//   3. PsyDelay module: buffer management, gate, delay/modulation, glitch,
+//      ring mod, SRR, bitcrusher, feedback, freeze, drive, colour, phase/
+//      ping-pong and dry/wet mix.
+//   4. Anonymous-namespace UI: PDPanelBackground and PDDisplayWidget.
+//   5. PsyDelayWidget: places all controls, jacks, switches and the display.
+//   6. Model registration.
+// ============================================================
 
 // ------------------------------------------------------------
 // Layout constants
@@ -28,24 +60,30 @@ static const float PD_KCELL_W = 48.f;
 static const float PD_KCELL_H = 62.f;
 static const float PD_KTOP[3] = {58.f, 126.f, 194.f};
 static const float PD_CAP1_Y = 46.f;   // DELAY / FX captions
+// Returns the knob centre y for knob row `row` (0..2).
 static float pdKnobY(int row) { return PD_KTOP[row] + 38.f; }
 
 // Switch row under the display
 static const float PD_SW_TOP = 200.f;
 static const float PD_SW_H = 52.f;
 static const float PD_SW_W = 45.f;
+// Returns the switch centre y for the row of on/off switches.
 static float pdSwY() { return PD_SW_TOP + 34.f; }
 
 // Jack row
 static const float PD_CAP2_Y = 274.f;  // INPUT / CV INPUT / OUTPUT captions
 static const float PD_JACK_TOP = 283.f;
 static const float PD_JACK_H = 52.f;
+// Returns the jack centre y for the input/CV/output row.
 static float pdJackY() { return PD_JACK_TOP + 33.f; }
+// Returns the horizontal centre of the six middle columns (CV/switch row).
 static float pdCenterX(int i) { return 148.f + 48.8f * i; } // 6 centre columns
 
 // ------------------------------------------------------------
 // Soft limiter for the feedback path (keeps self-oscillation from blowing up)
 // ------------------------------------------------------------
+// Soft-limits a feedback sample: linear up to ±8 V, then a tanh shoulder
+// that asymptotes to ±12 V. Non-finite values are replaced by 0.
 static inline float pdSoftLimit(float x)
 {
     if (!std::isfinite(x))
@@ -159,6 +197,8 @@ struct PsyDelay : Module
     float meterL = 0.f, meterR = 0.f;
     bool dispGateActive = false, dispGateOpen = true;
 
+    // Constructor: configures all parameters (with display scaling),
+    // switches, CV inputs, outputs, bypass, LEDs and initial buffer state.
     PsyDelay()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -205,6 +245,8 @@ struct PsyDelay : Module
         setSampleRate(44100.0f);
     }
 
+    // Allocates the L/R delay buffers for the given sample rate (2 seconds
+    // plus one sample) and resets all filter/LFO/gate/display state.
     void setSampleRate(float sr)
     {
         sampleRate = sr;
@@ -226,11 +268,20 @@ struct PsyDelay : Module
         lastBin = -1;
     }
 
+    // Rack sample-rate-change hook: reallocates the delay buffers to match
+    // the engine's new sample rate.
     void onSampleRateChange() override
     {
         setSampleRate(APP->engine->getSampleRate());
     }
 
+    // Main audio callback: applies the input gate, computes the modulated
+    // delay time (with chaos LFO), reads the (optionally reversed and
+    // cross-modulated) taps, applies glitch/ring mod/SRR/bitcrush to the wet
+    // signal, computes the feedback (with howl), handles freeze, writes into
+    // the delay line, runs drive + tone on the wet output, applies phase
+    // flip/ping-pong and mixes dry/wet, then writes the stereo outputs and
+    // updates the meters and display snapshot.
     void process(const ProcessArgs &args) override
     {
         float sr = args.sampleRate;
@@ -503,11 +554,16 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, captions, labelled plates
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the left DELAY and right FX
+    // knob blocks, the six-switch row, and the input/CV/output jack row with
+    // its captions.
     struct PDPanelBackground : TransparentWidget
     {
         PDPanelBackground() { box.size = Vec(PD_PANEL_W, PD_PANEL_H); }
 
         // Section caption with hairlines, placed inside the block x0 .. x0 + w
+        // Draws an agmm section header whose hairlines span only [x0, x0+w],
+        // by translating the context.
         static void caption(NVGcontext *vg, float x0, float w, float y, const char *txt)
         {
             nvgSave(vg);
@@ -516,6 +572,9 @@ namespace
             nvgRestore(vg);
         }
 
+        // Draws all static panel art: base panel, bezel, the two knob blocks,
+        // the switch row plates and the input/CV/output jack row plates
+        // (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -561,6 +620,10 @@ namespace
     // Rows (display-local): header 0-15, timeline 22-102, ruler labels 113,
     // chips 121-134, footer text 146.
     // ------------------------------------------------------------
+    // Live display: shows the entire delay-line contents as a mirrored bar
+    // timeline, the current read tap, the tap triangle, a "now" marker, L/R
+    // meters, state chips and numeric readouts. Uses demo data when there is
+    // no module.
     struct PDDisplayWidget : TransparentWidget
     {
         PsyDelay *module = nullptr;
@@ -573,6 +636,8 @@ namespace
             box.size = Vec(PD_DISP_W, PD_DISP_H);
         }
 
+        // Draws a horizontal divider line inside the display at y, spanning
+        // the display width minus an 8 px margin.
         static void hairline(NVGcontext *vg, float y, float W)
         {
             nvgBeginPath(vg);
@@ -584,6 +649,9 @@ namespace
         }
 
         // Static background: screen, timeline field, grid, ruler
+        // Draws the display screen, the header/footer dividers, the timeline
+        // frame, the 0.5 s grid and centre line, the time ruler with its
+        // labels, and the L/R meter channel labels.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -631,6 +699,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the delay-line contents as mirrored bars,
+        // the tap region, the tap line and triangle, the modulation wobble,
+        // the "now" marker, glitch ring, L/R meters, state chips, and the
+        // header/footer readouts.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -805,10 +877,16 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Widget
+// Widget: adds the static panel, screws, the live display, the twelve knobs
+// (six delay + six FX), the six switches with their LEDs, and the
+// input/CV/output jacks.
 // ------------------------------------------------------------
 struct PsyDelayWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, the six
+    // left delay knobs and six right FX knobs, the six switches each with a
+    // status LED (violet for freeze, cyan otherwise), and the L/R inputs,
+    // six CV/gate inputs, and L/R outputs.
     PsyDelayWidget(PsyDelay *module)
     {
         setModule(module);
