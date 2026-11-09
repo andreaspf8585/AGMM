@@ -8,6 +8,36 @@
 #include <limits>
 
 // =============================================================================
+// Bouncing Balls
+// =============================================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// BouncingBalls is a 28 HP "chaos generator": up to 16 balls bounce inside a
+// 20 V x 20 V arena, and their X/Y positions, zero-crossings, ball-ball
+// collisions and wall hits are all exposed as polyphonic outputs (one channel
+// per ball). Each ball also has its own random V/oct value, re-randomised on
+// every zero-crossing of that axis, so the module can drive up to 16 voices
+// of a synth.
+//
+// File structure:
+//   1. Layout constants (28 HP = 420x380 px).
+//   2. BouncingBalls module: state, config, physics, gates, trail buffer,
+//      JSON persistence.
+//   3. Anonymous-namespace UI helpers and widgets:
+//        - theme colours / font / text / plate / cell / caption helpers
+//        - TBBCyanLight / TBBVioletLight light widgets
+//        - ballColor(), drawTrail()
+//        - BBPanelBackground: static artwork (title, blocks, plates, bezel)
+//        - BBDisplayWidget:   arena (static rail/grid + live balls/trails)
+//        - BBReadoutWidget:   text row under the arena
+//        - BBBarsWidget:      per-ball speed bars
+//   4. BouncingBallsWidget: places all controls, LEDs and the menu.
+//   5. Model registration.
+// -----------------------------------------------------------------------------
+
+// =============================================================================
 // Layout (28 HP = 420 x 380 px)
 //
 //   y   0-15   screws
@@ -138,6 +168,7 @@ struct BouncingBalls : Module
         LIGHTS_LEN
     };
 
+    // Range of the random per-ball V/oct value, selectable from the menu.
     enum VoctRange
     {
         RANGE_0_1,
@@ -147,6 +178,7 @@ struct BouncingBalls : Module
         RANGE_0_5,
         NUM_RANGES
     };
+    // Duration of the X/Y zero-crossing gates, selectable from the menu.
     enum GateDuration
     {
         GATE_TRIGGER,
@@ -210,6 +242,8 @@ struct BouncingBalls : Module
     float xcPos[MAX_BALLS] = {};     // Y value where X crossed zero
     float ycPos[MAX_BALLS] = {};     // X value where Y crossed zero
 
+    // Constructor: configures params, inputs, outputs, lights, then seeds the
+    // RNG and resets the ball state to the initial scene.
     BouncingBalls()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -246,6 +280,9 @@ struct BouncingBalls : Module
         onReset();
     }
 
+    // Resets all ball positions/velocities to a random scene, clears timers
+    // and trails, and re-randomises the V/oct values. Called on construction,
+    // on the Reset button/gate, and from the context menu if wired up.
     void onReset() override
     {
         updateParameters();
@@ -281,6 +318,8 @@ struct BouncingBalls : Module
         }
     }
 
+    // Generates a new random V/oct value for one ball and one axis (X or Y),
+    // scaled according to the currently selected V/oct range.
     void generateRandomVoct(int ball, bool forX)
     {
         std::uniform_real_distribution<double> randRaw(-1.0, 1.0);
@@ -309,6 +348,7 @@ struct BouncingBalls : Module
         }
     }
 
+    // Returns the selected zero-crossing gate length in seconds.
     double getGateDurationSeconds()
     {
         switch (gateDuration)
@@ -332,6 +372,9 @@ struct BouncingBalls : Module
         }
     }
 
+    // Reads the speed / angle / ball-count controls and CVs, updates the
+    // cached values, creates any newly added balls, and smoothly reorients
+    // and rescales existing velocities when speed or angle changes.
     void updateParameters()
     {
         float angleCV = inputs[ANGLE_CV_INPUT].getVoltage();
@@ -403,6 +446,9 @@ struct BouncingBalls : Module
     }
 
     // Resolve collisions and record which balls collided
+    // Runs two relaxation passes over all ball pairs, pushing overlapping
+    // balls apart and exchanging the normal velocity component. If `record`
+    // is true, `collided[i]` is set for each ball that actually bounced.
     void resolveCollisionsAndRecord(bool record, bool collided[MAX_BALLS])
     {
         for (int iter = 0; iter < 2; ++iter)
@@ -446,6 +492,9 @@ struct BouncingBalls : Module
         }
     }
 
+    // Main audio callback: applies parameter/CV changes, handles reset,
+    // advances the balls (walls, zero-crossing gates, collisions), updates
+    // the LEDs, writes the eight polyphonic outputs and samples the trails.
     void process(const ProcessArgs &args) override
     {
         updateParameters();
@@ -597,6 +646,8 @@ struct BouncingBalls : Module
         }
 
         // ---- trail data for the display ----
+        // Samples all ball positions at BB_TRAIL_HZ into a ring buffer that
+        // the display widget reads to draw the fading motion trails.
         const float trailStep = 1.f / BB_TRAIL_HZ;
         trailTimer += args.sampleTime;
         if (trailTimer >= trailStep)
@@ -615,6 +666,7 @@ struct BouncingBalls : Module
         }
     }
 
+    // Serialises the V/oct range and gate duration menu choices.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -623,6 +675,8 @@ struct BouncingBalls : Module
         return root;
     }
 
+    // Restores the V/oct range and gate duration from a saved patch,
+    // clamping the values to valid enum ranges.
     void dataFromJson(json_t *root) override
     {
         json_t *j;
@@ -643,17 +697,26 @@ namespace
     // ------------------------------------------------------------
     // Theme (same palette as the other AGMM modules)
     // ------------------------------------------------------------
+    // Panel background gradient start colour (top).
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    // Panel background gradient end colour (bottom).
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    // Default body text colour.
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    // Muted colour for secondary labels.
     NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    // Primary accent colour (cyan).
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    // Secondary accent colour (violet) for the output block and wall LEDs.
     NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
+    // Text alignment presets.
     const int ALIGN_L = NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
     const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
     const int ALIGN_R = NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE;
 
+    // Loads the AGMM monospace font and makes it the current NanoVG font
+    // face. Returns false if there is no window or the asset is missing.
     bool setFont(NVGcontext *vg)
     {
         if (!APP || !APP->window)
@@ -666,6 +729,8 @@ namespace
         return true;
     }
 
+    // Draws a string at (x, y) with the given size, colour, alignment and
+    // letter spacing.
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
                   int align = ALIGN_C, float spacing = 0.5f)
     {
@@ -678,6 +743,7 @@ namespace
         nvgText(vg, x, y, s, NULL);
     }
 
+    // Returns a copy of `c` with its alpha channel replaced by `a`.
     NVGcolor withAlpha(NVGcolor c, float a)
     {
         c.a = a;
@@ -685,22 +751,28 @@ namespace
     }
 
     // Cyan / violet LEDs (Rack has no built-in ones)
+    // Cyan LED widget, templated on the base light class.
     template <typename TBase = GrayModuleLightWidget>
     struct TBBCyanLight : TBase
     {
+        // Registers the cyan base colour with the underlying light widget.
         TBBCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
     };
     using BBCyanLight = TBBCyanLight<>;
 
+    // Violet LED widget, templated on the base light class.
     template <typename TBase = GrayModuleLightWidget>
     struct TBBVioletLight : TBase
     {
+        // Registers the violet base colour with the underlying light widget.
         TBBVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
     };
     using BBVioletLight = TBBVioletLight<>;
 
     // Ball colours run from cyan through violet to magenta, so all 16 stay distinct.
     // The colour depends on the ball index, not on the ball count.
+    // Returns the HSL colour for ball `i`, using the given saturation and
+    // lightness; the hue sweeps from 0.5 (cyan) to ~0.95 (magenta).
     NVGcolor ballColor(int i, float sat, float light)
     {
         float h = 0.5f + 0.45f * (float)i / 15.f;
@@ -708,6 +780,8 @@ namespace
     }
 
     // Fading motion trail (older = thinner and fainter)
+    // Draws a polyline through n points, split into short segments so the
+    // stroke width and alpha can taper off toward the oldest points.
     void drawTrail(NVGcontext *vg, const float *xs, const float *ys, int n, NVGcolor col, float width, float alpha)
     {
         if (n < 2)
@@ -748,6 +822,7 @@ namespace
         drawText(vg, cx, top + BB_CELL_LABEL, txt, 7.f, colDim(), ALIGN_C, 0.3f);
     }
 
+    // Draws a centred, letter-spaced block caption (CONTROL / OUTPUT).
     void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col)
     {
         drawText(vg, cx, y, txt, 8.f, col, ALIGN_C, 2.f);
@@ -760,6 +835,9 @@ namespace
     {
         BBPanelBackground() { box.size = Vec(BB_PANEL_W, BB_PANEL_H); }
 
+        // Draws the opaque background, title, maker tag, arena bezel, block
+        // captions, the left and right cell plates, the LED plate labels and
+        // the speed-bars plate.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -837,6 +915,8 @@ namespace
         }
 
         // Static layer: rail, playfield, grid, axes
+        // Draws the arena's static artwork: raised rail, dark playfield,
+        // 2 V grid lines and the two brighter centre axes.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -890,6 +970,8 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 hook: draws the live balls/trails/flashes on top of the
+        // static arena, then forwards to the base widget.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -897,6 +979,9 @@ namespace
             Widget::drawLayer(args, layer);
         }
 
+        // Draws the live arena contents: wall-hit flashes on the rail, axis
+        // crossing rings, fading trails, the balls with heading ticks, and
+        // collision rings. Uses a sample scene when there is no module.
         void drawLive(NVGcontext *vg)
         {
             const float W = BB_DISP_W, H = BB_DISP_H, cx = W / 2.f, cy = H / 2.f;
@@ -1104,6 +1189,9 @@ namespace
             box.size = Vec(BB_DISP_W, 12.f);
         }
 
+        // Layer-1 overlay: draws the four readouts (balls, speed, angle and
+        // collision on/off) in four equal slots under the arena. Falls back
+        // to sample values in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -1142,8 +1230,10 @@ namespace
             box.size = Vec(BB_BARS_W, BB_BARS_H);
         }
 
+        // Width of one bar slot (the bars area is split evenly across 16).
         static float slot() { return BB_BARS_W / (float)BB_N; }
 
+        // Static layer: the 16 empty bar tracks and their ball-number labels.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1162,6 +1252,9 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: fills each active ball's bar in proportion to its
+        // speed (scaled so the bar tops out around 28 V/s). Uses sample
+        // speeds in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -1205,6 +1298,8 @@ namespace
 // ------------------------------------------------------------
 struct BouncingBallsWidget : ModuleWidget
 {
+    // Builds the widget tree: background, screws, arena, readouts, speed
+    // bars, the left control block, the right output block and both LED rows.
     BouncingBallsWidget(BouncingBalls *module)
     {
         setModule(module);
@@ -1262,6 +1357,8 @@ struct BouncingBallsWidget : ModuleWidget
         }
     }
 
+    // Adds the right-click menu: a "V/oct range" submenu and a "Gate
+    // duration" submenu, each with a checkmark on the active option.
     void appendContextMenu(ui::Menu *menu) override
     {
         BouncingBalls *module = dynamic_cast<BouncingBalls *>(this->module);

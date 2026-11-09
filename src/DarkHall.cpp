@@ -5,6 +5,31 @@
 #include <algorithm>
 #include <memory>
 
+// ============================================================
+// Dark Hall
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// DarkHall is a 12 HP stereo reverb built from eight damped comb filters
+// feeding four series all-passes (a Schroeder/Freeverb-style structure), with
+// a small L/R cross-feed for stereo width. Size sets the comb feedback and
+// delay length, Damping darkens the feedback path, and Modulation gently
+// moves the comb delays. A live display shows a scope of the mono output plus
+// L/R level meters.
+//
+// File structure:
+//   1. Constants (comb/all-pass counts, buffer size, scope size).
+//   2. DarkHall module: DSP state, param/port config, allpass() helper and
+//      process().
+//   3. Layout constants (12 HP = 180x380 px).
+//   4. Anonymous-namespace theme/drawing helpers and the two panel widgets:
+//        - DhPanelBackground: static artwork
+//        - DhDisplayWidget:  live scope + meters + readouts (layer 1)
+//   5. DarkHallWidget: places widgets.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
 static const int NUM_COMBS = 8;
 static const int NUM_ALLPASS = 4;
 static const int MAX_DELAY = 96000;
@@ -60,6 +85,8 @@ struct DarkHall : Module
         OUTPUTS_LEN
     };
 
+    // Constructor: configures the four parameters, stereo inputs/outputs and
+    // stereo bypass.
     DarkHall()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN);
@@ -79,6 +106,9 @@ struct DarkHall : Module
         configBypass(IN_R, OUT_R);
     }
 
+    // Processes one sample through a fixed-gain all-pass delay line: reads
+    // the delayed sample at `idx`, writes input + delayed*gain back, advances
+    // the index (wrapping at MAX_DELAY) and returns the all-pass output.
     float allpass(float input, float *buf, int &idx, float gain)
     {
         float delayed = buf[idx];
@@ -93,6 +123,9 @@ struct DarkHall : Module
         return output;
     }
 
+    // Main audio callback: runs the eight damped comb filters and four
+    // series all-passes, mixes dry/wet, soft-clips, writes the stereo
+    // outputs and updates the scope/meter data.
     void process(const ProcessArgs &args) override
     {
         // =====================
@@ -114,6 +147,9 @@ struct DarkHall : Module
 
         float feedback = 0.75f + size * 0.2f;
 
+        // Eight comb filters: modulated read position, one-pole damping in
+        // the feedback loop, a little cross-feed for width, and clamping to
+        // keep the feedback bounded.
         for (int i = 0; i < NUM_COMBS; i++)
         {
             modPhase[i] += args.sampleTime * (0.05f + i * 0.01f);
@@ -163,6 +199,7 @@ struct DarkHall : Module
         float apL = sumL;
         float apR = sumR;
 
+        // Four series all-passes on each channel diffuse the comb sum.
         for (int i = 0; i < NUM_ALLPASS; i++)
         {
             apL = allpass(apL, allpassL[i], apIdxL[i], 0.6f);
@@ -172,6 +209,7 @@ struct DarkHall : Module
         apL *= 0.35f;
         apR *= 0.35f;
 
+        // Equal-power dry/wet mix.
         float dry = cosf(mix * M_PI_2);
         float wet = sinf(mix * M_PI_2);
 
@@ -190,12 +228,14 @@ struct DarkHall : Module
         outputs[OUT_R].setVoltage(outR * 5.f);
 
         // ---- display data ----
+        // Peak envelopes with a short decay for the L/R meters.
         float vL = outL * 5.f;
         float vR = outR * 5.f;
         float decay = 1.f - 4.f * args.sampleTime;
         peakL = std::max(std::fabs(vL), peakL * decay);
         peakR = std::max(std::fabs(vR), peakR * decay);
 
+        // Scope ring buffer: min/max of the mono output, bucketed to ~2.5 ms.
         float mono = 0.5f * (vL + vR);
         if (scopeCount == 0)
             scopeBMin = scopeBMax = mono;
@@ -253,6 +293,7 @@ static const float DH_CELL_KNOB = 42.f;
 static const float DH_SEC2_Y = 288.f;
 static const float DH_IO_TOP = 296.f, DH_IO_H = 52.f, DH_IO_W = 38.f;
 static const float DH_IO_LABEL = 10.f, DH_IO_JACK = 34.f;
+// Horizontal centre of I/O jack i (0..3): 2 inputs then 2 outputs.
 static float dhIoX(int i) { return 25.5f + 43.f * i; }
 
 // ============================================================
@@ -261,15 +302,24 @@ static float dhIoX(int i) { return 25.5f + 43.f * i; }
 namespace
 {
 
+    // Panel background gradient start colour (top).
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    // Panel background gradient end colour (bottom).
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    // Default body text colour.
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    // Muted colour for secondary labels.
     NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    // Primary accent colour (cyan).
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    // Secondary accent colour (violet), used for meter gradients.
     NVGcolor colAccent2() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
+    // Centred text alignment preset.
     const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
 
+    // Loads the AGMM monospace font and makes it the current NanoVG font
+    // face. Returns false if there is no window or the asset is missing.
     bool setFont(NVGcontext *vg)
     {
         if (!APP || !APP->window)
@@ -282,6 +332,8 @@ namespace
         return true;
     }
 
+    // Draws a string at (x, y) with the given size, colour, alignment and
+    // letter spacing.
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
                   int align = ALIGN_C, float spacing = 0.5f)
     {
@@ -329,6 +381,8 @@ namespace
         nvgStroke(vg);
     }
 
+    // Describes one of the four reverb cells: label plus the module ID of
+    // the knob it hosts.
     struct DhCellDef
     {
         const char *name;
@@ -349,6 +403,9 @@ namespace
     {
         DhPanelBackground() { box.size = Vec(DH_PANEL_W, DH_PANEL_H); }
 
+        // Draws the opaque background, title, maker tag, display bezel, the
+        // REVERB section with its four cell plates, and the I/O row with its
+        // four jack plates.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -408,8 +465,12 @@ namespace
             box.size = Vec(DH_DISP_W, DH_DISP_H);
         }
 
+        // Width of the scope area (the display width minus room for meters).
         static float scopeW() { return DH_DISP_W - 16.f; }
 
+        // Draws the dark display fill and its grid (vertical ticks and a
+        // centre line). This runs on layer 0; the live waveform is drawn in
+        // drawLayer().
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -434,6 +495,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the scope waveform from the module's
+        // min/max ring buffer (or a demo burst in the module browser), the
+        // L/R level meters with a cyan-to-violet gradient, and the two
+        // readouts (MIX and SIZE) in their own row below the display.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -513,10 +578,13 @@ namespace
 } // namespace
 
 // ============================================================
-// Module widget
+// Module widget: adds the panel background, screws, the display widget,
+// the four reverb knobs and the two in / two out jacks.
 // ============================================================
 struct DarkHallWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, live display,
+    // four knobs centred under their cell labels, and the I/O jacks.
     DarkHallWidget(DarkHall *module)
     {
         setModule(module);

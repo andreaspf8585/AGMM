@@ -13,8 +13,36 @@
 // Engines: Moog Ladder, TB-303 Diode, MS-20, SEM SVF,
 //          Steiner-Parker, CEM3320, Roland OTA, EMS Diode,
 //          EDP Wasp, Buchla LPG
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// Bastion is a single 16 HP filter module offering ten different classic
+// filter topologies ("engines") selectable at runtime. The selected engine
+// processes one summed audio input and produces LP, BP and HP outputs.
+//
+// File structure:
+//   1. Engine enum / name / description tables.
+//   2. DSP: per-engine state structs and processing functions, plus shared
+//      helpers (one-pole LP, soft clippers, drive stage, zero-delay-feedback
+//      prediction).
+//   3. Panel layout constants (all positions in pixels for a 240x380 panel).
+//   4. Bastion module class: parameter/port/light config and process().
+//   5. UI helpers (palette, text, plates, screens, response estimation).
+//   6. BastionPanel: static artwork plus a live "layer 1" overlay with the
+//      response curve, scope, meters, engine name and readouts.
+//   7. BastionEngineKnob: custom-drawn engine selector knob.
+//   8. BastionWidget: places all widgets and the context menu.
+//   9. Model registration.
+//
+// The design is flat fills and hairline strokes: no gradients are used for
+// the panel art beyond the flat background, and the only "glow" is the
+// per-engine accent colour used consistently for curve, scope, pointer, tick
+// and engine name. Each engine also gets its own accent colour, which is what
+// makes the module look different as you scroll through engines.
 // ============================================================
 
+// Engine IDs, in the order they appear on the selector knob.
 enum BastionEngine
 {
     ENGINE_MOOG = 0,
@@ -30,11 +58,13 @@ enum BastionEngine
     NUM_ENGINES
 };
 
+// Display names shown on the engine plate and in the context menu.
 static const char *const ENGINE_NAMES[NUM_ENGINES] = {
     "Moog Ladder", "TB-303 Diode", "MS-20", "SEM SVF",
     "Steiner-Parker", "CEM3320", "Roland OTA",
     "EMS Diode", "EDP Wasp", "Buchla LPG"};
 
+// Short technical descriptions shown under the engine name on the plate.
 static const char *const ENGINE_DESCS[NUM_ENGINES] = {
     "4-POLE TRANSISTOR LADDER",
     "DIODE LADDER",
@@ -49,12 +79,17 @@ static const char *const ENGINE_DESCS[NUM_ENGINES] = {
 
 // ---------- DSP ----------
 
+// State shared by the ladder-style engines: four one-pole stages plus two
+// extra states used by the MS-20 high-pass stages.
 struct LadderState
 {
     float s[4] = {0.f, 0.f, 0.f, 0.f};
     float h[2] = {0.f, 0.f}; // extra state used by the MS-20 high-pass stages
 };
 
+// One-pole low-pass with a zero-delay-feedback-friendly TPT form. `g` is the
+// prewarped tan(pi*fc/fs) value; `state` is updated in place and the filtered
+// output is returned.
 static inline float onePoleLP(float in, float &state, float g)
 {
     float G = g / (1.f + g);
@@ -65,11 +100,14 @@ static inline float onePoleLP(float in, float &state, float g)
 }
 
 // Soft clippers that work in the +-5 V audio domain (linear for small signals)
+// Tanh limiter scaled to `lim` volts; stays approximately linear for |v| << lim.
 static inline float softClip(float v, float lim) { return lim * std::tanh(v / lim); }
+// Saturator mapped to the +-5 V audio range.
 static inline float sat5(float v) { return 5.f * std::tanh(v * 0.2f); }
 
 // Drive stage: 0..1 -> 0..~25 dB of gain into an asymmetric tanh, with makeup
 // gain compensation. Adds even + odd harmonics, getting harder as drive rises.
+// `asym` adds a DC bias before the tanh, which increases even harmonics.
 static inline float driveStage(float in, float d, float asym = 0.f)
 {
     d = clamp(d, 0.f, 1.5f);
@@ -79,6 +117,8 @@ static inline float driveStage(float in, float d, float asym = 0.f)
     return y * 5.f / (1.f + d * 0.45f);
 }
 
+// Clamps a cutoff frequency into a safe range: at least 10 Hz and at most
+// `frac` of the sample rate, to keep the tan() prewarp finite and stable.
 static inline float fcLimit(float fc, float fs, float frac)
 {
     return clamp(fc, 10.f, fs * frac);
@@ -99,6 +139,8 @@ static inline float ladderPredict(const float *s, int n, float G, float x, float
     return (Gn * x + S) / (1.f + k * Gn);
 }
 
+// Shared 4-pole ladder engine. Used by Moog, TB-303 and EMS Diode; `diode`
+// switches to the diode-ladder feedback saturation and slightly lower k.
 static float processLadder(float in, LadderState &st, float fc, float res, float drive, float fs, bool diode)
 {
     float fcHz = fcLimit(fc, fs, 0.4f);
@@ -116,6 +158,9 @@ static float processLadder(float in, LadderState &st, float fc, float res, float
     return u;
 }
 
+// MS-20 engine: two high-pass stages into two low-pass stages, with global
+// negative feedback around the whole chain (the classic Korg topology).
+// Uses an explicit ZDF prediction of the HP-HP-LP-LP cascade.
 static float processMS20(float in, LadderState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.4f);
@@ -145,11 +190,15 @@ static float processMS20(float in, LadderState &st, float fc, float res, float d
     return y;
 }
 
+// State for the state-variable filter (SEM engine): the three simultaneous
+// outputs plus nothing else.
 struct SVFState
 {
     float lp = 0.f, bp = 0.f, hp = 0.f;
 };
 
+// SEM engine: a TPT/Chamberlin-style state-variable filter producing LP, BP
+// and HP simultaneously. Resonance is mapped as damping q = 1 - res.
 static void processSVF(float in, SVFState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.2f);
@@ -168,11 +217,16 @@ static void processSVF(float in, SVFState &st, float fc, float res, float drive,
     st.lp = lp;
 }
 
+// State for the Steiner-Parker engine: two one-pole stages plus the derived
+// band-pass signal.
 struct SPState
 {
     float s1 = 0.f, s2 = 0.f, bp = 0.f;
 };
 
+// Steiner-Parker engine: a two-pole multimode core where the band-pass is
+// formed as the difference of the input HP and the two LP stages, with
+// feedback taken from the second stage.
 static void processSteiner(float in, SPState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.25f);
@@ -186,6 +240,8 @@ static void processSteiner(float in, SPState &st, float fc, float res, float dri
     st.bp = hp - lp1 - lp2;
 }
 
+// CEM3320 engine: 4-pole OTA ladder with a slightly softer feedback
+// saturation and a final output saturator.
 static float processCEM3320(float in, LadderState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.4f);
@@ -202,6 +258,8 @@ static float processCEM3320(float in, LadderState &st, float fc, float res, floa
     return sat5(u * 1.1f);
 }
 
+// Roland OTA engine: 4-pole cascade with inter-stage saturation, which is
+// what gives the OTA character its compressed resonance.
 static float processRolandOTA(float in, LadderState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.4f);
@@ -220,6 +278,8 @@ static float processRolandOTA(float in, LadderState &st, float fc, float res, fl
     return u;
 }
 
+// EDP Wasp engine: a 3-pole driven ladder with extra drive and output
+// saturation, giving the grittiest character of the set.
 static float processWasp(float in, LadderState &st, float fc, float res, float drive, float fs)
 {
     float fcHz = fcLimit(fc, fs, 0.4f);
@@ -235,12 +295,17 @@ static float processWasp(float in, LadderState &st, float fc, float res, float d
     return sat5(u * 1.2f);
 }
 
+// State for the Buchla low-pass gate: the lagging vactrol envelope and the
+// one-pole low-pass state.
 struct LPGState
 {
     float vactrol = 0.f;
     float lp = 0.f;
 };
 
+// Buchla low-pass gate engine: `fc` (via the cutoff control) sets the vactrol
+// target level, which lags with a slower release; the level then drives both
+// a VCA and the low-pass cutoff. This emulates the combined VCA+LPG behaviour.
 static float processLPG(float in, LPGState &st, float fc, float res, float drive, float fs)
 {
     float level = clamp(fc / 1000.f, 0.f, 1.f);
@@ -300,11 +365,14 @@ static const float SCOPE_PX0 = SCOPE_X + 4.f;
 static const float SCOPE_PX1 = SCOPE_X + SCOPE_W - 4.f;
 static const float DB_MIN = -48.f, DB_MAX = 24.f;
 
+// Maps a dB value to a y pixel inside the response plot (clamped to the plot).
 static float dbToY(float db)
 {
     float t = clamp((db - DB_MIN) / (DB_MAX - DB_MIN), 0.f, 1.f);
     return PLOT_Y1 - t * (PLOT_Y1 - PLOT_Y0);
 }
+// Maps a frequency in Hz to an x pixel inside the response plot using a
+// 20 Hz..20 kHz logarithmic axis (each decade takes equal width).
 static float hzToX(float f)
 {
     return RESP_PX0 + std::log(std::max(f, 20.f) / 20.f) / std::log(1000.f) * (RESP_PX1 - RESP_PX0);
@@ -323,23 +391,31 @@ static const float CELL_KNOB = 36.f;
 static const float CELL_READ = 65.f;
 static const float CELL_JACK = 88.f;
 static const float CELL_SUBLBL = 106.f;
-static const float CELL_SUB_DX = 17.f;               // CV jack left, attenuator right
+static const float CELL_SUB_DX = 17.f; // CV jack left, attenuator right
+// Horizontal centre of column i (0..2) for the three parameter cells.
 static float colX(int i) { return 44.f + 76.f * i; } // 44, 120, 196
 
 // ---- I/O ----
 static const float IO_SEC_Y = 294.f;
 static const float IO_TOP = 303.f, IO_H = 46.f, IO_W = 34.f;
 static const float IO_LABEL = 10.f, IO_JACK = 30.f;
+// Horizontal centre of I/O jack i (0..5): 3 inputs then 3 outputs.
 static float ioX(int i) { return 27.f + 37.f * i; } // 27 .. 212
 
 // Knob sweep (matches Rack's standard knobs)
 static const float KNOB_MIN_ANGLE = -0.83f * (float)M_PI;
 static const float KNOB_MAX_ANGLE = 0.83f * (float)M_PI;
+// Converts a normalised knob position t (0..1) to a NanoVG angle
+// (0 = +x axis), rotated so the sweep starts at the lower-left.
 static float knobAngle(float t)
 { // t in 0..1 -> NanoVG angle (0 = +x axis)
     return -(float)M_PI / 2.f + KNOB_MIN_ANGLE + t * (KNOB_MAX_ANGLE - KNOB_MIN_ANGLE);
 }
 
+// ============================================================
+// Bastion module: parameters, ports, lights, DSP state and process().
+// Also holds the UI feedback values (display values, peaks, scope buffer)
+// that the panel widget reads while drawing.
 // ============================================================
 struct Bastion : Module
 {
@@ -378,6 +454,7 @@ struct Bastion : Module
         LIGHTS_LEN
     };
 
+    // Number of bins in the UI scope ring buffer.
     static const int SCOPE_N = 64;
 
     LadderState ladder;
@@ -400,6 +477,8 @@ struct Bastion : Module
     float scopeAccMin = 0.f, scopeAccMax = 0.f;
     int scopeCount = 0;
 
+    // Constructor: configures all params, inputs, outputs, lights and the
+    // bypass route (input 1 -> LP output).
     Bastion()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -433,6 +512,8 @@ struct Bastion : Module
         configBypass(LP_INPUT, LP_OUTPUT);
     }
 
+    // Clears all DSP states and UI feedback values (used on reset and from
+    // the context menu's "Reset State" item).
     void onReset() override
     {
         ladder = LadderState();
@@ -445,6 +526,9 @@ struct Bastion : Module
             scopeMin[i] = scopeMax[i] = 0.f;
     }
 
+    // Maps the normalised cutoff knob (0..1) to Hz on a 20 Hz..20 kHz
+    // exponential curve, then applies CV as an octave shift (0.2 V per volt
+    // of CV into the CV amount), clamped to the audio range.
     float computeCutoff(float base, float cvAmt, float cv)
     {
         float norm = clamp(base, 0.f, 1.f);
@@ -454,6 +538,9 @@ struct Bastion : Module
         return clamp(hz, 10.f, 20000.f);
     }
 
+    // Main audio callback: reads controls + CV, runs the selected engine,
+    // writes the three outputs, and updates the UI feedback (peaks and the
+    // scope ring buffer).
     void process(const ProcessArgs &args) override
     {
         int engine = (int)std::round(params[ENGINE_PARAM].getValue());
@@ -588,6 +675,8 @@ struct Bastion : Module
         break;
         }
 
+        // Safety net: if any engine produced a non-finite value, reset all
+        // states and output silence for this sample.
         if (!std::isfinite(outLP) || !std::isfinite(outBP) || !std::isfinite(outHP))
         {
             ladder = LadderState();
@@ -611,6 +700,8 @@ struct Bastion : Module
         outPeak = std::max(outMax, outPeak * peakDecay);
 
         // ---- UI feedback: scope (LP output, ~30 ms window) ----
+        // Accumulates min/max over a stride so each scope bin covers several
+        // samples, giving a peak-preserving envelope of the LP output.
         int stride = std::max(1, (int)(fs * 0.03f / SCOPE_N));
         if (scopeCount == 0)
         {
@@ -637,12 +728,18 @@ struct Bastion : Module
 namespace
 {
 
+    // Panel background gradient start colour (top).
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    // Panel background gradient end colour (bottom).
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    // Default body text colour.
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    // Muted colour for secondary labels.
     NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    // Primary accent colour (cyan) for headers and default highlights.
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
 
+    // Returns a copy of `c` with its alpha channel replaced by `a`.
     NVGcolor withAlpha(NVGcolor c, float a)
     {
         c.a = a;
@@ -667,6 +764,8 @@ namespace
         return cols[clamp(e, 0, NUM_ENGINES - 1)];
     }
 
+    // Loads the AGMM monospace font and makes it the current NanoVG font face.
+    // Returns false if there is no window or the asset is missing.
     bool setFont(NVGcontext *vg)
     {
         if (!APP || !APP->window)
@@ -679,6 +778,8 @@ namespace
         return true;
     }
 
+    // Draws a string at (x, y) with the given size, colour, alignment and
+    // letter spacing.
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
                   int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 0.5f)
     {
@@ -691,6 +792,7 @@ namespace
         nvgText(vg, x, y, s, NULL);
     }
 
+    // Text alignment presets local to this translation unit.
     const int ALIGN_L = NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
     const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
     const int ALIGN_R = NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE;
@@ -707,7 +809,7 @@ namespace
         nvgStroke(vg);
     }
 
-    // Flat dark display screen
+    // Flat dark display screen with a rounded frame and faint hairline edge.
     void screen(NVGcontext *vg, float x, float y, float w, float h)
     {
         nvgBeginPath(vg);
@@ -719,6 +821,8 @@ namespace
         nvgStroke(vg);
     }
 
+    // Translucent dark frame used to host a plot or scope, with a faint
+    // cyan hairline border.
     void plotFrame(NVGcontext *vg, float x, float y, float w, float h)
     {
         nvgBeginPath(vg);
@@ -753,6 +857,7 @@ namespace
         nvgStroke(vg);
     }
 
+    // Formats a frequency into `b` as "123 Hz" or "1.23 kHz".
     void fmtHz(char *b, size_t n, float hz)
     {
         if (hz >= 1000.f)
@@ -762,6 +867,8 @@ namespace
     }
 
     // Approximate magnitude response (dB) of the LP output for each engine.
+    // This is an analytic transfer-function estimate used only for drawing
+    // the response curve; it is not used in the audio path.
     float responseDb(int engine, float f, float fc, float res)
     {
         typedef std::complex<float> C;
@@ -836,6 +943,10 @@ struct BastionPanel : TransparentWidget
     BastionPanel() { box.size = Vec(BS_W, BS_H); }
 
     // ---------------- Static artwork ----------------
+
+    // Draws the opaque background, title, maker tag and the static frames
+    // for the display, engine strip, parameter cells and I/O row. This runs
+    // on layer 0 and is only redrawn when the widget needs repainting.
     void draw(const DrawArgs &args) override
     {
         NVGcontext *vg = args.vg;
@@ -858,7 +969,8 @@ struct BastionPanel : TransparentWidget
         Widget::draw(args);
     }
 
-    // Display: screens, plot frames, grids, titles and axis labels
+    // Draws the three screens (response, scope, meter) and their titles,
+    // grids, axis labels and plot frames.
     void drawDisplayFrame(NVGcontext *vg)
     {
         screen(vg, RESP_X, DISP_Y, RESP_W, DISP_H);
@@ -930,7 +1042,8 @@ struct BastionPanel : TransparentWidget
         }
     }
 
-    // Engine selector ticks + name plate frame
+    // Draws the engine selector tick marks and the engine name plate frame
+    // with its static "SWITCH"/"SIGNAL" labels.
     void drawEngineFrame(NVGcontext *vg)
     {
         for (int i = 0; i < NUM_ENGINES; ++i)
@@ -950,7 +1063,8 @@ struct BastionPanel : TransparentWidget
         drawText(vg, ENG_PLATE_X + 141.f, ly, "SIGNAL", 7.f, colDim(), ALIGN_R, 0.5f);
     }
 
-    // Three parameter cells: title / knob / readout / CV jack + attenuator
+    // Draws the three parameter cell frames with their titles and the
+    // "CV"/"ATT" sub-labels.
     void drawCellFrames(NVGcontext *vg)
     {
         const char *titles[3] = {"CUTOFF", "RESONANCE", "DRIVE"};
@@ -964,7 +1078,8 @@ struct BastionPanel : TransparentWidget
         }
     }
 
-    // I/O row: 3 inputs (left), 3 outputs (right, tinted)
+    // Draws the I/O section header and six jack cell frames: three inputs
+    // (left) and three tinted outputs (right).
     void drawIoFrames(NVGcontext *vg)
     {
         sectionHeader(vg, IO_SEC_Y, "I / O");
@@ -978,6 +1093,10 @@ struct BastionPanel : TransparentWidget
     }
 
     // ---------------- Live (glowing) layer ----------------
+
+    // Layer-1 hook: draws the live response curve, scope, meters, engine
+    // plate and readouts on top of the static artwork, then forwards to the
+    // base widget so child widgets are still drawn on other layers.
     void drawLayer(const DrawArgs &args, int layer) override
     {
         if (layer == 1)
@@ -985,6 +1104,10 @@ struct BastionPanel : TransparentWidget
         Widget::drawLayer(args, layer);
     }
 
+    // Draws everything that changes with the module state: the response
+    // curve, scope, meters, engine plate contents, engine tick highlight
+    // and the three value readouts. Falls back to demo values when `bm` is
+    // null (i.e. in the module browser).
     void drawLive(NVGcontext *vg)
     {
         // Pull values (or sensible demo values in the module browser)
@@ -1033,6 +1156,9 @@ struct BastionPanel : TransparentWidget
         }
     }
 
+    // Draws the response curve for the current engine plus the cutoff
+    // marker, clipped to the response plot rectangle. Uses responseDb() to
+    // sample the analytic transfer function across the log frequency axis.
     void drawResponse(NVGcontext *vg, int engine, float fc, float res, NVGcolor ec)
     {
         const float x0 = RESP_PX0, x1 = RESP_PX1, w = x1 - x0;
@@ -1083,6 +1209,9 @@ struct BastionPanel : TransparentWidget
         nvgRestore(vg);
     }
 
+    // Draws the scope as a filled min/max envelope from the module's ring
+    // buffer, clipped to the scope plot. Uses a demo waveform when there is
+    // no module (module browser).
     void drawScope(NVGcontext *vg, NVGcolor ec)
     {
         const int N = Bastion::SCOPE_N;
@@ -1141,6 +1270,8 @@ struct BastionPanel : TransparentWidget
         nvgRestore(vg);
     }
 
+    // Draws the two vertical level meters (input "I" and output "O") as
+    // flat fills rising from the bottom of each track. Turns red above 90%.
     void drawMeters(NVGcontext *vg, float inPk, float outPk)
     {
         const float h = PLOT_Y1 - PLOT_Y0;
@@ -1160,6 +1291,8 @@ struct BastionPanel : TransparentWidget
     }
 
     // Counter, name and description (lights and their labels are static + widgets)
+    // Draws the live engine plate contents: "ENGINE nn/NN", the engine name
+    // in its accent colour, and the engine description underneath.
     void drawEnginePlate(NVGcontext *vg, int engine, NVGcolor ec)
     {
         char buf[24];
@@ -1172,14 +1305,19 @@ struct BastionPanel : TransparentWidget
 
 // ============================================================
 // Engine selector knob - fully custom-drawn (no SVG required)
+// Draws a flat knob body with an accent-coloured pointer; the colour comes
+// from the currently selected engine.
 // ============================================================
 struct BastionEngineKnob : app::Knob
 {
+    // Fixed 30x30 px knob footprint.
     BastionEngineKnob()
     {
         box.size = Vec(30.f, 30.f);
     }
 
+    // Paints the knob: drop shadow, radial-gradient body, inner cap, accent
+    // pointer at the current engine's position, and a centre dot.
     void draw(const DrawArgs &args) override
     {
         NVGcontext *vg = args.vg;
@@ -1235,8 +1373,13 @@ struct BastionEngineKnob : app::Knob
 };
 
 // ============================================================
+// Module widget: creates the panel, screws and every control, and adds the
+// context menu with an engine submenu and a "Reset State" item.
+// ============================================================
 struct BastionWidget : ModuleWidget
 {
+    // Places the panel, screws, engine knob/lights, the three parameter
+    // cells (knob + CV jack + attenuator) and the six I/O jacks.
     BastionWidget(Bastion *module)
     {
         setModule(module);
@@ -1285,6 +1428,8 @@ struct BastionWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ioX(5), jy), module, Bastion::HP_OUTPUT));
     }
 
+    // Adds the right-click menu: a separator, an "Engine" submenu with a
+    // checkmark for the active engine, and a "Reset State" action.
     void appendContextMenu(Menu *menu) override
     {
         Bastion *module = dynamic_cast<Bastion *>(this->module);

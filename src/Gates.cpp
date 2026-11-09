@@ -5,6 +5,36 @@
 #include <cstring>
 #include <algorithm>
 
+// ============================================================
+// Gates
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// Gates is a 24 HP polyphonic logic processor. It takes two gate inputs (A and
+// B) and produces seven simultaneous logic outputs: AND, OR, NOT (of A), NAND,
+// NOR, XOR and XNOR. Each input is treated as "high" when its voltage exceeds
+// 1 V, and every output is 10 V when its logic function is true and 0 V when
+// false. All outputs are polyphonic: the channel count is the larger of the two
+// inputs' channel counts (at least one), so per-voice logic is possible.
+//
+// The display is a live 9-row logic scope: one row each for A, B and the seven
+// outputs, each showing a scrolling square-wave trace of that signal's history
+// plus a state dot on the right. The TIME knob sets how many milliseconds of
+// history fill the width of the screen (logarithmically, 5 ms .. 50 s), which
+// lets you watch both very short and very long gate patterns.
+//
+// File structure:
+//   1. Layout constants (24 HP = 360x380 px) and the time-knob log mapping.
+//   2. TimeQuantity ParamQuantity (log time knob with a friendly readout).
+//   3. Gates module: logic evaluation, LEDs and the history buffer.
+//   4. Anonymous-namespace UI: GTPanel (static art) and GTDisplay (the live
+//      logic scope, including its drawRow() helper).
+//   5. GatesWidget: places inputs, LEDs, the time knob and the seven outputs.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (24 HP = 360 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -34,17 +64,22 @@ static const float GT_OUT_HEAD_Y = 296.f;
 static const float GT_OUT_TOP = 306.f, GT_OUT_H = 46.f, GT_OUT_W = 42.f;
 static const float GT_OUT_Y = GT_OUT_TOP + 31.f;
 static const float GT_OUT_LED_Y = GT_OUT_TOP + 10.f;
+// Horizontal centre of output jack i (0..6).
 static float gtOutJx(int i) { return 42.f + 46.f * i; }
 
 // Log mapping helper: knob t (0..1) -> ms/screen in [5, 50000]
 //   t=0   -> 50000 ms
 //   t=0.5 ->   500 ms  (default)
 //   t=1   ->     5 ms
+// Maps a normalized TIME knob value (0..1) to milliseconds per screen on an
+// inverted logarithmic curve (knob fully up = fastest/5 ms).
 static inline float timeKnobToMs(float t)
 {
     t = clamp(t, 0.f, 1.f);
     return 50000.f * std::pow(5.f / 50000.f, t);
 }
+// Inverse of timeKnobToMs(): maps milliseconds per screen back to a
+// normalized knob value (used by the ParamQuantity to accept typed values).
 static inline float msToTimeKnob(float ms)
 {
     if (ms <= 0.f)
@@ -53,16 +88,24 @@ static inline float msToTimeKnob(float ms)
     return clamp(t, 0.f, 1.f);
 }
 
+// ParamQuantity for the TIME knob: stores the knob in 0..1 but exposes the
+// real value in ms/screen for display, editing and reset-to-default.
 struct TimeQuantity : ParamQuantity
 {
+    // Returns the effective display value: the knob position mapped through
+    // the log curve to milliseconds per screen.
     float getDisplayValue() override
     {
         return timeKnobToMs(getValue());
     }
+    // Accepts a display value (ms/screen) and converts it back to a knob
+    // position via the inverse log mapping.
     void setDisplayValue(float v) override
     {
         setValue(msToTimeKnob(v));
     }
+    // Returns the human-readable display string: "1.50 s/screen" for values
+    // of at least one second, otherwise "500.0 ms/screen".
     std::string getDisplayValueString() override
     {
         float ms = getDisplayValue();
@@ -130,6 +173,8 @@ struct Gates : Module
     // TIME: ms per screen.
     float screenMs = 500.f;
 
+    // Constructor: configures the TIME parameter (with its log ParamQuantity),
+    // the two inputs, the seven logic outputs and the nine activity lights.
     Gates()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -157,6 +202,10 @@ struct Gates : Module
         configLight(LIGHT_XNOR, "XNOR active");
     }
 
+    // Main callback: reads the TIME knob, evaluates all seven logic functions
+    // per channel from the two gate inputs, writes the polyphonic outputs,
+    // updates the nine LEDs from channel 0, and samples channel 0's state
+    // into the display history buffer at the TIME-derived rate.
     void process(const ProcessArgs &args) override
     {
         // Same mapping used by TimeQuantity::getDisplayValue()
@@ -223,6 +272,8 @@ struct Gates : Module
         lights[LIGHT_XNOR].setBrightness(o0[6] ? 1.f : 0.f);
 
         // Sample history at a rate determined by screenMs.
+        // The 512-slot buffer always spans exactly screenMs of audio, so the
+        // per-slot duration shrinks as the TIME knob speeds up.
         double slotSec = (screenMs / 1000.0) / (double)HIST;
         histAccum += args.sampleTime;
         while (histAccum >= slotSec)
@@ -245,10 +296,15 @@ struct Gates : Module
 namespace
 {
 
+    // Static artwork: base panel, display bezel, the CONTROL section with the
+    // two input cells and the TIME knob cell, and the OUTPUT section with its
+    // seven tinted jack cells.
     struct GTPanel : TransparentWidget
     {
         GTPanel() { box.size = Vec(GT_W, GT_H); }
 
+        // Draws all static panel art: base panel, bezel, the CONTROL section
+        // (IN A, IN B, TIME cells) and the OUTPUT section (seven tinted cells).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -271,6 +327,9 @@ namespace
         }
     };
 
+    // Live logic scope: nine trace rows (A, B and the seven outputs), each a
+    // scrolling square-wave trace plus a state dot, with a header row showing
+    // the channel and time-per-screen.
     struct GTDisplay : TransparentWidget
     {
         Gates *module = nullptr;
@@ -283,6 +342,12 @@ namespace
         static const int ROWS = 9;
 
         // One trace row: label column on the left, trace in the middle, state dot on the right
+        // Draws one row: a faint background, the `title` label on the left,
+        // a step-shaped trace of the boolean history in the middle, and a
+        // state dot on the right that is filled when the current value is
+        // high. The history is read starting at `pos` (the ring-buffer write
+        // head) so the oldest sample is on the left and the newest on the
+        // right.
         void drawRow(NVGcontext *vg, float x, float y, float w, float h,
                      const char *title, bool curHigh,
                      const bool *hist, int len, int pos, NVGcolor color)
@@ -316,6 +381,8 @@ namespace
                     }
                     else if (v != prev)
                     {
+                        // Draw the vertical edge at the midpoint of the slot
+                        // before the transition, then the horizontal run.
                         float mx = traceX + (i - 0.5f) * step;
                         nvgLineTo(vg, mx, prev ? hiY : loY);
                         nvgLineTo(vg, mx, py);
@@ -338,12 +405,17 @@ namespace
             nvgFill(vg);
         }
 
+        // Static layer: fills the display area with the flat screen colour.
         void draw(const DrawArgs &args) override
         {
             agmm::screen(args.vg, 0.f, 0.f, GT_DW, GT_DH);
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the header row (channel / time per screen)
+        // and the nine trace rows for A, B and the seven logic outputs. Reads
+        // live state when a module is present, and leaves the rows blank in
+        // the module browser (there is no sample history to show).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -401,8 +473,16 @@ namespace
 
 } // namespace
 
+// ============================================================
+// Module widget: adds the static panel, screws, the logic scope, the two
+// inputs with their LEDs, the TIME knob, and the seven outputs (each with an
+// LED next to its label).
+// ============================================================
 struct GatesWidget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, the live scope, the two
+    // input jacks with their activity LEDs, the TIME knob, the seven output
+    // jacks, and the seven output LEDs on the output label row.
     GatesWidget(Gates *module)
     {
         setModule(module);

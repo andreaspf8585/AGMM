@@ -5,6 +5,30 @@
 #include <algorithm>
 #include <memory>
 
+// ============================================================
+// Black Hole Reverb
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// Black Hole is a 12 HP stereo reverb built from six parallel modulated delay
+// lines (a classic "Schroeder/FDN-lite" structure) with damping, a shared
+// pre-delay, feedback and a dry/wet mix. It exposes CV control (with
+// attenuverters) over mix, feedback, darkness and modulation, plus a live
+// display showing a scope of the mono output and L/R level meters.
+//
+// File structure:
+//   1. Constants (number of delays, buffer sizes, scope size).
+//   2. BlackHoleReverb module: DSP state, params/ports config, JSON
+//      persistence for the CV range, process().
+//   3. Panel layout constants (12 HP = 180x380 px).
+//   4. Theme/drawing helpers and the two panel widgets:
+//        - BhPanelBackground: static artwork (title, sections, plates, bezel)
+//        - BhDisplayWidget:  live scope + meters + readouts (layer 1)
+//   5. BlackHoleReverbWidget: places widgets and builds the CV-range menu.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
 static const int NUM_DELAYS = 6;
 static const int MAX_DELAY = 96000;
 static const int PRE_DELAY_MAX = 44100;
@@ -27,6 +51,7 @@ struct BlackHoleReverb : Module
     float filterStoreL[NUM_DELAYS] = {};
     float filterStoreR[NUM_DELAYS] = {};
 
+    // Selectable CV interpretation: bipolar ±5 V or unipolar 0..10 V.
     enum CVRange
     {
         BIPOLAR_M5_5,
@@ -73,6 +98,7 @@ struct BlackHoleReverb : Module
         OUTPUTS_LEN
     };
 
+    // Constructor: configures parameters, inputs, outputs and stereo bypass.
     BlackHoleReverb()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN);
@@ -101,6 +127,8 @@ struct BlackHoleReverb : Module
         configBypass(IN_R, OUT_R);
     }
 
+    // Serialises the chosen CV range mode so patches reopen with the same
+    // CV interpretation.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -108,6 +136,8 @@ struct BlackHoleReverb : Module
         return root;
     }
 
+    // Restores the CV range mode from a saved patch, defaulting to bipolar
+    // if the field is missing or unrecognised.
     void dataFromJson(json_t *root) override
     {
         json_t *mode = json_object_get(root, "cvRangeMode");
@@ -118,6 +148,8 @@ struct BlackHoleReverb : Module
         }
     }
 
+    // Normalises a raw CV voltage to roughly -1..1 (bipolar ±5 V) or 0..1
+    // (unipolar 0..10 V) according to the selected CV range mode.
     float scaleCV(float v) const
     {
         if (cvRangeMode == UNIPOLAR_0_10)
@@ -125,6 +157,8 @@ struct BlackHoleReverb : Module
         return clamp(v / 5.f, -1.f, 1.f);
     }
 
+    // Main audio callback: reads controls and CV, runs the six-line reverb,
+    // mixes dry/wet, writes the outputs and updates the scope/meter data.
     void process(const ProcessArgs &args) override
     {
         if (args.sampleTime <= 0.0f)
@@ -158,6 +192,7 @@ struct BlackHoleReverb : Module
         float damp = clamp(dampKnob + dampCV * dampAtten, 0.f, 1.f);
         float modAmount = clamp(modKnob + modCV * modAtten, 0.f, 1.f);
 
+        // Shared pre-delay (80 ms) fed from the mono sum of both inputs.
         int preDelaySamples = (int)(0.08f * args.sampleRate);
         preDelaySamples = clamp(preDelaySamples, 0, PRE_DELAY_MAX - 1);
         int preRead = preWrite - preDelaySamples;
@@ -177,6 +212,8 @@ struct BlackHoleReverb : Module
 
         float wetL = 0.f, wetR = 0.f;
 
+        // Six modulated delay lines with damping in the feedback path and a
+        // small cross-feed between L and R for a stereo spread.
         for (int i = 0; i < NUM_DELAYS; i++)
         {
             modPhase[i] += args.sampleTime * (0.08f + 0.04f * i);
@@ -217,6 +254,7 @@ struct BlackHoleReverb : Module
         float outL = (1.f - mix) * inL + mix * wetL;
         float outR = (1.f - mix) * inR + mix * wetR;
 
+        // Soft clip to ±10 V to keep the outputs in a safe audio range.
         const float clipLevel = 10.f;
         outL = clipLevel * std::tanh(outL / clipLevel);
         outR = clipLevel * std::tanh(outR / clipLevel);
@@ -225,10 +263,12 @@ struct BlackHoleReverb : Module
         outputs[OUT_R].setVoltage(safe(outR));
 
         // ---- display data ----
+        // Peak envelopes with a short decay for the L/R meters.
         float decay = 1.f - 4.f * args.sampleTime;
         peakL = std::max(std::fabs(outL), peakL * decay);
         peakR = std::max(std::fabs(outR), peakR * decay);
 
+        // Scope ring buffer: min/max of the mono output, bucketed to ~2.5 ms.
         float mono = 0.5f * (outL + outR);
         if (scopeCount == 0)
             scopeBMin = scopeBMax = mono;
@@ -289,6 +329,7 @@ static const float BH_SUB_DX = 17.f; // CV jack left, attenuator right
 static const float BH_SEC2_Y = 292.f;
 static const float BH_IO_TOP = 300.f, BH_IO_H = 52.f, BH_IO_W = 38.f;
 static const float BH_IO_LABEL = 10.f, BH_IO_JACK = 34.f;
+// Horizontal centre of I/O jack i (0..3): 2 inputs then 2 outputs.
 static float bhIoX(int i) { return 25.5f + 43.f * i; }
 
 // ============================================================
@@ -297,17 +338,26 @@ static float bhIoX(int i) { return 25.5f + 43.f * i; }
 namespace
 {
 
+    // Panel background gradient start colour (top).
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    // Panel background gradient end colour (bottom).
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    // Default body text colour.
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    // Muted colour for secondary labels.
     NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    // Primary accent colour (cyan).
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    // Secondary accent colour (violet), used for meter gradients.
     NVGcolor colAccent2() { return nvgRGB(0xb0, 0x5a, 0xff); }
 
+    // Text alignment presets.
     const int ALIGN_L = NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE;
     const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
     const int ALIGN_R = NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE;
 
+    // Loads the AGMM monospace font and makes it the current NanoVG font
+    // face. Returns false if there is no window or the font is missing.
     bool setFont(NVGcontext *vg)
     {
         if (!APP || !APP->window)
@@ -320,6 +370,8 @@ namespace
         return true;
     }
 
+    // Draws a string at (x, y) with the given size, colour, alignment and
+    // letter spacing.
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
                   int align = ALIGN_C, float spacing = 0.5f)
     {
@@ -367,6 +419,8 @@ namespace
         nvgStroke(vg);
     }
 
+    // Describes one of the four reverb cells: label plus the three module
+    // IDs (knob parameter, CV attenuator parameter, CV input) that it hosts.
     struct BhCellDef
     {
         const char *name;
@@ -387,6 +441,9 @@ namespace
     {
         BhPanelBackground() { box.size = Vec(BH_PANEL_W, BH_PANEL_H); }
 
+        // Draws the opaque background, title, maker tag, display bezel,
+        // REVERB section with its four cell plates, and the I/O row with
+        // its four jack plates.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -448,8 +505,12 @@ namespace
             box.size = Vec(BH_DISP_W, BH_DISP_H);
         }
 
+        // Width of the scope area (the display width minus room for meters).
         static float scopeW() { return BH_DISP_W - 16.f; }
 
+        // Draws the dark display fill and its grid (vertical ticks and a
+        // centre line). This runs on layer 0; the live waveform is drawn in
+        // drawLayer().
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -474,6 +535,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the scope waveform from the module's
+        // min/max ring buffer (or a demo burst in the module browser), the
+        // L/R level meters with a cyan-to-violet gradient, and the two
+        // readouts (MIX and FB) in their own row below the display.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -553,10 +618,14 @@ namespace
 } // namespace
 
 // ============================================================
-// Module widget
+// Module widget: adds the panel background, screws, display widget, the
+// four reverb control cells and the two in / two out jacks, plus the
+// CV-range context menu.
 // ============================================================
 struct BlackHoleReverbWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, live display,
+    // four cells (knob + CV jack + attenuator) and the I/O jacks.
     BlackHoleReverbWidget(BlackHoleReverb *module)
     {
         setModule(module);
@@ -593,6 +662,8 @@ struct BlackHoleReverbWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(bhIoX(3), jy), module, BlackHoleReverb::OUT_R));
     }
 
+    // Adds the right-click "CV Range" submenu with two mutually exclusive,
+    // checkmarked options that set the module's CV interpretation.
     void appendContextMenu(Menu *menu) override
     {
         BlackHoleReverb *module = dynamic_cast<BlackHoleReverb *>(this->module);
@@ -606,10 +677,12 @@ struct BlackHoleReverbWidget : ModuleWidget
         {
             BlackHoleReverb *module;
             BlackHoleReverb::CVRange range;
+            // Sets the module's CV range mode to this item's range.
             void onAction(const ActionEvent &e) override
             {
                 module->cvRangeMode = range;
             }
+            // Shows a checkmark when this item's range is the active mode.
             void step() override
             {
                 rightText = CHECKMARK(module->cvRangeMode == range);
@@ -629,4 +702,7 @@ struct BlackHoleReverbWidget : ModuleWidget
     }
 };
 
+// ============================================================
+// Module registration
+// ============================================================
 Model *modelBlackHoleReverb = createModel<BlackHoleReverb, BlackHoleReverbWidget>("BlackHoleReverb");

@@ -1,20 +1,30 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+
 
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
 static const float PR_W = RACK_GRID_WIDTH * 14; // 210
 static const float PR_H = RACK_GRID_HEIGHT;     // 380
-static const float PR_DX = 30.f, PR_DY = 46.f, PR_DW = 150.f, PR_DH = 92.f;
-static const float PR_ROW[4] = {164.f, 202.f, 240.f, 278.f}; // top of each control row
-static const float PR_ROWH = 34.f;
+
+// Display (170 x 114): header, decay field, damping field, axis row, footer
+static const float PR_DX = 20.f, PR_DY = 34.f, PR_DW = 170.f, PR_DH = 114.f;
+
+// Control rows: header labels at y = 160, then 4 plates of 32 px
+static const float PR_HDR_Y = 160.f;
+static const float PR_ROW[4] = {168.f, 204.f, 240.f, 276.f}; // top of each control row
+static const float PR_ROWH = 32.f;
 static const float PR_CVX = 100.f, PR_ATX = 137.f, PR_KX = 173.f;
-static const float PR_IOY = 346.f;
-static float prIoX(int i) { return 30.f + 50.f * i; }
+
+// I/O cells: label on top, jack below
+static const float PR_IO_TOP = 314.f, PR_IO_H = 42.f, PR_IO_W = 44.f;
+static float prIoX(int i) { return 33.75f + 47.5f * i; }
+static float prIoY() { return PR_IO_TOP + 28.f; }
 
 // ------------------------------------------------------------
 // Freeverb-style reverb (no runaway gain)
@@ -216,6 +226,8 @@ struct PsyReverb : Module
         configInput(CV_DAMPING, "Damping CV (10 V = 100%)");
         configOutput(OUTPUT_LEFT, "Left");
         configOutput(OUTPUT_RIGHT, "Right");
+        configBypass(INPUT_LEFT, OUTPUT_LEFT);
+        configBypass(INPUT_RIGHT, OUTPUT_RIGHT);
 
         paramDivider.setDivision(32);
         onSampleRateChange();
@@ -263,175 +275,54 @@ struct PsyReverb : Module
     }
 };
 
+
 // Everything below lives in an anonymous namespace so the names cannot clash
 // with the same-named helpers in the other module files.
 namespace
 {
+    namespace ag = agmm;
 
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-    NVGcolor withAlpha(NVGcolor c, float a)
-    {
-        c.a = a;
-        return c;
-    }
-
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int)H; y += 3)
-        {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStroke(vg);
-        drawLogo(vg, W / 2.f, 13.f);
-        drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-    }
-
-    void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
-    {
-        float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-    }
-
-    void plate(NVGcontext *vg, float x, float y, float w, float h)
-    {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void label(NVGcontext *vg, float x, float y, const char *t)
-    {
-        drawText(vg, x, y, t, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-    }
-
-    void topCell(NVGcontext *vg, float cx, float cy, const char *t)
-    {
-        plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-        label(vg, cx, cy - 19.f, t);
-    }
-
-    void screenBase(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-        nvgFill(vg);
-    }
-
-    void screenFinish(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int)H; y += 3)
-            nvgRect(vg, 0, y + 1, W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H * 0.3f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-    }
-
+    // ------------------------------------------------------------
+    // Panel: title, display frame, labelled control rows, I/O cells
+    // ------------------------------------------------------------
     struct PRPanel : TransparentWidget
     {
         PRPanel() { box.size = Vec(PR_W, PR_H); }
+
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            drawPanelBase(vg, PR_W, PR_H, "PSYREVERB");
-            drawBezel(vg, PR_DX, PR_DY, PR_DW, PR_DH);
 
-            drawText(vg, PR_CVX, 157.f, "CV", 6.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, PR_ATX, 157.f, "ATT", 6.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, PR_KX, 157.f, "KNOB", 6.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+            ag::panelBase(vg, PR_W, PR_H, "PSYREVERB");
+            ag::bezel(vg, PR_DX, PR_DY, PR_DW, PR_DH);
 
+            // Column headers
+            ag::text(vg, PR_CVX, PR_HDR_Y, "CV", 7.f, ag::accent(), ag::ALIGN_C, 1.f);
+            ag::text(vg, PR_ATX, PR_HDR_Y, "ATT", 7.f, ag::accent(), ag::ALIGN_C, 1.f);
+            ag::text(vg, PR_KX, PR_HDR_Y, "KNOB", 7.f, ag::accent(), ag::ALIGN_C, 1.f);
+
+            // Control rows: full-width plate, name on the left
             const char *names[4] = {"WET", "DRY", "ROOM", "DAMP"};
             for (int i = 0; i < 4; ++i)
             {
-                plate(vg, 10.f, PR_ROW[i], 190.f, PR_ROWH);
-                drawText(vg, 20.f, PR_ROW[i] + PR_ROWH / 2.f, names[i], 8.f, colText(),
-                         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.5f);
+                ag::plate(vg, PR_W / 2.f, PR_ROW[i], 190.f, PR_ROWH);
+                ag::text(vg, 20.f, PR_ROW[i] + PR_ROWH / 2.f, names[i], 8.f, ag::textCol(),
+                         ag::ALIGN_L, 1.5f);
             }
 
+            // I/O
             const char *io[4] = {"L IN", "R IN", "L OUT", "R OUT"};
             for (int i = 0; i < 4; ++i)
-                topCell(vg, prIoX(i), PR_IOY, io[i]);
+                ag::cell(vg, prIoX(i), PR_IO_TOP, PR_IO_W, PR_IO_H, io[i], i >= 2);
+
             Widget::draw(args);
         }
     };
 
+    // ------------------------------------------------------------
+    // Display rows (display-local): header 0-15, decay caption 22, decay field 27-55,
+    // damping caption 63, damping field 68-86, axis labels 93, footer 107
+    // ------------------------------------------------------------
     struct PRDisplay : TransparentWidget
     {
         PsyReverb *module = nullptr;
@@ -441,43 +332,65 @@ namespace
             box.size = Vec(PR_DW, PR_DH);
         }
 
-        static constexpr float FX = 10.f, FW = 100.f;
-        static constexpr float DY = 16.f, DH = 34.f; // decay field
-        static constexpr float PY = 58.f, PH = 18.f; // damping field
+        static constexpr float FX = 8.f, FW = 120.f;
+        static constexpr float DY = 27.f, DH = 28.f; // decay field
+        static constexpr float PY = 68.f, PH = 18.f; // damping field
+        static constexpr float MX = 138.f;           // first meter
+
+        static void hairline(NVGcontext *vg, float y)
+        {
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 8.f, y);
+            nvgLineTo(vg, PR_DW - 8.f, y);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+        }
+
+        static float dampX(float f) { return FX + FW * (std::log10(std::max(f, 20.f) / 20.f) / 3.f); }
 
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            screenBase(vg, PR_DW, PR_DH);
-            const float fy[2] = {DY, PY}, fh[2] = {DH, PH};
-            for (int k = 0; k < 2; ++k)
-            {
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, FX - 1.f, fy[k] - 1.f, FW + 2.f, fh[k] + 2.f, 2.f);
-                nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-                nvgFill(vg);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-            }
+
+            ag::screen(vg, 0.f, 0.f, PR_DW, PR_DH);
+            hairline(vg, 15.5f);
+            hairline(vg, 100.5f);
+
+            ag::plotFrame(vg, FX, DY, FW, DH);
+            ag::plotFrame(vg, FX, PY, FW, PH);
+
+            // grid
             nvgBeginPath(vg);
             for (int t = 1; t < 4; ++t)
             {
                 float x = FX + FW * t / 4.f + 0.5f;
-                nvgMoveTo(vg, x, DY);
-                nvgLineTo(vg, x, DY + DH);
+                nvgMoveTo(vg, x, DY + 1.f);
+                nvgLineTo(vg, x, DY + DH - 1.f);
             }
-            for (int d = 1; d <= 3; ++d)
-            { // 100 Hz, 1 kHz, 10 kHz
-                float x = FX + FW * (std::log10(std::pow(10.f, (float)d) * 10.f / 20.f) / 3.f) + 0.5f;
-                nvgMoveTo(vg, x, PY);
-                nvgLineTo(vg, x, PY + PH);
+            const float fq[3] = {100.f, 1000.f, 10000.f};
+            for (int d = 0; d < 3; ++d)
+            {
+                float x = dampX(fq[d]) + 0.5f;
+                nvgMoveTo(vg, x, PY + 1.f);
+                nvgLineTo(vg, x, PY + PH - 1.f);
             }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
-            drawText(vg, FX + 2.f, DY + 6.f, "DECAY 0-8S", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, FX + 2.f, PY + 6.f, "DAMP", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+
+            // captions above the fields, frequency labels below the damping field
+            ag::text(vg, FX, 22.f, "DECAY 0-8S", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+            ag::text(vg, FX, 63.f, "DAMPING", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+            ag::text(vg, dampX(100.f), 93.f, "100", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, dampX(1000.f), 93.f, "1K", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, dampX(10000.f), 93.f, "10K", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+
+            // meter channel labels
+            ag::text(vg, MX + 2.5f, 93.f, "I", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, MX + 10.5f, 93.f, "L", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, MX + 18.5f, 93.f, "R", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+
             Widget::draw(args);
         }
 
@@ -489,7 +402,7 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float W = PR_DW, H = PR_DH;
+            const float W = PR_DW;
 
             float wet = 0.5f, dry = 0.5f, room = 0.8f, damp = 0.5f, mIn = 2.f, mL = 2.8f, mR = 2.8f;
             if (module)
@@ -521,25 +434,24 @@ namespace
                 }
                 nvgLineTo(vg, FX + FW, DY + DH - 1.f);
                 nvgClosePath(vg);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, DY, 0, DY + DH, nvgRGBA(0x3d, 0xe0, 0xff, 70), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.2f));
                 nvgFill(vg);
-                for (int pass = 0; pass < 2; ++pass)
+
+                nvgBeginPath(vg);
+                for (int i = 0; i <= (int)FW; ++i)
                 {
-                    nvgBeginPath(vg);
-                    for (int i = 0; i <= (int)FW; ++i)
-                    {
-                        float t = 8.f * i / FW;
-                        float y = DY + DH - 1.f - std::exp(-6.9078f * t / rt60) * (DH - 2.f);
-                        if (i == 0)
-                            nvgMoveTo(vg, FX + i, y);
-                        else
-                            nvgLineTo(vg, FX + i, y);
-                    }
-                    nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 50) : nvgRGB(0x8a, 0xee, 0xff));
-                    nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.3f);
-                    nvgLineJoin(vg, NVG_ROUND);
-                    nvgStroke(vg);
+                    float t = 8.f * i / FW;
+                    float y = DY + DH - 1.f - std::exp(-6.9078f * t / rt60) * (DH - 2.f);
+                    if (i == 0)
+                        nvgMoveTo(vg, FX + i, y);
+                    else
+                        nvgLineTo(vg, FX + i, y);
                 }
+                nvgStrokeColor(vg, ag::bright());
+                nvgStrokeWidth(vg, 1.3f);
+                nvgLineJoin(vg, NVG_ROUND);
+                nvgStroke(vg);
+
                 if (rt60 < 8.f)
                 {
                     float mx = FX + FW * rt60 / 8.f;
@@ -549,7 +461,7 @@ namespace
                         nvgMoveTo(vg, mx + 0.5f, y);
                         nvgLineTo(vg, mx + 0.5f, y + 2.f);
                     }
-                    nvgStrokeColor(vg, withAlpha(colViolet(), 0.9f));
+                    nvgStrokeColor(vg, ag::withA(ag::violet(), 0.9f));
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
@@ -557,66 +469,46 @@ namespace
 
             // damping response (one-pole, log 20 Hz..20 kHz, 0..-36 dB)
             {
-                for (int pass = 0; pass < 2; ++pass)
+                nvgBeginPath(vg);
+                for (int i = 0; i <= (int)FW; ++i)
                 {
-                    nvgBeginPath(vg);
-                    for (int i = 0; i <= (int)FW; ++i)
-                    {
-                        float f = 20.f * std::pow(1000.f, (float)i / FW);
-                        float db = -10.f * std::log10(1.f + (f / cutoff) * (f / cutoff));
-                        float t = std::min(std::max(-db / 36.f, 0.f), 1.f);
-                        float y = PY + 1.f + t * (PH - 2.f);
-                        if (i == 0)
-                            nvgMoveTo(vg, FX + i, y);
-                        else
-                            nvgLineTo(vg, FX + i, y);
-                    }
-                    nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0xb0, 0x5a, 0xff, 60) : nvgRGB(0xd8, 0xb0, 0xff));
-                    nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
-                    nvgLineJoin(vg, NVG_ROUND);
-                    nvgStroke(vg);
+                    float f = 20.f * std::pow(1000.f, (float)i / FW);
+                    float db = -10.f * std::log10(1.f + (f / cutoff) * (f / cutoff));
+                    float t = std::min(std::max(-db / 36.f, 0.f), 1.f);
+                    float y = PY + 1.f + t * (PH - 2.f);
+                    if (i == 0)
+                        nvgMoveTo(vg, FX + i, y);
+                    else
+                        nvgLineTo(vg, FX + i, y);
                 }
-                float cxm = FX + FW * (std::log10(std::max(cutoff, 20.f) / 20.f) / 3.f);
+                nvgStrokeColor(vg, nvgRGB(0xd8, 0xb0, 0xff));
+                nvgStrokeWidth(vg, 1.2f);
+                nvgLineJoin(vg, NVG_ROUND);
+                nvgStroke(vg);
+
+                float cxm = dampX(cutoff);
                 nvgBeginPath(vg);
                 nvgRect(vg, cxm, PY, 1.f, PH);
-                nvgFillColor(vg, withAlpha(colAccent(), 0.7f));
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.7f));
                 nvgFill(vg);
             }
 
-            // meters: in, L, R
-            for (int k = 0; k < 3; ++k)
-            {
-                float v = k == 0 ? mIn : (k == 1 ? mL : mR);
-                float lv = std::min(v / 5.f, 1.f);
-                float x = 118.f + k * 8.f;
-                nvgBeginPath(vg);
-                nvgRect(vg, x, 16.f, 5.f, 60.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-                nvgFill(vg);
-                if (lv > 0.01f)
-                {
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x, 76.f - lv * 60.f, 5.f, lv * 60.f);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 76.f, 0, 16.f, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-                    nvgFill(vg);
-                }
-            }
-            drawText(vg, 120.5f, 82.f, "I", 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-            drawText(vg, 128.5f, 82.f, "L", 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-            drawText(vg, 136.5f, 82.f, "R", 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+            // meters: in, L, R (spanning both fields)
+            ag::meter(vg, MX, DY, 5.f, PY + PH - DY, std::min(mIn / 5.f, 1.f));
+            ag::meter(vg, MX + 8.f, DY, 5.f, PY + PH - DY, std::min(mL / 5.f, 1.f));
+            ag::meter(vg, MX + 16.f, DY, 5.f, PY + PH - DY, std::min(mR / 5.f, 1.f));
 
-            screenFinish(vg, W, H);
-
+            // header + footer readouts
             char buf[48];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-            snprintf(buf, sizeof(buf), "ROOM %3.0f%%", room * 100.f);
-            drawText(vg, 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "WET %3.0f%%", wet * 100.f);
-            drawText(vg, W - 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            snprintf(buf, sizeof(buf), "ROOM %.0f%%", room * 100.f);
+            ag::text(vg, 8.f, 8.f, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "WET %.0f%%", wet * 100.f);
+            ag::text(vg, W - 8.f, 8.f, buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
             snprintf(buf, sizeof(buf), "RT60 %.1fS", rt60);
-            drawText(vg, 6.f, 86.f, buf, 7.f, nvgRGBA(0xff, 0xe6, 0x80, 220), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-            snprintf(buf, sizeof(buf), "DRY %3.0f%%", dry * 100.f);
-            drawText(vg, W - 6.f, 86.f, buf, 7.f, nvgRGBA(0x7a, 0x85, 0x94, 230), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 8.f, 107.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "DRY %.0f%%", dry * 100.f);
+            ag::text(vg, W - 8.f, 107.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
+
             Widget::drawLayer(args, layer);
         }
     };
@@ -649,10 +541,11 @@ struct PsyReverbWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PR_KX, cy), module, knobs[i]));
         }
 
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(0), PR_IOY), module, PsyReverb::INPUT_LEFT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(1), PR_IOY), module, PsyReverb::INPUT_RIGHT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(2), PR_IOY), module, PsyReverb::OUTPUT_LEFT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(3), PR_IOY), module, PsyReverb::OUTPUT_RIGHT));
+        const float y = prIoY();
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(0), y), module, PsyReverb::INPUT_LEFT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(1), y), module, PsyReverb::INPUT_RIGHT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(2), y), module, PsyReverb::OUTPUT_LEFT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(3), y), module, PsyReverb::OUTPUT_RIGHT));
     }
 };
 

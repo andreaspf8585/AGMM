@@ -7,6 +7,32 @@
 #include <cstring>
 #include <algorithm>
 
+// ============================================================
+// Dice
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// Dice is a 16 HP polyphonic random-gate / random-V-Oct generator. On every
+// rising clock edge it rolls a die per voice: with the PROBABILITY setting a
+// voice fires, opening its gate for the configured gate time and latching a
+// new random voltage. That voltage is emitted both raw (RANDOM output) and
+// quantized to a selectable scale (QUANT output), making the module usable as
+// a random sequencer, a probabilistic trigger source, or a quantized random
+// melody generator.
+//
+// File structure:
+//   1. Layout constants (16 HP = 240x380 px).
+//   2. Scale table (diceScales()) with 60+ named scales.
+//   3. Dice module: state, config, quantization, random generation, JSON,
+//      and process().
+//   4. Anonymous-namespace UI: DCPanel (static art) and DCDisplay (live
+//      plot, header and footer rows).
+//   5. DiceWidget: places controls, LEDs and the context menu.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (16 HP = 240 x 380)
 // ------------------------------------------------------------
@@ -36,17 +62,22 @@ static const float DC_KX0 = 68.f, DC_KX1 = 172.f;
 static const float DC_SEC2_Y = 278.f;
 static const float DC_IO_TOP = 290.f, DC_IO_H = 62.f, DC_IO_W = 48.f;
 static const float DC_IOY = DC_IO_TOP + 38.f; // jack centre (label above, jack 24 px)
+// Horizontal centre of I/O jack i (0..3): clock in then 3 outputs.
 static float dcIoX(int i) { return 36.f + 56.f * i; }
 
 // ------------------------------------------------------------
 // Scales
 // ------------------------------------------------------------
+// One named quantization scale: a display name plus its semitone intervals
+// from the root.
 struct DiceScale
 {
     std::string name;
     std::vector<float> intervals; // semitone intervals from root
 };
 
+// Returns the static list of all built-in quantization scales. Built once
+// on first call and reused thereafter.
 static const std::vector<DiceScale> &diceScales()
 {
     static const std::vector<DiceScale> scales = {
@@ -159,6 +190,8 @@ struct Dice : Module
     int activePoly = 1;
     float flash[16] = {};
 
+    // Constructor: configures the two knobs, clock input, three outputs and
+    // the 16 per-channel gate lights.
     Dice()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -173,6 +206,10 @@ struct Dice : Module
             configLight(LIGHT_GATES + i, string::f("Channel %d gate", i + 1));
     }
 
+    // Quantizes `voltage` (in V/Oct) to the nearest note of `scale`. Works in
+    // semitone space: splits into an octave plus a fractional part, finds the
+    // closest scale degree (also considering the wrap to the next octave),
+    // and returns the quantized voltage.
     float quantizeToScale(float voltage, const DiceScale &scale)
     {
         float semitones = voltage * 12.0f;
@@ -201,6 +238,9 @@ struct Dice : Module
         return (float)(octave + (int)std::floor(bestMatch + 0.5f)) + bestMatch;
     }
 
+    // Rolls a new random voltage for `channel` according to the selected
+    // range, stores it in the raw output buffer, and stores the quantized
+    // version of it for the quantized output.
     void generateRandomVoltage(int channel)
     {
         float voltage = 0.0f;
@@ -224,6 +264,8 @@ struct Dice : Module
         quantizedVoltages[channel] = quantizeToScale(voltage, sc[clamp(selectedScale, 0, (int)sc.size() - 1)]);
     }
 
+    // Rack reset hook: restores gate time, random range and scale to their
+    // defaults, then defers to the base reset.
     void onReset(const ResetEvent &e) override
     {
         gateTime = 0.01f;
@@ -232,6 +274,8 @@ struct Dice : Module
         Module::onReset(e);
     }
 
+    // Serialises the gate time, random range and selected scale so patches
+    // reopen with the same settings.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -241,6 +285,8 @@ struct Dice : Module
         return root;
     }
 
+    // Restores the gate time, random range and selected scale from a saved
+    // patch, clamping each to its valid range.
     void dataFromJson(json_t *root) override
     {
         json_t *gt = json_object_get(root, "gateTime");
@@ -254,6 +300,9 @@ struct Dice : Module
             selectedScale = clamp((int)json_integer_value(ss), 0, (int)diceScales().size() - 1);
     }
 
+    // Main callback: detects clock rising edges, rolls the die per voice,
+    // decrements gate timers, clears unused channels, writes the three
+    // polyphonic outputs, and updates the LED flash envelopes.
     void process(const ProcessArgs &args) override
     {
         float clockVoltage = inputs[INPUT_CLOCK].getVoltage();
@@ -332,9 +381,15 @@ struct Dice : Module
 namespace
 {
 
+    // Static artwork: base panel, display bezel, LED strip plate, and the
+    // CONTROL and I/O section frames.
     struct DCPanel : TransparentWidget
     {
         DCPanel() { box.size = Vec(DC_W, DC_H); }
+
+        // Draws the static panel artwork: base panel, display bezel, LED
+        // strip plate, CONTROL section with its two cells, and the I/O
+        // section with its four jack cells (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -363,6 +418,8 @@ namespace
         }
     };
 
+    // Live display: 16 per-channel bars (quantized filled, raw as a tick),
+    // plus a header row (scale / range) and footer row (poly / prob / gate).
     struct DCDisplay : TransparentWidget
     {
         Dice *module = nullptr;
@@ -372,12 +429,16 @@ namespace
             box.size = Vec(DC_DW, DC_DH);
         }
 
+        // Static layer: fills the display area with the flat screen colour.
         void draw(const DrawArgs &args) override
         {
             agmm::screen(args.vg, 0.f, 0.f, DC_DW, DC_DH);
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the plot frame, channel columns, voltage
+        // grid, quantized bars and raw ticks, plus the header and footer
+        // text rows. Falls back to a sample scene in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -500,8 +561,15 @@ namespace
 
 } // namespace
 
+// ============================================================
+// Module widget: adds the panel, screws, display, two knobs, the four
+// I/O jacks, the 16 gate LEDs, and the context menu (gate time, random
+// range, quantization scale).
+// ============================================================
 struct DiceWidget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, live display, two knobs,
+    // the clock input and three outputs, and the 16 gate LEDs.
     DiceWidget(Dice *module)
     {
         setModule(module);
@@ -528,6 +596,9 @@ struct DiceWidget : ModuleWidget
                 Vec(DC_DX + (i + 0.5f) * DC_CHW, DC_LEDY), module, Dice::LIGHT_GATES + i));
     }
 
+    // Adds the right-click menu: "Gate time", "Random V/Oct range" and
+    // "Quantization scale" submenus, each with a checkmark on the active
+    // option.
     void appendContextMenu(Menu *menu) override
     {
         Dice *module = dynamic_cast<Dice *>(this->module);

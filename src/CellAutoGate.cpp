@@ -8,6 +8,40 @@
 #include <memory>
 
 // =============================================================================
+// Cell Auto Gate
+// =============================================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// CellAutoGate runs a one-dimensional elementary cellular automaton (Wolfram
+// rules 0-255) on a 64-cell row and turns the cells into a 1-16 channel
+// polyphonic gate signal. Each channel samples the automaton at an evenly
+// spaced position along the row, so different channels fire different
+// rhythms from the same rule.
+//
+// The module can be stepped either by its internal clock (SPEED knob) or by
+// an external clock patch into CLOCK. RANDOM fills the row with random bits,
+// RESET restarts from a single centre cell. The display shows the most recent
+// 64 rows of history (newest brightest), with a status row above and a rule
+// truth-table glyph row below.
+//
+// File structure:
+//   1. Layout constants (32 HP = 480x380 px).
+//   2. CellAutoGate module: automaton state, ruleset, history buffer,
+//      clocking and poly gate outputs.
+//   3. Anonymous-namespace UI helpers and widgets:
+//        - theme colours / font / text / plate / cell helpers
+//        - CAPanelBackground: static artwork
+//        - CellularDisplayWidget: history display (static grid + live cells)
+//        - CAStatusWidget: status text row above the display
+//        - CARuleTableWidget: rule truth-table glyphs under the display
+//        - TCaCyanLight: custom cyan LED widget
+//   4. CellAutoGateWidget: places all controls and LEDs.
+//   5. Model registration.
+// -----------------------------------------------------------------------------
+
+// =============================================================================
 // Layout (32 HP = 480 x 380 px)
 //
 //   y   0-15   screws
@@ -106,6 +140,8 @@ struct CellAutoGate : Module
     int lastRule = -1;
     bool clockActive = false;
 
+    // Constructor: configures params, input, output and lights, builds the
+    // initial ruleset from the RULE knob and restarts the automaton.
     CellAutoGate()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -131,14 +167,19 @@ struct CellAutoGate : Module
         restart();
     }
 
+    // Resets the automaton state (same as pressing RESET).
     void onReset() override { restart(); }
 
+    // Expands a Wolfram rule number (0-255) into the 8-entry lookup table
+    // indexed by the 3-bit neighbourhood (left, centre, right).
     void updateRuleset(int rule)
     {
         for (int i = 0; i < 8; ++i)
             ruleset[i] = (rule >> i) & 1;
     }
 
+    // Writes one row into the history ring buffer, advancing the head and
+    // saturating the count at ROWS.
     void pushHistory(uint64_t row)
     {
         history[histHead] = row;
@@ -148,12 +189,14 @@ struct CellAutoGate : Module
     }
 
     // Row r (0 = oldest) for display
+    // Returns the r-th history row counting from the oldest stored row.
     uint64_t getHistoryRow(int r) const
     {
         int oldest = (histHead - histCount + ROWS * 2) % ROWS;
         return history[(oldest + r) % ROWS];
     }
 
+    // Restarts the automaton from a single centre cell and clears history.
     void restart()
     {
         currentRow = 1ULL << (COLS / 2);
@@ -161,6 +204,8 @@ struct CellAutoGate : Module
         pushHistory(currentRow);
     }
 
+    // Fills the current row with random bits (about 50% density) and clears
+    // history to just that row.
     void randomize()
     {
         uint64_t r = 0;
@@ -172,6 +217,8 @@ struct CellAutoGate : Module
         pushHistory(currentRow);
     }
 
+    // Advances the automaton by one generation, wrapping at the row edges
+    // (circular neighbourhood), and pushes the new row into history.
     void stepAutomaton()
     {
         uint64_t next = 0;
@@ -187,6 +234,9 @@ struct CellAutoGate : Module
         pushHistory(currentRow);
     }
 
+    // Main callback: rebuilds the ruleset if the rule changed, applies the
+    // RANDOM/RESET buttons, advances the automaton on the external clock or
+    // the internal SPEED timer, then writes the poly gate outputs and LEDs.
     void process(const ProcessArgs &args) override
     {
         int rule = (int)params[RULE_PARAM].getValue();
@@ -250,14 +300,22 @@ struct CellAutoGate : Module
 namespace
 {
 
+    // Panel background gradient start colour (top).
     NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    // Panel background gradient end colour (bottom).
     NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    // Default body text colour.
     NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    // Muted colour for secondary labels.
     NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa4); }
+    // Primary accent colour (cyan).
     NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
 
+    // Centred text alignment preset.
     const int ALIGN_C = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE;
 
+    // Loads the AGMM monospace font and makes it the current NanoVG font
+    // face. Returns false if there is no window or the asset is missing.
     bool setFont(NVGcontext *vg)
     {
         if (!APP || !APP->window)
@@ -270,6 +328,8 @@ namespace
         return true;
     }
 
+    // Draws a string at (x, y) with the given size, colour, alignment and
+    // letter spacing.
     void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
                   int align = ALIGN_C, float spacing = 0.5f)
     {
@@ -294,6 +354,8 @@ namespace
         nvgStroke(vg);
     }
 
+    // Draws a standard column cell: an 84-wide plate with its label near the
+    // top. `tint` marks output jacks.
     void cell(NVGcontext *vg, float cx, float top, float h, const char *label, bool tint = false)
     {
         plate(vg, cx, top, CA_COL_W, h, tint);
@@ -307,6 +369,8 @@ namespace
     {
         CAPanelBackground() { box.size = Vec(PANEL_W, PANEL_H); }
 
+        // Draws the opaque background, title, maker tag, display bezel, the
+        // left and right column cell plates, and the LED caption.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -359,6 +423,7 @@ namespace
             box.size = Vec(DISP_W, DISP_H);
         }
 
+        // Static layer: dark display fill and a faint 8-cell grid.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -384,6 +449,9 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the stored automaton history, one row per
+        // generation, with the newest rows brightest. Falls back to a live
+        // rule-30 preview in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -460,6 +528,9 @@ namespace
             box.size = Vec(DISP_W, 12.f);
         }
 
+        // Layer-1 overlay: draws the status line (rule number, clock source,
+        // and poly channel count) above the display, or demo values in the
+        // module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -499,6 +570,9 @@ namespace
             box.size = Vec(DISP_W, 16.f);
         }
 
+        // Layer-1 overlay: draws the truth table for the current rule as 8
+        // groups of three neighbourhood cells (filled = 1) above a result
+        // cell (filled cyan = 1). Falls back to rule 30 in the browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -550,9 +624,11 @@ namespace
     };
 
     // Custom cyan light (Rack has no built-in CyanLight)
+    // Cyan LED widget, templated on the base light class.
     template <typename TBase = GrayModuleLightWidget>
     struct TCaCyanLight : TBase
     {
+        // Registers the cyan base colour with the underlying light widget.
         TCaCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
     };
     using CaCyanLight = TCaCyanLight<>;
@@ -560,10 +636,13 @@ namespace
 } // namespace
 
 // =============================================================================
-// Module widget
+// Module widget: adds the background, screws, the three display widgets,
+// the left/right column controls and the 16 gate LEDs.
 // =============================================================================
 struct CellAutoGateWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, the history display,
+    // status row, rule table, all controls and the gate LED row.
     CellAutoGateWidget(CellAutoGate *module)
     {
         setModule(module);

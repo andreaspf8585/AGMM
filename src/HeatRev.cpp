@@ -7,16 +7,49 @@
 #include <algorithm>
 #include <utility>
 
+// ============================================================
+// HeatRev
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// HeatRev is a 12 HP hybrid reverb/echo effect built from three layers:
+//   1. A stereo delay/echo stage with feedback and L/R time spread.
+//   2. A "Cathedral" reverb: pre-delay, early reflections, input diffusion
+//      and an 8-line feedback delay network (FDN) with an orthonormal Hadamard
+//      feedback matrix for guaranteed stability.
+//   3. A 2D "heat grid" diffusion network that adds a slowly moving, warm
+//      resonant texture to the tail.
+//
+// The module exposes reverb controls (Diffusion, Decay, Size, Mix, Damping,
+// Level, Space) and delay controls (Time, Feedback, Level, Spread), and shows
+// a live heat-map of the grid plus a readout row with the grid size and the
+// cyan/violet sign legend.
+//
+// File structure:
+//   1. DSP building blocks: SimpleLPF, StereoDelay, Cathedral.
+//   2. Layout constants (12 HP = 180x380 px).
+//   3. HeatRev module: state, config, display snapshot and process().
+//   4. Anonymous-namespace UI: HRPanelBackground and HRDisplayWidget.
+//   5. HeatRevWidget: places knobs, jacks and the display.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // DSP
 // ------------------------------------------------------------
 
 // One-pole low-pass
+// Simple one-pole low-pass filter used to tame the heat-grid taps.
 struct SimpleLPF
 {
     float y = 0.0f;
     float a = 0.0f;
 
+    // Sets the filter coefficient from a normalised cutoff (0..1, where 1 is
+    // Nyquist). Values at or below 0 mute the filter; at or above 1 pass the
+    // input through unchanged.
     void setCutoff(float normCutoff)
     {
         if (normCutoff <= 0.0f)
@@ -27,6 +60,8 @@ struct SimpleLPF
             a = 1.0f - std::exp(-2.0f * float(M_PI) * normCutoff);
     }
 
+    // Processes one sample through the one-pole low-pass and returns the
+    // filtered value.
     float process(float x)
     {
         y = y + a * (x - y);
@@ -35,6 +70,8 @@ struct SimpleLPF
 };
 
 // Stereo delay with feedback and fractional delay
+// Stereo delay line with independent L/R delay times, feedback and
+// linear-interpolated fractional reads.
 struct StereoDelay
 {
     std::vector<float> bufferL, bufferR;
@@ -45,8 +82,11 @@ struct StereoDelay
     float delayTimeR = 0.0f;
     float feedback = 0.0f;
 
+    // Stores the current sample rate used to convert milliseconds to samples.
     void setSampleRate(float sr) { sampleRate = sr; }
 
+    // Allocates (or reallocates) both delay buffers to hold maxDelaySamples+2
+    // samples and resets the write position. No-op if the size is unchanged.
     void resize(int maxDelaySamples)
     {
         if (maxDelaySamples != bufferSize)
@@ -58,6 +98,8 @@ struct StereoDelay
         }
     }
 
+    // Sets the L/R delay times in milliseconds and grows the buffers if the
+    // requested delay is longer than the current allocation.
     void setDelayMs(float msL, float msR)
     {
         delayTimeL = msL * 0.001f * sampleRate;
@@ -67,8 +109,11 @@ struct StereoDelay
             resize(maxSamples);
     }
 
+    // Sets the feedback amount, clamped to 0..0.95 for stability.
     void setFeedback(float fb) { feedback = rack::math::clamp(fb, 0.0f, 0.95f); }
 
+    // Processes one stereo sample: reads the delayed L/R values, writes the
+    // input plus feedback into the buffers, and returns the delayed pair.
     std::pair<float, float> process(float inL, float inR)
     {
         float readL = readBuffer(bufferL, delayTimeL);
@@ -85,6 +130,8 @@ struct StereoDelay
     }
 
 private:
+    // Reads one buffer at `delaySamples` behind the write head using linear
+    // interpolation. Returns 0 for non-positive delays.
     float readBuffer(const std::vector<float> &buf, float delaySamples)
     {
         if (delaySamples <= 0.0f)
@@ -116,6 +163,8 @@ static const float CATH_ER_MS_R[7] = {11.f, 23.f, 37.f, 53.f, 73.f, 97.f, 127.f}
 static const float CATH_ER_G_L[7] = {0.80f, -0.65f, 0.55f, -0.45f, 0.38f, -0.30f, 0.24f};
 static const float CATH_ER_G_R[7] = {-0.78f, 0.62f, -0.52f, 0.43f, -0.36f, 0.29f, -0.23f};
 
+// Cathedral reverb engine: pre-delay, early reflections, four input diffusers
+// per channel, and an 8-line FDN with per-line damping and Hadamard mixing.
 struct Cathedral
 {
     enum
@@ -138,6 +187,7 @@ struct Cathedral
     float inGain = 0.3f, scaleSm = 1.f, lastScale = -1.f, lastRT = -1.f, lastDamp = -1.f, b = 0.5f;
     float hpL = 0.f, hpR = 0.f;
 
+    // Allocates every delay buffer to its final size and resets the engine.
     void init()
     {
         for (int i = 0; i < N; ++i)
@@ -152,6 +202,8 @@ struct Cathedral
         reset();
     }
 
+    // Clears all delay buffers, filter states, LFO phases and cached parameter
+    // values so the reverb starts from silence.
     void reset()
     {
         for (int i = 0; i < N; ++i)
@@ -175,6 +227,8 @@ struct Cathedral
         lastScale = lastRT = lastDamp = -1.f;
     }
 
+    // Runs one sample through a fixed-length all-pass delay line with gain
+    // `gain`, returning the all-pass output.
     static float allpass(std::vector<float> &buf, int &idx, int len, float gain, float x)
     {
         if (len < 2)
@@ -189,6 +243,8 @@ struct Cathedral
         return d - gain * wv;
     }
 
+    // Reads the pre-delay buffer at a fractional delay `d` behind the write
+    // head using linear interpolation, with power-of-two wrapping.
     float readPD(const std::vector<float> &buf, float d) const
     {
         const float pos = (float)pdW - d;
@@ -200,6 +256,9 @@ struct Cathedral
     }
 
     // fdn = diffuse tail, er = early reflections
+    // Runs the full Cathedral reverb for one stereo sample. `rt60`, `damping`,
+    // `scaleTarget`, `diffusion` and `space` control the tail; outputs are the
+    // FDN tail (fdnL/fdnR) and the early reflections (erL/erR).
     void process(float inL, float inR, float sr, float rt60, float damping,
                  float scaleTarget, float diffusion, float space,
                  float &fdnL, float &fdnR, float &erL, float &erR)
@@ -415,6 +474,8 @@ struct HeatRev : Module
     float vizNorm = 1.f;
     int vizCounter = 0;
 
+    // Constructor: configures all parameters, inputs, outputs and bypass,
+    // allocates the heat grid, and initialises the delay and Cathedral DSP.
     HeatRev()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -446,6 +507,8 @@ struct HeatRev : Module
         cathedral.init();
     }
 
+    // Rack reset hook: clears the heat grid, the Cathedral engine and the
+    // DC-blocker state.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -455,6 +518,8 @@ struct HeatRev : Module
         dcL = dcR = 0.f;
     }
 
+    // Downsamples the current heat grid into the `viz` snapshot for display
+    // and auto-scales it so the map stays readable at any signal level.
     void updateViz()
     {
         float peak = 0.f;
@@ -477,6 +542,10 @@ struct HeatRev : Module
                 viz[r][c] *= k;
     }
 
+    // Main audio callback: reads the controls, runs the delay, Cathedral
+    // reverb and heat-grid diffusion, mixes dry/wet, applies soft limiting and
+    // safety checks, writes the stereo outputs, and refreshes the display
+    // snapshot periodically.
     void process(const ProcessArgs &args) override
     {
         sampleRate = args.sampleRate;
@@ -564,6 +633,7 @@ struct HeatRev : Module
             next[i] *= gridFb;
         state.swap(next);
 
+        // Samples a heat-grid cell at normalised coordinates (fx, fy).
         auto tap = [&](float fx, float fy)
         {
             int tx = rack::math::clamp((int)(fx * size), 0, size - 1);
@@ -601,6 +671,7 @@ struct HeatRev : Module
         float outL = (1.0f - mix) * inL_raw + mix * wetL;
         float outR = (1.0f - mix) * inR_raw + mix * wetR;
 
+        // Soft-clips the output above ±9 V with a gentle 0.3 slope.
         auto softClip = [](float x)
         {
             const float limit = 9.0f;
@@ -633,10 +704,16 @@ struct HeatRev : Module
 namespace
 {
 
+    // Static artwork: base panel, display bezel, the REVERB section (three
+    // knobs in row 1, four in row 2), the DELAY section, and the I/O row with
+    // tinted output jacks.
     struct HRPanelBackground : TransparentWidget
     {
         HRPanelBackground() { box.size = Vec(HR_PANEL_W, HR_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, REVERB/DELAY section
+        // headers and their knob cells, and the I/O row with four jack cells
+        // (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -681,6 +758,9 @@ namespace
             box.size = Vec(HR_DISP_W, HR_DISP_H);
         }
 
+        // Static layer: fills the display screen, draws the faint grid over
+        // the heat-map area, and adds the divider between the map and the
+        // readout row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -712,6 +792,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the heat-map cells (cyan positive, violet
+        // negative, opacity by magnitude) and the readout row with the grid
+        // size and the cyan/violet sign legend. Uses a demo pattern in the
+        // module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -761,10 +845,14 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, screws, the heat-map display, the
+// reverb knobs, the delay knobs and the two in / two out jacks.
 // ------------------------------------------------------------
 struct HeatRevWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, live display, the
+    // three reverb row-1 knobs, the four reverb row-2 knobs, the four delay
+    // knobs, and the I/O jacks.
     HeatRevWidget(HeatRev *module)
     {
         setModule(module);

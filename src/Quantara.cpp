@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -417,16 +418,10 @@ struct Quantara : Module
 // ------------------------------------------------------------
 namespace
 {
+    namespace ag = agmm;
 
-    NVGcolor colBgTop() { return nvgRGB(0x25, 0x28, 0x30); }
-    NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-    NVGcolor colText() { return nvgRGB(0xd6, 0xdc, 0xe6); }
-    NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa5); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
     NVGcolor colBright() { return nvgRGB(0x7a, 0xec, 0xff); }
     NVGcolor colWarm() { return nvgRGB(0xff, 0x9c, 0x6a); }
-
-    NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
 
     const int QZ_WPC[7] = {0, 2, 4, 5, 7, 9, 11}; // white keys
     const int QZ_BPC[5] = {1, 3, 6, 8, 10};       // black keys
@@ -435,56 +430,27 @@ namespace
     inline float qzPx(float t) { return QZ_PX0 + t / 12.f * (QZ_PX1 - QZ_PX0); }
     inline float qzPy(float v) { return QZ_PY1 - (v + 1.f) / 14.f * (QZ_PY1 - QZ_PY0); }
 
-    void setFont(NVGcontext *vg)
+    void plate(NVGcontext *vg, float cx, float cy, float w, float h)
     {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
+        nvgRoundedRect(vg, cx - w / 2.f, cy - h / 2.f, w, h, 6.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
         nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+        nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
+    }
 
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
+    void ring(NVGcontext *vg, float cx, float cy, float r)
+    {
         nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
+        nvgCircle(vg, cx, cy, r);
+        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
+                                           nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
         nvgFill(vg);
-
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
     }
 
     // Tick arc around a knob (n ticks across the 270 degree sweep)
@@ -512,178 +478,53 @@ namespace
     {
         QZPanelBackground() { box.size = Vec(QZ_PANEL_W, QZ_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
-        {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                               nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-                                               nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void section(NVGcontext *vg, float y, const char *txt)
-        {
-            float x1 = 12.f, x2 = QZ_PANEL_W - 12.f, cx = QZ_PANEL_W / 2.f;
-            float w = 14.f + (float)strlen(txt) * 7.f;
-            drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y);
-            nvgLineTo(vg, cx - w / 2.f, y);
-            nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-                                                 nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, cx + w / 2.f, y);
-            nvgLineTo(vg, x2, y);
-            nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-                                                 nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
         // kind: 0 = input (orange), 1 = output (cyan)
-        void cell(NVGcontext *vg, float cx, float cy, const char *txt, int kind)
+        void portCell(NVGcontext *vg, float cx, float cy, const char *txt, int kind)
         {
-            const float w = 30.f, top = -27.f, h = 44.f;
-            float x = cx - w / 2.f, y = cy + top;
-            plate(vg, x, y, w, h);
+            const float w = 30.f, h = 44.f;
+            plate(vg, cx, cy - 4.f, w, h);
 
             NVGcolor c = (kind == 0) ? nvgRGBA(0xff, 0x9c, 0x6a, 170) : nvgRGBA(0x3d, 0xe0, 0xff, 170);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
+            nvgRoundedRect(vg, cx - w / 2.f + 6.f, cy - 4.f - h / 2.f + 1.5f, w - 12.f, 1.8f, 0.9f);
             nvgFillColor(vg, c);
             nvgFill(vg);
 
-            label(vg, cx, cy - 19.f, txt);
+            ag::text(vg, cx, cy - 19.f, txt, 7.f, ag::dim(), ag::ALIGN_C, 1.f);
         }
 
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
 
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, QZ_PANEL_W, QZ_PANEL_H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, QZ_PANEL_H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
+            ag::panelBase(vg, QZ_PANEL_W, QZ_PANEL_H, "QUANTARA");
+            ag::bezel(vg, QZ_DISP_X, QZ_DISP_Y, QZ_DISP_W, QZ_DISP_H);
 
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)QZ_PANEL_H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, QZ_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
-
-            // Corner vignette
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, QZ_PANEL_W, QZ_PANEL_H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, QZ_PANEL_W / 2.f, QZ_PANEL_H * 0.4f,
-                                               QZ_PANEL_H * 0.35f, QZ_PANEL_H * 0.85f,
-                                               nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-            nvgFill(vg);
-
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, QZ_PANEL_W - 1.f, QZ_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // Top accent line
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, QZ_PANEL_W, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, QZ_PANEL_W, 0,
-                                               nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-            nvgFill(vg);
-
-            // Logo + title
-            drawLogo(vg, QZ_PANEL_W / 2.f, 15.f);
-            drawText(vg, QZ_PANEL_W / 2.f, 32.f, "QUANTARA", 12.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-            // ---- Display bezel (metallic, recessed) ----
-            float bx = QZ_DISP_X - 5.f, by = QZ_DISP_Y - 5.f;
-            float bw = QZ_DISP_W + 10.f, bh = QZ_DISP_H + 10.f;
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
-
-            // ---- Side knobs ----
+            // ---- side knobs ----
             const char *knobL[4] = {"ROOT", "SCALE", "SHIFT", "GLIDE"};
             const int knobN[4] = {12, 17, 9, 11};
             for (int k = 0; k < 4; ++k)
             {
                 ring(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k], 17.f);
                 drawKnobTicks(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k], 21.f, 24.f, knobN[k]);
-                label(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k] + 29.f, knobL[k]);
+                ag::text(vg, QZ_KNOB_X[k], QZ_KNOB_Y[k] + 29.f, knobL[k], 7.f, ag::dim(), ag::ALIGN_C, 1.f);
             }
 
             // ---- CV inputs ----
-            section(vg, QZ_CV_SEC_Y, "CV INPUTS");
+            ag::sectionHeader(vg, QZ_PANEL_W, QZ_CV_SEC_Y, "CV INPUTS");
             const char *cv[5] = {"CLOCK", "ROOT", "SCALE", "SHIFT", "GLIDE"};
             for (int i = 0; i < 5; ++i)
-                cell(vg, QZ_CV_X[i], QZ_CV_Y, cv[i], 0);
+                portCell(vg, QZ_CV_X[i], QZ_CV_Y, cv[i], 0);
 
             // ---- I/O ----
-            section(vg, QZ_IO_SEC_Y, "I / O");
+            ag::sectionHeader(vg, QZ_PANEL_W, QZ_IO_SEC_Y, "I / O");
             const char *io[3] = {"IN", "OUT", "TRIG"};
             const int ioKind[3] = {0, 1, 1};
             for (int i = 0; i < 3; ++i)
-                cell(vg, QZ_IO_X[i], QZ_IO_Y, io[i], ioKind[i]);
+                portCell(vg, QZ_IO_X[i], QZ_IO_Y, io[i], ioKind[i]);
 
-            drawText(vg, QZ_PANEL_W / 2.f, 362.f, "1 V/OCT  -  POLYPHONIC  -  12 NOTE", 6.f,
-                     nvgRGBA(0x8a, 0x95, 0xa5, 120), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
+            ag::text(vg, QZ_PANEL_W / 2.f, 350.f, "1 V/OCT  -  POLYPHONIC  -  12 NOTE", 6.f,
+                     ag::withA(ag::dim(), 0.6f), ag::ALIGN_C, 1.5f);
 
             Widget::draw(args);
         }
@@ -727,17 +568,17 @@ namespace
 
                 float s = a0 + (a1 - a0) * lo;
                 float e = a0 + (a1 - a0) * hi;
-                NVGcolor col = (bipolar && v < 0.5f) ? colWarm() : colAccent();
+                NVGcolor col = (bipolar && v < 0.5f) ? colWarm() : ag::accent();
 
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, R, s, e, NVG_CW);
-                nvgStrokeColor(vg, withA(col, 0.18f));
+                nvgStrokeColor(vg, ag::withA(col, 0.18f));
                 nvgStrokeWidth(vg, 5.f);
                 nvgStroke(vg);
 
                 nvgBeginPath(vg);
                 nvgArc(vg, cx, cy, R, s, e, NVG_CW);
-                nvgStrokeColor(vg, withA(col, 0.95f));
+                nvgStrokeColor(vg, ag::withA(col, 0.95f));
                 nvgStrokeWidth(vg, 2.f);
                 nvgStroke(vg);
             }
@@ -813,17 +654,7 @@ namespace
         {
             NVGcontext *vg = args.vg;
 
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0, 0, QZ_DISP_W, QZ_DISP_H, 4.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, QZ_DISP_H,
-                                               nvgRGB(0x0a, 0x16, 0x1f), nvgRGB(0x03, 0x06, 0x09)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0.5f, 0.5f, QZ_DISP_W - 1.f, QZ_DISP_H - 1.f, 4.f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            ag::screen(vg, 0.f, 0.f, QZ_DISP_W, QZ_DISP_H);
 
             // Wheel rings
             nvgBeginPath(vg);
@@ -991,11 +822,11 @@ namespace
                     if (pn >= 3)
                     {
                         nvgClosePath(vg);
-                        nvgFillColor(vg, withA(colAccent(), 0.10f));
+                        nvgFillColor(vg, ag::withA(ag::accent(), 0.10f));
                         nvgFill(vg);
                     }
                     nvgLineJoin(vg, NVG_ROUND);
-                    nvgStrokeColor(vg, withA(colAccent(), 0.35f));
+                    nvgStrokeColor(vg, ag::withA(ag::accent(), 0.35f));
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
@@ -1012,13 +843,13 @@ namespace
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, mx, my);
                     nvgLineTo(vg, tx, ty);
-                    nvgStrokeColor(vg, withA(colWarm(), c == 0 ? 0.65f : 0.25f));
+                    nvgStrokeColor(vg, ag::withA(colWarm(), c == 0 ? 0.65f : 0.25f));
                     nvgStrokeWidth(vg, c == 0 ? 1.1f : 0.8f);
                     nvgStroke(vg);
 
                     nvgBeginPath(vg);
                     nvgCircle(vg, mx, my, c == 0 ? 2.4f : 1.7f);
-                    nvgFillColor(vg, withA(colWarm(), c == 0 ? 0.95f : 0.6f));
+                    nvgFillColor(vg, ag::withA(colWarm(), c == 0 ? 0.95f : 0.6f));
                     nvgFill(vg);
                 }
 
@@ -1032,19 +863,19 @@ namespace
                     pcPos((float)pc, R, x, y);
                     pcPos((float)pc, R + 9.f, lx, ly);
 
-                    NVGcolor col = isRoot ? colWarm() : (in ? colAccent() : colDim());
+                    NVGcolor col = isRoot ? colWarm() : (in ? ag::accent() : ag::dim());
 
                     if (act[pc])
                     {
                         nvgBeginPath(vg);
                         nvgCircle(vg, x, y, 8.f);
-                        nvgFillColor(vg, withA(col, 0.22f + 0.30f * f));
+                        nvgFillColor(vg, ag::withA(col, 0.22f + 0.30f * f));
                         nvgFill(vg);
                     }
 
                     nvgBeginPath(vg);
                     nvgCircle(vg, x, y, act[pc] ? 4.2f : (in ? 3.2f : 1.5f));
-                    nvgFillColor(vg, in ? withA(col, 0.95f) : withA(col, 0.45f));
+                    nvgFillColor(vg, in ? ag::withA(col, 0.95f) : ag::withA(col, 0.45f));
                     nvgFill(vg);
                     if (act[pc])
                     {
@@ -1057,14 +888,14 @@ namespace
                     {
                         nvgBeginPath(vg);
                         nvgCircle(vg, x, y, 5.6f);
-                        nvgStrokeColor(vg, withA(colWarm(), 0.8f));
+                        nvgStrokeColor(vg, ag::withA(colWarm(), 0.8f));
                         nvgStrokeWidth(vg, 1.f);
                         nvgStroke(vg);
                     }
 
-                    drawText(vg, lx, ly, QZ_NOTE_NAMES[pc], 5.5f,
+                    ag::text(vg, lx, ly, QZ_NOTE_NAMES[pc], 5.5f,
                              isRoot ? colWarm() : (in ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 130)),
-                             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                             ag::ALIGN_C, 0.f);
                 }
 
                 // centre: number of notes
@@ -1074,9 +905,9 @@ namespace
                     snprintf(b, sizeof(b), "%d", cnt);
                 else
                     snprintf(b, sizeof(b), "--");
-                drawText(vg, cx, cy - 1.5f, b, 13.f, colBright(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-                drawText(vg, cx, cy + 8.f, cnt > 0 ? "NOTES" : "BYPASS", 5.f, colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, cx, cy - 1.5f, b, 13.f, colBright(), ag::ALIGN_C, 0.f);
+                ag::text(vg, cx, cy + 8.f, cnt > 0 ? "NOTES" : "BYPASS", 5.f, ag::dim(),
+                         ag::ALIGN_C, 1.f);
             }
 
             // ================= transfer staircase =================
@@ -1093,7 +924,7 @@ namespace
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, QZ_PX1 - 4.f, y + 0.5f);
                     nvgLineTo(vg, QZ_PX1, y + 0.5f);
-                    nvgStrokeColor(vg, withA(colAccent(), 0.55f));
+                    nvgStrokeColor(vg, ag::withA(ag::accent(), 0.55f));
                     nvgStrokeWidth(vg, 1.2f);
                     nvgStroke(vg);
                 }
@@ -1105,7 +936,7 @@ namespace
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, x + 0.5f, QZ_PY1 - 4.f);
                     nvgLineTo(vg, x + 0.5f, QZ_PY1);
-                    nvgStrokeColor(vg, withA(colAccent(), 0.55f));
+                    nvgStrokeColor(vg, ag::withA(ag::accent(), 0.55f));
                     nvgStrokeWidth(vg, 1.2f);
                     nvgStroke(vg);
                 }
@@ -1140,7 +971,7 @@ namespace
                 nvgLineTo(vg, sx[NP - 1], QZ_PY1);
                 nvgClosePath(vg);
                 nvgFillPaint(vg, nvgLinearGradient(vg, 0, QZ_PY0, 0, QZ_PY1,
-                                                   withA(colAccent(), 0.18f), withA(colAccent(), 0.02f)));
+                                                   ag::withA(ag::accent(), 0.18f), ag::withA(ag::accent(), 0.02f)));
                 nvgFill(vg);
 
                 nvgLineCap(vg, NVG_ROUND);
@@ -1149,14 +980,14 @@ namespace
                 nvgMoveTo(vg, sx[0], sy[0]);
                 for (int i = 1; i < NP; ++i)
                     nvgLineTo(vg, sx[i], sy[i]);
-                nvgStrokeColor(vg, withA(colAccent(), 0.14f));
+                nvgStrokeColor(vg, ag::withA(ag::accent(), 0.14f));
                 nvgStrokeWidth(vg, 4.5f);
                 nvgStroke(vg);
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, sx[0], sy[0]);
                 for (int i = 1; i < NP; ++i)
                     nvgLineTo(vg, sx[i], sy[i]);
-                nvgStrokeColor(vg, withA(colBright(), 0.95f));
+                nvgStrokeColor(vg, ag::withA(colBright(), 0.95f));
                 nvgStrokeWidth(vg, 1.3f);
                 nvgStroke(vg);
 
@@ -1172,7 +1003,7 @@ namespace
                         float age = (float)(i + 1) / (float)trCount;
                         nvgBeginPath(vg);
                         nvgCircle(vg, qzPx(xi), qzPy(yo), 1.1f);
-                        nvgFillColor(vg, withA(colWarm(), 0.55f * age * age));
+                        nvgFillColor(vg, ag::withA(colWarm(), 0.55f * age * age));
                         nvgFill(vg);
                     }
                 }
@@ -1192,19 +1023,19 @@ namespace
                         nvgBeginPath(vg);
                         nvgMoveTo(vg, x, QZ_PY1);
                         nvgLineTo(vg, x, y);
-                        nvgStrokeColor(vg, withA(colWarm(), 0.45f));
+                        nvgStrokeColor(vg, ag::withA(colWarm(), 0.45f));
                         nvgStrokeWidth(vg, 1.f);
                         nvgStroke(vg);
                         nvgBeginPath(vg);
                         nvgMoveTo(vg, x, y);
                         nvgLineTo(vg, QZ_PX1, y);
-                        nvgStrokeColor(vg, withA(colBright(), 0.45f));
+                        nvgStrokeColor(vg, ag::withA(colBright(), 0.45f));
                         nvgStrokeWidth(vg, 1.f);
                         nvgStroke(vg);
 
                         nvgBeginPath(vg);
                         nvgCircle(vg, x, y, 5.f);
-                        nvgFillColor(vg, withA(colBright(), 0.25f));
+                        nvgFillColor(vg, ag::withA(colBright(), 0.25f));
                         nvgFill(vg);
                         nvgBeginPath(vg);
                         nvgCircle(vg, x, y, 2.4f);
@@ -1215,7 +1046,7 @@ namespace
                     {
                         nvgBeginPath(vg);
                         nvgCircle(vg, x, y, 1.9f);
-                        nvgFillColor(vg, withA(colBright(), 0.8f));
+                        nvgFillColor(vg, ag::withA(colBright(), 0.8f));
                         nvgFill(vg);
                     }
                 }
@@ -1223,8 +1054,8 @@ namespace
                 nvgRestore(vg);
 
                 const char *mn[3] = {"NEAREST", "DOWN", "UP"};
-                drawText(vg, QZ_PX0 + 3.f, QZ_PY0 + 5.f, mn[rack::math::clamp(mode, 0, 2)], 5.5f,
-                         nvgRGBA(0x8a, 0x95, 0xa5, 190), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, QZ_PX0 + 3.f, QZ_PY0 + 5.f, mn[rack::math::clamp(mode, 0, 2)], 5.5f,
+                         nvgRGBA(0x8a, 0x95, 0xa5, 190), ag::ALIGN_L, 1.f);
             }
 
             // ================= keyboard =================
@@ -1243,7 +1074,7 @@ namespace
                     {
                         nvgBeginPath(vg);
                         nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 3.f);
-                        nvgFillColor(vg, withA(colAccent(), 0.14f + 0.28f * f));
+                        nvgFillColor(vg, ag::withA(ag::accent(), 0.14f + 0.28f * f));
                         nvgFill(vg);
                     }
 
@@ -1254,11 +1085,11 @@ namespace
 
                     if (in)
                     {
-                        NVGcolor tint = isRoot ? colWarm() : colAccent();
+                        NVGcolor tint = isRoot ? colWarm() : ag::accent();
                         nvgBeginPath(vg);
                         nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
                         nvgFillPaint(vg, nvgLinearGradient(vg, 0, y, 0, y + h,
-                                                           withA(tint, 0.10f), withA(tint, 0.42f)));
+                                                           ag::withA(tint, 0.10f), ag::withA(tint, 0.42f)));
                         nvgFill(vg);
                     }
                     if (a)
@@ -1271,7 +1102,7 @@ namespace
 
                     nvgBeginPath(vg);
                     nvgRoundedRectVarying(vg, x, y, w, h, 1.f, 1.f, 3.f, 3.f);
-                    nvgStrokeColor(vg, hv ? withA(colBright(), 0.95f)
+                    nvgStrokeColor(vg, hv ? ag::withA(colBright(), 0.95f)
                                           : nvgRGBA(255, 255, 255, black ? 34 : 44));
                     nvgStrokeWidth(vg, hv ? 1.4f : 1.f);
                     nvgStroke(vg);
@@ -1280,14 +1111,14 @@ namespace
                     {
                         nvgBeginPath(vg);
                         nvgRect(vg, x + 2.5f, y + h - 3.5f, w - 5.f, 2.f);
-                        nvgFillColor(vg, withA(colWarm(), 0.95f));
+                        nvgFillColor(vg, ag::withA(colWarm(), 0.95f));
                         nvgFill(vg);
                     }
                     if (!black)
                     {
-                        drawText(vg, x + w / 2.f, y + h - 8.f, QZ_NOTE_NAMES[pc], 6.f,
+                        ag::text(vg, x + w / 2.f, y + h - 8.f, QZ_NOTE_NAMES[pc], 6.f,
                                  in ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 150),
-                                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                                 ag::ALIGN_C, 0.f);
                     }
                 };
 
@@ -1310,25 +1141,24 @@ namespace
                 // clock lamp
                 nvgBeginPath(vg);
                 nvgCircle(vg, 8.f, 7.f, 5.f);
-                nvgFillColor(vg, withA(colAccent(), 0.20f * clockFlash));
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.20f * clockFlash));
                 nvgFill(vg);
                 nvgBeginPath(vg);
                 nvgCircle(vg, 8.f, 7.f, 2.2f);
-                nvgFillColor(vg, withA(colAccent(), (clocked ? 0.25f : 0.12f) + 0.75f * clockFlash));
+                nvgFillColor(vg, ag::withA(ag::accent(), (clocked ? 0.25f : 0.12f) + 0.75f * clockFlash));
                 nvgFill(vg);
 
                 snprintf(buf, sizeof(buf), "%s %s", QZ_NOTE_NAMES[qzMod(root, 12)], QZ_SCALE_SHORT[scale]);
-                drawText(vg, 15.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, 15.f, 7.f, buf, 7.f, c1, ag::ALIGN_L, 1.f);
 
                 snprintf(buf, sizeof(buf), "SHIFT %+d", shift);
-                drawText(vg, QZ_DISP_W / 2.f + 14.f, 7.f, buf, 7.f, cm,
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, QZ_DISP_W / 2.f + 14.f, 7.f, buf, 7.f, cm, ag::ALIGN_C, 1.f);
 
                 if (nCh > 0)
                     snprintf(buf, sizeof(buf), "CH %d %s", nCh, clocked ? "HOLD" : "LIVE");
                 else
                     snprintf(buf, sizeof(buf), "NO INPUT");
-                drawText(vg, QZ_DISP_W - 5.f, 7.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, QZ_DISP_W - 5.f, 7.f, buf, 7.f, cd, ag::ALIGN_R, 1.f);
 
                 // caption
                 if (hoverKey >= 0)
@@ -1336,13 +1166,12 @@ namespace
                     bool on = (mask >> hoverKey) & 1;
                     snprintf(buf, sizeof(buf), "%s %s  -  CLICK TO TOGGLE",
                              QZ_NOTE_NAMES[hoverKey], on ? "ON" : "OFF");
-                    drawText(vg, QZ_DISP_W / 2.f, 136.5f, buf, 5.5f, c1,
-                             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                    ag::text(vg, QZ_DISP_W / 2.f, 136.5f, buf, 5.5f, c1, ag::ALIGN_C, 1.f);
                 }
                 else
                 {
-                    drawText(vg, QZ_DISP_W / 2.f, 136.5f, "CLICK KEYS TO EDIT THE SCALE", 5.5f,
-                             nvgRGBA(0x8a, 0x95, 0xa5, 150), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                    ag::text(vg, QZ_DISP_W / 2.f, 136.5f, "CLICK KEYS TO EDIT THE SCALE", 5.5f,
+                             nvgRGBA(0x8a, 0x95, 0xa5, 150), ag::ALIGN_C, 1.f);
                 }
             }
 

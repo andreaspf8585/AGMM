@@ -13,7 +13,32 @@
 //          (Hadamard feedback matrix, modulated delays, per-line damping,
 //           RT60-based decay, freeze) -> decorrelated stereo taps -> width
 //    + early reflections (6 taps) -> equal-power dry/wet mix -> DC block/limit
-// ============================================================================
+//
+// ----------------------------------------------------------------------------
+// OVERVIEW
+// ----------------------------------------------------------------------------
+// InfinityRev is a 24 HP stereo reverb with a fully parametric 8-line feedback
+// delay network. The FDN uses an orthonormal Hadamard feedback matrix so the
+// tail is energy-preserving when the per-line loop gains are 1, and the RT60
+// control sets those gains for a target decay. A Freeze switch (and gate input)
+// pushes the loop gains to just under 1 and disables damping so the tail can be
+// held indefinitely. Input diffusion is provided by four Schroeder all-passes
+// per channel, and six early-reflection taps are mixed in before the width
+// stage. A live display shows the eight FDN line levels, the decay envelope,
+// the damping response and input/output level meters.
+//
+// File structure:
+//   1. DSP building blocks: IRDelayLine, IRAllpass.
+//   2. Constants: base delay lengths, LFO rates, tap signs, diffuser and early
+//      reflection delays.
+//   3. Tooltip ParamQuantity helpers for Decay and Damping.
+//   4. InfinityRev module: state, prepare(), onReset(), updateControl(), the
+//      soft limiter and process().
+//   5. Anonymous-namespace UI: IRPanel (static art) and IRDisplay (live
+//      FDN/decay/damping/meter display).
+//   6. InfinityRevWidget: places knobs, the freeze switch, jacks and LEDs.
+//   7. Model registration.
+// ----------------------------------------------------------------------------
 
 // ------------------------------------------------------------
 // Layout (24 HP = 360 x 380)
@@ -41,10 +66,12 @@ static const float IR_FOOT_Y = 111.f;
 // Controls: two rows of five knobs, then the I/O row
 static const float IR_R1 = 170.f, IR_R2 = 228.f, IR_CH = 52.f, IR_CW = 64.f;
 static const float IR_KNOB_DY = 32.f; // knob centre below the plate top
+// Horizontal centre of knob column i (0..4).
 static float irCol(int i) { return 40.f + 70.f * i; }
 static const float IR_IO_HEAD_Y = 296.f;
 static const float IR_IO_TOP = 306.f, IR_IO_H = 46.f, IR_IO_W = 38.f;
 static const float IR_JY = IR_IO_TOP + 31.f; // jack centre (label above)
+// Horizontal centre of I/O jack i (0..7).
 static float irJx(int i) { return 31.f + 42.5f * i; }
 
 // Circular delay line with linear + cubic (Hermite) fractional read.
@@ -53,18 +80,22 @@ struct IRDelayLine
     std::vector<float> buf;
     int w = 0, n = 0;
 
+    // Allocates the buffer with `size` samples (minimum 16) and resets the
+    // write head.
     void init(int size)
     {
         n = std::max(size, 16);
         buf.assign(n, 0.f);
         w = 0;
     }
+    // Writes one sample at the write head and advances it (wrapping).
     void write(float x)
     {
         buf[w] = x;
         if (++w >= n)
             w = 0;
     }
+    // Wraps an arbitrary integer index into [0, n).
     int wrap(int i) const
     {
         while (i < 0)
@@ -74,6 +105,8 @@ struct IRDelayLine
         return i;
     }
     // d >= 1
+    // Reads the buffer at a fractional delay `d` (>= 1) using linear
+    // interpolation.
     float readLinear(float d) const
     {
         float rp = (float)w - d;
@@ -84,6 +117,8 @@ struct IRDelayLine
         return buf[i1] + f * (buf[i2] - buf[i1]);
     }
     // d >= 3
+    // Reads the buffer at a fractional delay `d` (>= 3) using 4-point cubic
+    // (Hermite) interpolation.
     float readCubic(float d) const
     {
         float rp = (float)w - d;
@@ -102,15 +137,20 @@ struct IRDelayLine
 };
 
 // Schroeder allpass (fixed length)
+// Fixed-length Schroeder all-pass used for input diffusion.
 struct IRAllpass
 {
     std::vector<float> buf;
     int pos = 0;
+    // Allocates the all-pass buffer to `len` samples and resets the read/write
+    // position.
     void init(int len)
     {
         buf.assign(std::max(len, 1), 0.f);
         pos = 0;
     }
+    // Processes one sample through the all-pass with gain `g` and returns the
+    // all-pass output.
     float process(float x, float g)
     {
         float d = buf[pos];
@@ -140,6 +180,9 @@ static const float kErGL[6] = {0.80f, -0.60f, 0.50f, -0.40f, 0.30f, -0.25f};
 static const float kErGR[6] = {-0.70f, 0.70f, -0.45f, 0.45f, -0.30f, 0.28f};
 
 // Tooltip helpers
+// ParamQuantity for the Decay knob: the display string is the effective RT60
+// in seconds, derived from the knob with the same 0.2 s .. 60 s mapping used
+// by the DSP.
 struct IRDecayQ : rack::engine::ParamQuantity
 {
     std::string getDisplayValueString() override
@@ -149,6 +192,9 @@ struct IRDecayQ : rack::engine::ParamQuantity
         return std::string(buf);
     }
 };
+// ParamQuantity for the Damping knob: the display string is the effective
+// cutoff in kHz, derived from the knob with the same 20 kHz .. 1 kHz mapping
+// used by the DSP.
 struct IRDampQ : rack::engine::ParamQuantity
 {
     std::string getDisplayValueString() override
@@ -159,6 +205,9 @@ struct IRDampQ : rack::engine::ParamQuantity
     }
 };
 
+// The InfinityRev module: holds all DSP state, configures params/ports/lights,
+// prepares the delay lines, updates control-rate values, and runs the full
+// reverb in process().
 struct InfinityRev : Module
 {
     enum ParamId
@@ -218,6 +267,9 @@ struct InfinityRev : Module
     float meterIn = 0.f, meterOutL = 0.f, meterOutR = 0.f;
     float dispRt60 = 4.f, dispCut = 8000.f, dispMix = 0.35f;
 
+    // Constructor: configures every parameter (with the Decay/Damping custom
+    // ParamQuantity readouts), input, output and the freeze light, then calls
+    // prepare() at 48 kHz.
     InfinityRev()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -245,6 +297,8 @@ struct InfinityRev : Module
         prepare(48000.f);
     }
 
+    // (Re)allocates every delay line and all-pass for the given sample rate,
+    // resets filter/LFO/DC state, and recomputes the smoothing coefficient.
     void prepare(float newSr)
     {
         sr = newSr;
@@ -268,6 +322,8 @@ struct InfinityRev : Module
         dcInL = dcOutL = dcInR = dcOutR = 0.f;
     }
 
+    // Rack reset hook: re-prepares the reverb at the current sample rate,
+    // clearing all delay/filter state.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -275,6 +331,9 @@ struct InfinityRev : Module
     }
 
     // Control-rate update (every 32 samples)
+    // Recomputes the per-line loop gains from the RT60 (including freeze),
+    // the damping coefficient from the cutoff (including freeze), and the
+    // diffusion all-pass gain. Caches the display values.
     void updateControl()
     {
         float dec = params[DECAY_PARAM].getValue() + inputs[DECAY_CV_INPUT].getVoltage() * 0.1f;
@@ -299,6 +358,8 @@ struct InfinityRev : Module
         apG = 0.1f + 0.65f * params[DIFFUSION_PARAM].getValue();
     }
 
+    // Smooth limiter: linear up to ±8 V, then a tanh shoulder with an
+    // asymptote at ±10 V. Applied to the final stereo output.
     static float softLimit(float x)
     {
         const float t = 8.f;
@@ -310,6 +371,11 @@ struct InfinityRev : Module
         return x < 0.f ? -y : y;
     }
 
+    // Main audio callback: reads inputs and controls, smooths size and freeze,
+    // runs pre-delay, early reflections, diffusion, the 8-line FDN with
+    // Hadamard feedback, output taps and width, equal-power dry/wet mix, DC
+    // blocking and soft limiting, writes the outputs, and updates the display
+    // meters and line levels.
     void process(const ProcessArgs &args) override
     {
         if (args.sampleRate != sr)
@@ -448,9 +514,13 @@ struct InfinityRev : Module
 namespace
 {
 
+    // Static artwork: base panel, display bezel, the two knob rows (five knobs
+    // each) and the I/O row with eight jack cells (outputs tinted).
     struct IRPanel : TransparentWidget
     {
         IRPanel() { box.size = Vec(IR_W, IR_H); }
+        // Draws all static panel art: base panel, bezel, the two rows of five
+        // knob cells, and the I/O row with eight jack cells (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -474,6 +544,9 @@ namespace
     };
 
     // Display: FDN line activity, decay curve, damping response, level meters
+    // Live display: eight FDN line-level bars, a decay envelope plot, a damping
+    // response plot, three level meters (in / L / R), plus header and footer
+    // readouts.
     struct IRDisplay : TransparentWidget
     {
         InfinityRev *module = nullptr;
@@ -483,6 +556,9 @@ namespace
             box.size = Vec(IR_DW, IR_DH);
         }
 
+        // Static layer: fills the display screen, draws the decay and damping
+        // plot frames with their faint grids, and lays out the caption row
+        // above each plot and the meter captions.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -518,6 +594,11 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the header readouts (size / RT60 / mix), the
+        // eight FDN line bars, the decay envelope (with RT60 marker unless
+        // frozen), the one-pole damping response (with cutoff marker), the
+        // three meters, and the footer readouts (pre-delay / early + width /
+        // damping). Uses plausible demo values when there is no module.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -684,8 +765,15 @@ namespace
 
 } // namespace
 
+// ============================================================
+// Module widget: adds the static panel, screws, the live display, the two
+// rows of knobs, the freeze switch and light, and the eight I/O jacks.
+// ============================================================
 struct InfinityRevWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, live display, the
+    // five row-1 knobs, the four row-2 knobs, the freeze switch plus its
+    // light, and the eight I/O jacks.
     InfinityRevWidget(InfinityRev *module)
     {
         setModule(module);

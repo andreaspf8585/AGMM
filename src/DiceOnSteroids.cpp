@@ -9,6 +9,40 @@
 #include <random>
 #include <chrono>
 
+// ============================================================
+// Dice On Steroids
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// DiceOnSteroids is a 28 HP expanded version of the Dice module: a 16-voice
+// probabilistic gate / random V/Oct generator with a large feature set. On
+// each (optionally divided) clock edge it rolls per-channel dice, and voices
+// that "win" open a gate and latch a new random voltage. The random voltage
+// can be uniform, a random walk, a drunk walk, or Gaussian, and it can be
+// quantized to any of 60+ scales. The module also supports:
+//   - Glide (portamento) between successive pitches.
+//   - A per-channel 64-step pattern recorder / playback loop (CH1 pattern is
+//     displayed as a strip).
+//   - A "train mode" where one random value shifts down the voices each
+//     clock, like a delay line of pitches.
+//   - CV control over probability, polyphony, gate time, range, scale,
+//     transpose and glide.
+//   - A seed input and menu to re-seed the RNG for repeatable randomness.
+//
+// File structure:
+//   1. Layout constants (28 HP = 420x380 px).
+//   2. Scale struct + module declaration (DiceOnSteroids) with all state,
+//      config, RNG helpers, quantization, pattern recorder, JSON persistence
+//      and process().
+//   3. Static scale table definition.
+//   4. Anonymous-namespace UI: dsBlockHeader helper, DSPanelBackground
+//      (static art) and DSDisplayWidget (live plot/readouts/chips/meter).
+//   5. DiceOnSteroidsWidget: places controls, LEDs and the context menu.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (28 HP = 420 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -29,7 +63,9 @@ static const float DS_BLOCK_HEAD_Y = 40.f;
 static const float DS_LCOL[2] = {30.f, 72.f};
 static const float DS_LTOP0 = 50.f, DS_LPITCH = 56.f;
 static const float DS_LW = 38.f, DS_LH = 52.f;
+// Top edge of left-block row r.
 static float dsLTop(int r) { return DS_LTOP0 + DS_LPITCH * r; }
+// Knob centre for left-block row r (plate top + 32 px).
 static float dsLKnobY(int r) { return dsLTop(r) + 32.f; }
 
 // Right block: outputs, then transport
@@ -50,11 +86,14 @@ static const float DS_LED_Y = DS_LED_TOP + 24.f;
 static const float DS_IN_HEAD_Y = 298.f;
 static const float DS_IN_TOP = 308.f, DS_IN_H = 50.f, DS_IN_W = 38.f;
 static const float DS_IN_Y = DS_IN_TOP + 31.f;
+// Horizontal centre of input jack i (0..9).
 static float dsInX(int i) { return 30.f + 40.f * i; }
 
 // ------------------------------------------------------------
 // Scale structure
 // ------------------------------------------------------------
+// One named quantization scale: a display name plus its semitone intervals
+// from the root.
 struct Scale
 {
     std::string name;
@@ -142,6 +181,7 @@ struct DiceOnSteroids : Module
     float shiftRegisterGate[16] = {};
 
     static constexpr int MAX_PATTERN_LEN = 64;
+    // One recorded step: the gate state, raw pitch and quantized pitch.
     struct PatternStep
     {
         float gate;
@@ -170,8 +210,11 @@ struct DiceOnSteroids : Module
 
     // Static scales - accessible without a module instance
     static std::vector<Scale> scales;
+    // Returns the shared static scale table (same list used by all instances).
     static const std::vector<Scale> &getScales() { return scales; }
 
+    // Constructor: configures every parameter, input, output and light,
+    // seeds the RNG from the clock, and clears the pattern buffers.
     DiceOnSteroids()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -218,11 +261,16 @@ struct DiceOnSteroids : Module
                 pattern[ch][i] = {0.f, 0.f, 0.f};
     }
 
+    // Returns a uniformly distributed random float in [0, 1) from the
+    // module's mt19937 generator.
     float randFloat()
     {
         return std::uniform_real_distribution<float>(0, 1)(rng);
     }
 
+    // Generates a new random voltage according to the selected random mode
+    // (uniform / walk / drunk / Gaussian) and range. `currentVoltage` is the
+    // previous pitch, used by the walk/drunk modes to step from.
     float generateRandomVoltage(float currentVoltage = 0.f)
     {
         float voltage = 0.f;
@@ -299,6 +347,10 @@ struct DiceOnSteroids : Module
         return voltage;
     }
 
+    // Quantizes `voltage` (in V/Oct, plus `rootSemitone` offset) to the
+    // nearest degree of `scale`, returning the quantized voltage with the
+    // root offset removed. Works in semitone space and considers the wrap
+    // into the next octave so notes near the top of a scale snap correctly.
     float quantizeToScale(float voltage, const Scale &scale, float rootSemitone)
     {
         float semitones = voltage * 12.0f + rootSemitone;
@@ -326,6 +378,9 @@ struct DiceOnSteroids : Module
         return (outSemis - rootSemitone) / 12.0f;
     }
 
+    // Records the current gate/pitch/quantized state of `channel` into its
+    // pattern buffer at the write head, then advances the head. No-op when
+    // recording is off.
     void recordStep(int channel, float gate, float pitch, float quant)
     {
         if (!recordEnabled)
@@ -334,6 +389,9 @@ struct DiceOnSteroids : Module
         patternWritePos[channel] = (patternWritePos[channel] + 1) % loopLength;
     }
 
+    // Reads the next recorded step of `channel` from its pattern buffer into
+    // gate/pitch/quant, then advances the read head. No-op when playback is
+    // off.
     void playStep(int channel, float &gate, float &pitch, float &quant)
     {
         if (!playbackEnabled)
@@ -345,6 +403,9 @@ struct DiceOnSteroids : Module
         patternReadPos[channel] = (patternReadPos[channel] + 1) % loopLength;
     }
 
+    // Clears all per-channel state (gates, pitches, glide, shift registers,
+    // pattern heads and the pattern buffers themselves) and resets the
+    // clock/edge tracking. Called on RESET.
     void resetAll()
     {
         for (int c = 0; c < 16; ++c)
@@ -371,6 +432,9 @@ struct DiceOnSteroids : Module
         clockCounter = 0;
     }
 
+    // Serialises all persistent settings (gate time, range, scale, glide,
+    // random mode, clock division, seed, train mode) and the full 16x64
+    // pattern buffer so a patch reopens with the same sequence.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -401,6 +465,8 @@ struct DiceOnSteroids : Module
         return root;
     }
 
+    // Restores all settings and the 16x64 pattern buffer from a saved patch,
+    // clamping each scalar to its valid range and re-seeding the RNG.
     void dataFromJson(json_t *root) override
     {
         auto readFloat = [&](const char *key, float &out, float lo, float hi)
@@ -461,6 +527,11 @@ struct DiceOnSteroids : Module
         }
     }
 
+    // Main audio callback: reads controls + CVs (probability, polyphony,
+    // gate time, range, scale, transpose, glide), handles reset/retrigger/
+    // seed, runs the clock-division, train-mode, record/playback and
+    // independent random modes, applies glide and gate timers, writes the
+    // four polyphonic outputs and updates the LEDs/flash envelopes.
     void process(const ProcessArgs &args) override
     {
         float polyKnob = params[PARAM_POLYPHONY].getValue();
@@ -838,7 +909,8 @@ std::vector<Scale> DiceOnSteroids::scales = {
 namespace
 {
 
-    // Section header for a block that is narrower than the panel
+    // Draws an agmm section header whose hairlines span only [x0, x0+w]
+    // instead of the full panel width, by translating the context.
     void dsBlockHeader(NVGcontext *vg, float x0, float w, float y, const char *txt)
     {
         nvgSave(vg);
@@ -847,10 +919,16 @@ namespace
         nvgRestore(vg);
     }
 
+    // Static artwork: base panel, display bezel, the two control blocks,
+    // output and transport blocks, the numbered LED strip plate, and the
+    // input row.
     struct DSPanelBackground : TransparentWidget
     {
         DSPanelBackground() { box.size = Vec(DS_PANEL_W, DS_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, left CONTROL knobs,
+        // right OUTPUT jacks, right TRANSPORT switches, the LED strip with
+        // channel numbers, and the input row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -923,12 +1001,18 @@ namespace
         static constexpr float CHIP_Y = 134.f, CHIP_H = 12.f;
         static constexpr float METER_Y = 156.f;
 
+        // Static layer: fills the display area with the flat screen colour.
         void draw(const DrawArgs &args) override
         {
             agmm::screen(args.vg, 0.f, 0.f, DS_DISP_W, DS_DISP_H);
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the readout rows, the 16-channel pitch plot
+        // (quantized bars + raw ticks), the CH1 pattern strip with play/record
+        // markers, the REC/PLAY/TRAIN chips with a loop/div readout, and the
+        // probability meter. Falls back to a sample scene when there is no
+        // module.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1144,10 +1228,15 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Widget
+// Widget: adds the background, screws, live display, the left knob block,
+// the right output/transport block, the input row, the 16 gate LEDs and the
+// context menu (gate time, random mode, range, clock division, scale, seed).
 // ------------------------------------------------------------
 struct DiceOnSteroidsWidget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, display, the 8 control
+    // knobs (row-major), the 4 output jacks, the 3 transport switches + seed
+    // input, the 10 input jacks, and the 16 gate LEDs.
     DiceOnSteroidsWidget(DiceOnSteroids *module)
     {
         setModule(module);
@@ -1207,6 +1296,9 @@ struct DiceOnSteroidsWidget : ModuleWidget
                 module, DiceOnSteroids::LIGHT_GATES + i));
     }
 
+    // Adds the right-click menu: "Gate time", "Random mode", "V/Oct random
+    // range", "Clock division", "Quantization scale" submenus and a
+    // "Randomize seed" action, each with checkmarks on the active option.
     void appendContextMenu(Menu *menu) override
     {
         DiceOnSteroids *module = dynamic_cast<DiceOnSteroids *>(this->module);

@@ -5,6 +5,38 @@
 #include <cstring>
 #include <algorithm>
 
+// ============================================================
+// FancyADSR
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// FancyADSR is a 20 HP envelope generator with per-stage CV control, selectable
+// linear/exponential attack and release shapes, an optional looping mode, and a
+// live scope that shows both the ideal ADSR curve implied by the current knobs
+// (violet preview) and the actual envelope output history (cyan live trace).
+//
+// The envelope runs through ATTACK -> DECAY -> SUSTAIN -> RELEASE -> IDLE.
+// Attack and release are timed so that an exponential segment reaches within
+// 0.1% of its target after exactly the configured duration; decay is always
+// exponential (the usual ADSR behaviour). An end-of-release (EOR) pulse fires
+// for 5 ms when the envelope reaches zero, and a LOOP switch makes the envelope
+// retrigger from the gate while it is held.
+//
+// Each stage has its own CV input (5 V adds one second, or 100% for sustain),
+// and the scope's time axis is user-selectable via the TIME knob.
+//
+// File structure:
+//   1. Layout constants (20 HP = 300x380 px).
+//   2. FancyADSR module: state, param helpers, envelope maths, process() and
+//      the scope history buffer.
+//   3. Anonymous-namespace UI: segCurve helper, FAPanelBackground (static
+//      artwork) and FADisplayWidget (scope + readouts + chips).
+//   4. FancyADSRWidget: places knobs, jacks, switches and the display.
+//   5. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (20 HP = 300 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -37,6 +69,7 @@ static const float FA_IO_HEAD_Y = 303.f;
 static const float FA_ROWC_TOP = 311.f, FA_ROWC_H = 46.f; // I/O
 static const float FA_CELL_W = 66.f;
 
+// Horizontal centre of column i (0..3) for the four-column control rows.
 static float faColX(int i) { return 37.5f + 75.f * i; }
 
 // ------------------------------------------------------------
@@ -78,6 +111,7 @@ struct FancyADSR : Module
         NUM_LIGHTS
     };
 
+    // Envelope stages.
     enum Stage
     {
         STAGE_IDLE,
@@ -108,13 +142,21 @@ struct FancyADSR : Module
     float eorFlash = 0.f;
 
     // Parameter helpers (with CV)
+    // Attack time from the knob plus its CV, clamped to 1 ms .. 10 s.
     float getAttack() { return rack::math::clamp(params[ATTACK_PARAM].getValue() + inputs[ATTACK_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    // Decay time from the knob plus its CV, clamped to 1 ms .. 10 s.
     float getDecay() { return rack::math::clamp(params[DECAY_PARAM].getValue() + inputs[DECAY_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    // Sustain level from the knob plus its CV, clamped to 0..1.
     float getSustain() { return rack::math::clamp(params[SUSTAIN_PARAM].getValue() + inputs[SUSTAIN_CV_INPUT].getVoltage() / 5.0f, 0.0f, 1.0f); }
+    // Release time from the knob plus its CV, clamped to 1 ms .. 10 s.
     float getRelease() { return rack::math::clamp(params[RELEASE_PARAM].getValue() + inputs[RELEASE_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    // True when the LOOP switch is on.
     bool getLoop() { return params[LOOP_TOGGLE_PARAM].getValue() > 0.5f; }
+    // Scope time (full graph width in seconds), clamped to 50 ms .. 5 s.
     float getTimeScale() { return rack::math::clamp(params[TIME_SCALE_PARAM].getValue(), 0.05f, 5.0f); }
 
+    // Constructor: configures every parameter, input, output and the loop
+    // light, then resets the envelope and scope state.
     FancyADSR()
     {
         config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
@@ -141,6 +183,8 @@ struct FancyADSR : Module
         resetState();
     }
 
+    // Clears the envelope, stage, EOR pulse and scope history to a known
+    // starting state.
     void resetState()
     {
         stage = STAGE_IDLE;
@@ -156,6 +200,7 @@ struct FancyADSR : Module
             history[i] = 0.0f;
     }
 
+    // Rack reset hook: clears envelope and scope state.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -164,6 +209,9 @@ struct FancyADSR : Module
 
     // Helper: exponential that reaches target (1 or sustain) after 'duration' seconds
     // shape: 0=linear, 1=exponential (with proper timing)
+    // Computes the value of one envelope segment at time `t`: linear when
+    // `shape` is 0, otherwise exponential with tau chosen so the value is
+    // within 0.1% of `target` at t = duration.
     float runSegment(float start, float target, float duration, float t, float shape)
     {
         if (duration <= 0.0f)
@@ -182,6 +230,9 @@ struct FancyADSR : Module
         }
     }
 
+    // Handles a gate transition: a rising edge starts (or restarts) the
+    // attack from IDLE/RELEASE (and from SUSTAIN when looping); a falling
+    // edge starts the release from ATTACK/DECAY/SUSTAIN.
     void onGate(bool high)
     {
         if (high)
@@ -207,6 +258,8 @@ struct FancyADSR : Module
         }
     }
 
+    // Handles a trigger edge: while not idle, a rising trigger restarts the
+    // attack from the beginning.
     void onTrigger(bool high)
     {
         if (high && stage != STAGE_IDLE)
@@ -216,6 +269,10 @@ struct FancyADSR : Module
         }
     }
 
+    // Main audio callback: reads gate/trigger edges, evaluates the current
+    // stage's envelope value, advances stages when their durations elapse,
+    // writes the envelope and EOR outputs, updates the loop light, and
+    // samples the envelope into the scope history at the chosen time base.
     void process(const ProcessArgs &args) override
     {
         float sampleTime = args.sampleTime;
@@ -321,6 +378,8 @@ struct FancyADSR : Module
         eorFlash = std::max(0.f, eorFlash - 5.f * sampleTime);
 
         // ----- Real-time graph sampling -----
+        // Records the envelope output into a ring buffer at the current scope
+        // time base (one sample every timeScale/HISTORY_SIZE seconds).
         float timeScale = getTimeScale();
         float sampleInterval = timeScale / HISTORY_SIZE;
         sampleAccumulator += sampleTime;
@@ -335,7 +394,12 @@ struct FancyADSR : Module
     }
 
     // For graph widget access
+    // Returns the number of valid samples currently stored in the history
+    // buffer (0 .. HISTORY_SIZE).
     int getHistorySize() const { return historyCount; }
+    // Returns the history sample at `index`, where 0 is the oldest stored
+    // sample and the newest is at index historyCount-1. Out-of-range indices
+    // return 0.
     float getHistorySample(int index) const
     {
         if (index < 0 || index >= historyCount)
@@ -351,6 +415,8 @@ namespace
 {
 
     // Same segment maths as the module (used for the ideal-curve preview)
+    // Mirrors FancyADSR::runSegment() so the preview drawn by the UI matches
+    // the envelope the DSP will produce for the same parameters.
     float segCurve(float start, float target, float dur, float t, float shape)
     {
         if (dur <= 0.f)
@@ -370,6 +436,10 @@ namespace
     {
         FAPanelBackground() { box.size = Vec(FA_PANEL_W, FA_PANEL_H); }
 
+        // Draws all static panel art: base panel, display bezel, the
+        // ENVELOPE section with its four knob cells (and CV sub-labels), the
+        // four shape/loop/time cells with their EXP/LIN labels, and the I/O
+        // row with its four tinted jack cells.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -420,12 +490,15 @@ namespace
             box.size = Vec(FA_DISP_W, FA_DISP_H);
         }
 
+        // Maps a voltage (0..10 V) to a y pixel inside the scope rectangle.
         static float vy(float v)
         { // volts (0..10) to display y
             return FA_SY0 + FA_SH - 1.f - std::min(std::max(v / 10.f, 0.f), 1.f) * (FA_SH - 2.f);
         }
 
         // Static background: screen, scope field, grid, voltage ticks
+        // Draws the display screen, the scope frame, its 10x4 grid, and the
+        // "0"/"10" voltage labels in the left column.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -466,6 +539,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the readout row, the violet ideal-ADSR
+        // preview, the cyan live trace with a fill and end dot, the level
+        // meter, the legend row, and the stage/state chips (with an EOR
+        // flash ring). Falls back to a sample envelope in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -672,10 +749,16 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module Widget
+// Module Widget: adds the static panel, screws, the live display, the four
+// envelope knobs with their CV jacks, the shape/loop/time controls, and the
+// gate/retrigger inputs plus envelope/EOR outputs.
 // ------------------------------------------------------------
 struct FancyADSRWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, the scope display,
+    // row A (four knobs + four CV jacks), row B (two shape switches, the loop
+    // switch plus its light, and the time knob), and row C (two inputs + two
+    // outputs).
     FancyADSRWidget(FancyADSR *module)
     {
         setModule(module);

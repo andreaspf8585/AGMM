@@ -5,6 +5,36 @@
 #include <cstring>
 #include <algorithm>
 
+// ============================================================================
+// InstantDrone
+// ============================================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// InstantDrone is a 20 HP three-oscillator drone synth with per-oscillator
+// controls, a multi-tap delay-based reverb, and a live scope of the stereo
+// output. Each oscillator has its own frequency (V/Oct plus knob), waveform
+// (sine/triangle/saw), mix level, drift amount (random slow pitch wander),
+// low-pass filter cutoff and reverb send, all with dedicated CV inputs. An
+// optional envelope input per oscillator (with a bypass switch and LED) lets
+// the oscillator amplitude be shaped by an external envelope.
+//
+// The reverb is a bank of four feedback delay lines per channel with fixed
+// long tap times, mixed in by the INTENSITY control. A master gain trim and a
+// pair of output jacks complete the module. The display shows a min/max scope
+// of the mono output, L/R level meters, and readouts for intensity and gain.
+//
+// File structure:
+//   1. Layout constants (20 HP = 300x380 px).
+//   2. DroneDelay: a fixed-length circular delay line used by the reverb.
+//   3. InstantDrone module: oscillator state, parameter helpers, process().
+//   4. Anonymous-namespace UI: dWave helper, DRPanelBackground,
+//      DRDisplayWidget, DRWaveWidget, DREnvLed.
+//   5. InstantDroneWidget: places all controls, jacks, switches and widgets.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (20 HP = 300 x 380)
 // Every control sits in a plate with its label above it; CV jacks are labelled "CV".
@@ -39,11 +69,16 @@ static const float DR_COLX[6] = {67.f, 108.f, 149.f, 190.f, 231.f, 272.f}; // FR
 // ------------------------------------------------------------
 // Multi-tap delay for dense reverb
 // ------------------------------------------------------------
+// Fixed-length circular delay line used by the drone reverb. `process()`
+// reads `length` samples behind the write head, writes the input plus
+// feedback, and returns the delayed sample.
 struct DroneDelay
 {
     float buffer[44100] = {0.f};
     int writePos = 0;
 
+    // Processes one sample: reads the delayed value, writes input plus
+    // feedback, advances the write head, and returns the delayed sample.
     float process(float input, float feedback, int length)
     {
         length = clamp(length, 1, 44099);
@@ -138,6 +173,9 @@ struct InstantDrone : Module
     float scopeBMin = 0.f, scopeBMax = 0.f;
     float peakL = 0.f, peakR = 0.f;
 
+    // Constructor: configures every oscillator parameter, CV input, the
+    // reverb intensity and output gain, the envelope bypass switches, and the
+    // stereo outputs.
     InstantDrone()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN);
@@ -171,6 +209,8 @@ struct InstantDrone : Module
         configOutput(RIGHT_OUTPUT, "Right");
     }
 
+    // Returns the value of the requested waveform at `phase` (0..1):
+    // 0 = sine, 1 = triangle, 2 = saw. Unknown types fall back to sine.
     float getWaveform(float phase, int type)
     {
         switch (type)
@@ -186,6 +226,12 @@ struct InstantDrone : Module
         }
     }
 
+    // Main audio callback: for each oscillator, updates the slow random drift,
+    // computes the pitch from V/Oct and the FREQ knob, advances the phase,
+    // generates the selected waveform, applies mix/envelope, runs its one-pole
+    // low-pass, and sums into the dry bus and the reverb send. Then runs the
+    // multi-tap delay reverb, mixes dry/wet, applies output gain, writes the
+    // stereo outputs, and updates the scope and meters.
     void process(const ProcessArgs &args) override
     {
         float drySum = 0.f;
@@ -325,6 +371,8 @@ namespace
 {
 
     // Same shapes as InstantDrone::getWaveform
+    // Returns the value of the requested waveform at `phase` (0..1) for UI
+    // previews: 1 = triangle, 2 = saw, anything else = sine.
     float dWave(float phase, int type)
     {
         switch (type)
@@ -341,10 +389,16 @@ namespace
     // ------------------------------------------------------------
     // Panel background
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the master INTENSITY/GAIN/
+    // output cells, the OSCILLATORS section header and column headings, and
+    // the per-oscillator plates with their "CV"/"IN" sub-labels.
     struct DRPanelBackground : TransparentWidget
     {
         DRPanelBackground() { box.size = Vec(DR_PANEL_W, DR_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, master section cells
+        // (INTENSITY, GAIN, L OUT, R OUT), and the three oscillator rows with
+        // their waveform plate and six control plates per row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -389,6 +443,9 @@ namespace
     // ------------------------------------------------------------
     // Output scope + level meters, readouts in their own row
     // ------------------------------------------------------------
+    // Live display: a min/max scope of the mono output, L/R level meters, and
+    // a readout row for intensity and gain. Falls back to demo values when
+    // there is no module (module browser).
     struct DRDisplayWidget : TransparentWidget
     {
         InstantDrone *module = nullptr;
@@ -399,6 +456,8 @@ namespace
             box.size = Vec(DR_DISP_W, DR_DISP_H);
         }
 
+        // Static layer: fills the display screen, draws the scope grid, and
+        // adds the divider between the scope and the readout row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -427,6 +486,9 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the scope waveform from the module's min/max
+        // ring buffer (or a demo shape), the L/R level meters, and the two
+        // readouts (INT and GAIN) in their own row.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -491,6 +553,8 @@ namespace
     // Mini waveform screen (one per oscillator): the selected shape with a dot
     // at the oscillator's live phase, name underneath
     // ------------------------------------------------------------
+    // Small waveform preview per oscillator: draws the selected shape with a
+    // violet dot at the live phase, plus a SIN/TRI/SAW caption below.
     struct DRWaveWidget : TransparentWidget
     {
         InstantDrone *module = nullptr;
@@ -504,6 +568,7 @@ namespace
             box.size = Vec(SW, 36.f);
         }
 
+        // Static layer: draws the rounded dark screen with a faint cyan border.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -517,6 +582,8 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the selected waveform, a violet dot at the
+        // oscillator's live phase, and the SIN/TRI/SAW caption.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -566,6 +633,8 @@ namespace
     // ------------------------------------------------------------
     // Envelope-active LED (flat dot)
     // ------------------------------------------------------------
+    // Small flat LED that lights when the corresponding oscillator's envelope
+    // bypass switch is in the "active" position.
     struct DREnvLed : TransparentWidget
     {
         InstantDrone *module = nullptr;
@@ -577,6 +646,8 @@ namespace
             box.size = Vec(8.f, 8.f);
         }
 
+        // Layer-1 overlay: draws the LED dot bright when the envelope is
+        // active, dim otherwise. Uses a demo state in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -598,10 +669,16 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// Module widget: adds the static panel, screws, the scope display, the three
+// waveform mini-screens and envelope LEDs, the master INTENSITY/GAIN controls
+// and output jacks, and the three oscillator rows (waveform switch plus five
+// knob/jack pairs and an envelope switch/input).
 // ------------------------------------------------------------
 struct InstantDroneWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, per-row
+    // waveform previews and envelope LEDs, master controls and jacks, and the
+    // three oscillator control rows.
     InstantDroneWidget(InstantDrone *module)
     {
         setModule(module);

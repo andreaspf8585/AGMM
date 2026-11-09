@@ -6,45 +6,83 @@
 #include <memory>
 #include <cstdio>
 
+// =============================================================================
+// Dark Hall Granular
+// =============================================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// DarkHallGranular is an 18 HP stereo "galaxy-style" reverb. A shared input
+// diffusion chain feeds two cross-coupled feedback tanks, each containing a
+// long delay, a one-pole damping filter and two modulated all-passes. The
+// two tanks cross-feed each other, producing a dense, slowly evolving tail.
+// Controls: Replace, Brightness, Detune and Bigness (each with its own CV
+// input and bipolar attenuverter), plus input gain, dry/wet and output gain.
+// A RESET input flushes the reverb tail. The display shows a scope of the
+// mono output plus L/R level meters.
+//
+// File structure:
+//   1. DSP helpers: clampT, sanitize, softClip, DelayLine.
+//   2. DarkHallGranular module: delay-line tanks, params/ports config, CV
+//      scaling, reset, JSON persistence and process().
+//   3. Layout constants (18 HP = 270x380 px).
+//   4. Anonymous-namespace theme/drawing helpers and the two panel widgets:
+//        - DhgPanelBackground: static artwork
+//        - DhgDisplayWidget:  live scope + meters (layer 1)
+//   5. DarkHallGranularWidget: places widgets and builds the CV-range menu.
+//   6. Model registration.
+// -----------------------------------------------------------------------------
 static const int DHG_SCOPE_N = 96;
 
 // =============================================================================
 // Galaxy-style stereo reverb — DSP preserved from original
 // =============================================================================
 
+// Clamps v into [lo, hi].
 template<typename T>
 static inline T clampT(T v, T lo, T hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// Replaces non-finite values with 0 and flushes denormals (|x| < 1e-25) to 0.
 static inline float sanitize(float x) {
     if (!std::isfinite(x)) return 0.f;
     if (std::fabs(x) < 1e-25f) return 0.f;
     return x;
 }
 
+// Soft-clips x to approximately ±limit using tanh.
 static inline float softClip(float x, float limit) {
     return limit * std::tanh(x / limit);
 }
 
+// Circular delay line with cubic-interpolated fractional reads and an
+// all-pass helper. Used for both the diffusion and the tank delays.
 struct DelayLine {
     std::vector<float> buf;
     int size  = 0;
     int write = 0;
 
+    // Allocates the buffer with n samples and clears it.
     void init(int n) {
         size = n;
         buf.assign(n, 0.f);
         write = 0;
     }
+    // Zeroes the buffer contents and resets the write pointer.
     void clear() {
         std::fill(buf.begin(), buf.end(), 0.f);
         write = 0;
     }
+    // Writes one sample at the write head and advances it (wrapping).
     inline void push(float x) {
         buf[write] = x;
         if (++write >= size) write = 0;
     }
+    // Reads the buffer at a fractional `delay` (in samples) using 4-point
+    // cubic interpolation. The delay is clamped to keep the read indices
+    // inside the buffer.
     inline float read(float delay) const {
         delay = clampT(delay, 2.f, (float)(size - 4));
         float pos = (float)write - 1.f - delay + 1.f;
@@ -62,6 +100,9 @@ struct DelayLine {
         float c = -0.5f*y0             + 0.5f*y2;
         return ((a*t + b)*t + c)*t + y1;
     }
+    // Processes one sample through the line as a Schroeder all-pass with
+    // gain g at the given delay, pushing the sanitised input and returning
+    // the all-pass output.
     inline float allpass(float in, float delay, float g) {
         float d = read(delay);
         float w = in - g * d;
@@ -70,8 +111,12 @@ struct DelayLine {
     }
 };
 
+// =============================================================================
+// DarkHallGranular module
+// =============================================================================
 struct DarkHallGranular : Module {
 
+    // Fixed diffusion all-pass delays (samples at 32 kHz reference).
     static constexpr float AP_IN[4]  = { 150.f, 214.f, 319.f, 527.f };
     static constexpr float DAP1A = 2182.f, DAP1B = 2690.f, DEL1 = 4501.f;
     static constexpr float DAP2A = 2525.f, DAP2B = 2197.f, DEL2 = 6312.f;
@@ -88,6 +133,7 @@ struct DarkHallGranular : Module {
     bool wasResetHigh = false;
     bool wasConnected = false;
 
+    // Selectable CV interpretation: bipolar ±5 V or unipolar 0..10 V.
     enum CVRange { BIPOLAR_M5_5, UNIPOLAR_0_10 };
     CVRange cvRangeMode = BIPOLAR_M5_5;
 
@@ -114,6 +160,8 @@ struct DarkHallGranular : Module {
     };
     enum OutputId { OUT_L, OUT_R, OUTPUTS_LEN };
 
+    // Constructor: configures all parameters, inputs, outputs, stereo
+    // bypass, and allocates every delay line to its final length.
     DarkHallGranular() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN);
 
@@ -150,6 +198,8 @@ struct DarkHallGranular : Module {
         del1.init(131072); del2.init(131072);
     }
 
+    // Clears every delay line and resets the filter, LFO, smoothing and
+    // DC-blocker state. Used on reset and when the reset input is patched.
     void resetState() {
         for (int i = 0; i < 4; ++i) apIn[i].clear();
         dap1a.clear(); dap1b.clear(); del1.clear();
@@ -159,13 +209,17 @@ struct DarkHallGranular : Module {
         dcInL = dcInR = dcOutL = dcOutR = 0.f;
     }
 
+    // Rack reset hook: flushes the reverb tail.
     void onReset() override { resetState(); }
 
+    // Serialises the chosen CV range mode so patches reopen with the same
+    // CV interpretation.
     json_t *dataToJson() override {
         json_t *root = json_object();
         json_object_set_new(root, "cvRangeMode", json_integer(cvRangeMode));
         return root;
     }
+    // Restores the CV range mode from a saved patch, defaulting to bipolar.
     void dataFromJson(json_t *root) override {
         json_t *mode = json_object_get(root, "cvRangeMode");
         if (mode) {
@@ -174,6 +228,9 @@ struct DarkHallGranular : Module {
         }
     }
 
+    // Returns the effective value of `param` after adding the CV input
+    // `cvIn` scaled by the attenuverter `atten`, clamped to 0..1. The CV is
+    // normalised according to the selected CV range mode.
     float cvParam(int param, int cvIn, int atten) {
         float cv = sanitize(inputs[cvIn].getVoltage());
         float scaled;
@@ -185,6 +242,9 @@ struct DarkHallGranular : Module {
                       + scaled * params[atten].getValue(), 0.f, 1.f);
     }
 
+    // Main audio callback: handles reset/connection state, reads the
+    // controls and CVs, runs the diffusion + two cross-coupled tanks,
+    // mixes dry/wet, writes the outputs and updates the scope/meter data.
     void process(const ProcessArgs &args) override {
         if (args.sampleTime <= 0.f) return;
 
@@ -227,6 +287,8 @@ struct DarkHallGranular : Module {
         if (!inputs[IN_L].isConnected()) inL = inR;
 
         // ---- Derived values ------------------------------------------------
+        // Scale the fixed delay times to the current sample rate and smoothly
+        // track the Bigness control so size changes glide.
         const float srScale = args.sampleRate / 32000.f;
 
         float bigTgt = 0.4f + bigness * 1.2f;
@@ -242,6 +304,7 @@ struct DarkHallGranular : Module {
         float modDepth = detune * detune * 55.f * srScale;
         float apModDepth = detune * 14.f * srScale;
 
+        // Four free-running LFOs (different rates) for the modulated delays.
         lfo1 += args.sampleTime * 0.50f;
         lfo2 += args.sampleTime * 0.31f;
         lfo3 += args.sampleTime * 0.23f;
@@ -263,6 +326,8 @@ struct DarkHallGranular : Module {
         float apOut = sanitize(x);
 
         // ---- Tank 1 (-> left) -----------------------------------------------
+        // A long delay from tank 2, damped, through two modulated all-passes
+        // and back into tank 1's delay.
         float wet = apOut + del2.read(DEL2 * k + m3 * modDepth) * krt;
         lp1 += lpCoef * (wet - lp1);
         lp1 = sanitize(lp1);
@@ -274,6 +339,7 @@ struct DarkHallGranular : Module {
         float revL = wet;
 
         // ---- Tank 2 (-> right) ----------------------------------------------
+        // Mirror of tank 1, reading tank 1's delay for the cross-feed.
         wet = apOut + del1.read(DEL1 * k + m4 * modDepth) * krt;
         lp2 += lpCoef * (wet - lp2);
         lp2 = sanitize(lp2);
@@ -310,10 +376,12 @@ struct DarkHallGranular : Module {
         outputs[OUT_R].setVoltage(vR);
 
         // ---- display data ---------------------------------------------------
+        // Peak envelopes with a short decay for the L/R meters.
         float decayRate = 1.f - 4.f * args.sampleTime;
         peakL = std::max(std::fabs(vL), peakL * decayRate);
         peakR = std::max(std::fabs(vR), peakR * decayRate);
 
+        // Scope ring buffer: min/max of the mono output, bucketed to ~2.5 ms.
         float mono = 0.5f * (vL + vR);
         if (scopeCount == 0) scopeBMin = scopeBMax = mono;
         else {
@@ -330,6 +398,7 @@ struct DarkHallGranular : Module {
     }
 };
 
+// Out-of-line definition required for the static constexpr array.
 constexpr float DarkHallGranular::AP_IN[4];
 
 // =============================================================================
@@ -388,13 +457,21 @@ static const float DHG_IO_JACK_Y  = 336.f;
 // =============================================================================
 namespace {
 
+// Panel background gradient start colour (top).
 NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
+// Panel background gradient end colour (bottom).
 NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+// Default body text colour.
 NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
+// Muted colour for secondary labels.
 NVGcolor colDim()      { return nvgRGB(0x8a, 0x95, 0xa4); }
+// Primary accent colour (cyan).
 NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
+// Secondary accent colour (violet), used for meter gradients.
 NVGcolor colAccent2()  { return nvgRGB(0xb0, 0x5a, 0xff); }
 
+// Loads the AGMM monospace font and makes it the current NanoVG font face.
+// Returns false if there is no window or the asset is missing.
 bool setFont(NVGcontext* vg) {
     if (!APP || !APP->window) return false;
     std::shared_ptr<window::Font> font =
@@ -404,6 +481,8 @@ bool setFont(NVGcontext* vg) {
     return true;
 }
 
+// Draws a string at (x, y) with the given size, colour, alignment and
+// letter spacing.
 void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
               int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
     if (!setFont(vg)) return;
@@ -414,6 +493,8 @@ void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGco
     nvgText(vg, x, y, s, NULL);
 }
 
+// Describes one of the four TONE cells: label plus the three module IDs
+// (knob parameter, CV attenuverter, CV input) that it hosts.
 struct DhgToneDef { const char* name; int param, attn, cv; };
 const DhgToneDef DHG_TONE_CELLS[4] = {
     {"REPLACE", DarkHallGranular::REPLACE_PARAM,    DarkHallGranular::REPLACE_ATTEN,    DarkHallGranular::REPLACE_CV},
@@ -421,6 +502,7 @@ const DhgToneDef DHG_TONE_CELLS[4] = {
     {"DETUNE",  DarkHallGranular::DETUNE_PARAM,     DarkHallGranular::DETUNE_ATTEN,     DarkHallGranular::DETUNE_CV},
     {"BIGNESS", DarkHallGranular::BIGNESS_PARAM,    DarkHallGranular::BIGNESS_ATTEN,    DarkHallGranular::BIGNESS_CV},
 };
+// Describes one of the three LEVELS cells: label plus the knob parameter.
 struct DhgLevelDef { const char* name; int param; };
 const DhgLevelDef DHG_LEVEL_CELLS[3] = {
     {"IN GAIN",  DarkHallGranular::INPUT_GAIN_PARAM},
@@ -435,6 +517,8 @@ const char* DHG_IO_NAMES[5] = {"L IN", "R IN", "RESET", "L OUT", "R OUT"};
 struct DhgPanelBackground : TransparentWidget {
     DhgPanelBackground() { box.size = Vec(DHG_PANEL_W, DHG_PANEL_H); }
 
+    // Draws a rounded control plate centred on cx with its top edge at `top`.
+    // `output` tints the plate in accent cyan to mark output jacks.
     void plate(NVGcontext* vg, float cx, float top, float w, float h, bool output = false) {
         nvgBeginPath(vg);
         nvgRoundedRect(vg, cx - w / 2.f, top, w, h, 5.f);
@@ -467,6 +551,9 @@ struct DhgPanelBackground : TransparentWidget {
         nvgStroke(vg);
     }
 
+    // Draws the full static panel: background gradient, title, maker tag,
+    // display bezel, the TONE section with its four cells, the LEVELS
+    // section with three cells, and the I/O section with five jack cells.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
 
@@ -539,8 +626,11 @@ struct DhgDisplayWidget : TransparentWidget {
         box.size = Vec(DHG_DISP_W, DHG_DISP_H);
     }
 
+    // Width of the scope area (the display width minus room for meters).
     static float scopeW() { return DHG_DISP_W - 16.f; }
 
+    // Draws the dark display fill and its grid (vertical ticks and a centre
+    // line). This runs on layer 0; the live waveform is drawn in drawLayer().
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
 
@@ -564,6 +654,9 @@ struct DhgDisplayWidget : TransparentWidget {
         Widget::draw(args);
     }
 
+    // Layer-1 overlay: draws the scope waveform from the module's min/max
+    // ring buffer (or a demo burst in the module browser) and the L/R level
+    // meters with a cyan-to-violet gradient. Other layers just forward.
     void drawLayer(const DrawArgs& args, int layer) override {
         if (layer != 1) {
             Widget::drawLayer(args, layer);
@@ -629,9 +722,13 @@ struct DhgDisplayWidget : TransparentWidget {
 } // namespace
 
 // =============================================================================
-// Module widget
+// Module widget: adds the panel background, screws, the display widget, the
+// four TONE controls (knob + CV jack + attenuverter), the three LEVELS
+// knobs, the five I/O jacks, and the CV-range context menu.
 // =============================================================================
 struct DarkHallGranularWidget : ModuleWidget {
+    // Builds the widget tree: static background, screws, live display,
+    // TONE cells, LEVELS knobs and I/O jacks.
     DarkHallGranularWidget(DarkHallGranular* module) {
         setModule(module);
         box.size = Vec(DHG_PANEL_W, DHG_PANEL_H);
@@ -675,6 +772,8 @@ struct DarkHallGranularWidget : ModuleWidget {
             Vec(DHG_IO_CX[4], DHG_IO_JACK_Y), module, DarkHallGranular::OUT_R));
     }
 
+    // Adds the right-click "CV Range" submenu with two mutually exclusive,
+    // checkmarked options that set the module's CV interpretation.
     void appendContextMenu(Menu* menu) override {
         DarkHallGranular* module = dynamic_cast<DarkHallGranular*>(this->module);
         if (!module) return;
@@ -685,9 +784,11 @@ struct DarkHallGranularWidget : ModuleWidget {
         struct CVRangeItem : MenuItem {
             DarkHallGranular* module;
             DarkHallGranular::CVRange range;
+            // Sets the module's CV range mode to this item's range.
             void onAction(const ActionEvent& e) override {
                 module->cvRangeMode = range;
             }
+            // Shows a checkmark when this item's range is the active mode.
             void step() override {
                 rightText = CHECKMARK(module->cvRangeMode == range);
                 MenuItem::step();

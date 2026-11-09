@@ -1,13 +1,34 @@
 // Lifeform.cpp
 // AGMM-styled ferrofluid visualiser.
 //
-// A glossy black ferrofluid "lifeform" floating in a bright glass dish inside a
-// perforated white bezel. The lifeform is real 3D geometry: a lobed blob, ~140
-// Rosensweig spikes and orbiting droplets, tumbling through space with perspective
-// projection, depth sorting and normal-based gloss.
+// ============================================================================
+// OVERVIEW
+// ============================================================================
+// Lifeform is an 18 HP audio-reactive visual module that renders a glossy black
+// ferrofluid "lifeform" floating in a glass dish inside a perforated white
+// bezel. The lifeform is real 3D geometry: a lobed blob, ~140 Rosensweig spikes
+// and orbiting droplets, tumbling through space with perspective projection,
+// depth sorting and normal-based gloss.
 //
-// Sound drives it through three bands (low / mid / high), an onset detector
-// ("punch") and a silence detector: in silence everything merges into one blob.
+// Sound drives the visualisation through three bands (low / mid / high), an
+// onset detector ("punch") and a silence detector. In silence everything merges
+// into one calm blob; with audio the blob becomes active, spikes erupt, and
+// droplets orbit around it. The magnet position, field strength and viscosity
+// can be controlled by knobs and CV, and the module outputs an envelope and a
+// field-level CV.
+//
+// File structure:
+//   1. LifeformModule: audio analysis (envelope + three bands + pulse/onset),
+//      parameter smoothing, and output generation.
+//   2. Layout constants (18 HP = 270x380 px).
+//   3. Anonymous-namespace UI:
+//        - tiny 3D maths helpers (V3, M3, operators, dot/cross/norm)
+//        - hash1, smooth01
+//        - LifeformDisplay: the 3D ferrofluid renderer (physics + drawing)
+//        - LFPanelBackground: static panel art
+//   4. LifeformWidget: places buttons, knobs, jacks, lights and the display.
+//   5. Model registration.
+// ============================================================================
 
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
@@ -25,6 +46,7 @@
 
 using namespace rack;
 
+// Clamps x into [lo, hi] for any arithmetic type.
 template <typename T>
 inline T clampT(T x, T lo, T hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
@@ -95,6 +117,8 @@ struct LifeformModule : Module
     std::atomic<float> magnetX{0.f};
     std::atomic<float> magnetY{0.f};
 
+    // Constructor: configures all parameters, inputs, outputs, lights and
+    // bypass; sets up the atomic shared state used by the UI thread.
     LifeformModule()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -127,6 +151,8 @@ struct LifeformModule : Module
         configBypass(AUDIO_INPUT, ENV_OUTPUT);
     }
 
+    // Rack reset hook: clears the audio analysis, smoothing state and atomics
+    // so the visualiser returns to a neutral starting point.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -147,6 +173,11 @@ struct LifeformModule : Module
         magnetY.store(0.f);
     }
 
+    // Main audio callback: debounces the Pause / Audio-reactive buttons,
+    // computes a fast/slow envelope, splits the input into low/mid/high bands
+    // with envelope followers, detects pulse triggers, smooths the field
+    // parameter (with audio boost and pulse flash), advances the magnet phase,
+    // and publishes all state to the UI through the atomics and outputs.
     void process(const ProcessArgs &args) override
     {
         const float sr = args.sampleRate;
@@ -177,6 +208,7 @@ struct LifeformModule : Module
         const float bandLow = std::fabs(lp1) * 1.5f;
         const float bandMid = std::fabs(lp2 - lp1) * 1.6f;
         const float bandHigh = std::fabs(in - lp2) * 2.0f;
+        // Simple asymmetric envelope follower for each band.
         auto follow = [sr](float &e, float x, float aT, float rT)
         {
             const float a = std::min(1.f, 1.f / (aT * sr));
@@ -195,6 +227,7 @@ struct LifeformModule : Module
         if (pulseFlash < 0.f)
             pulseFlash = 0.f;
 
+        // Reads a knob plus its CV (0..10 V) and clamps the result to 0..1.
         auto v = [this](int p, int cv)
         {
             return clampT(params[p].getValue() + inputs[cv].getVoltage() / 10.f, 0.f, 1.f);
@@ -267,12 +300,15 @@ static const float LF_IO_X[4] = {37.f, 102.f, 167.f, 232.f};
 namespace
 {
 
+    // Fast deterministic hash in [0,1) used for per-spike/per-droplet randoms.
     inline float hash1(float x)
     {
         const float s = std::sin(x * 127.1f + 311.7f) * 43758.5453f;
         return s - std::floor(s);
     }
 
+    // Smoothstep between a and b; returns 0 below a, 1 above b, and a smooth
+    // Hermite interpolation in between.
     inline float smooth01(float a, float b, float x)
     {
         const float t = clampT((x - a) / (b - a), 0.f, 1.f);
@@ -280,10 +316,12 @@ namespace
     }
 
     // ---- tiny 3D maths ----
+    // Minimal 3-component vector.
     struct V3
     {
         float x, y, z;
     };
+    // Constructs a V3 from components.
     inline V3 v3(float x, float y, float z)
     {
         V3 r;
@@ -292,21 +330,30 @@ namespace
         r.z = z;
         return r;
     }
+    // Vector addition.
     inline V3 operator+(V3 a, V3 b) { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
+    // Vector subtraction.
     inline V3 operator-(V3 a, V3 b) { return v3(a.x - b.x, a.y - b.y, a.z - b.z); }
+    // Scalar multiplication.
     inline V3 operator*(V3 a, float s) { return v3(a.x * s, a.y * s, a.z * s); }
+    // Dot product.
     inline float dot3(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    // Cross product.
     inline V3 cross3(V3 a, V3 b)
     {
         return v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
     }
+    // Euclidean length.
     inline float len3(V3 a) { return std::sqrt(dot3(a, a)); }
+    // Returns a unit vector (with a small epsilon to avoid division by zero).
     inline V3 norm3(V3 a) { return a * (1.f / (len3(a) + 1e-6f)); }
 
+    // Row-major 3x3 matrix.
     struct M3
     {
         float m[9];
     }; // row-major
+    // Multiplies a 3x3 matrix by a V3.
     inline V3 m3mul(const M3 &M, V3 v)
     {
         return v3(M.m[0] * v.x + M.m[1] * v.y + M.m[2] * v.z,
@@ -314,6 +361,7 @@ namespace
                   M.m[6] * v.x + M.m[7] * v.y + M.m[8] * v.z);
     }
 
+    // Knob table entry: display name, parameter ID and CV input ID.
     struct LFKnobDef
     {
         const char *name;
@@ -332,6 +380,10 @@ namespace
     // =====================================================================
     //  Ferrofluid display - 3D tumbling blob, spikes and droplets
     // =====================================================================
+    // Renders the 3D ferrofluid lifeform: a lobed surface grid, Rosensweig
+    // spikes, orbiting droplets, perspective projection, depth sorting and
+    // normal-based gloss. Physics is stepped each frame from the module's
+    // audio-reactive state.
     struct LifeformDisplay : TransparentWidget
     {
         enum
@@ -344,6 +396,9 @@ namespace
             NB = 96
         };
 
+        // One Rosensweig spike: a local surface direction, per-spike random
+        // values, current height/velocity, and cached per-frame projected
+        // geometry.
         struct Spike
         {
             V3 d;             // local unit direction on the body
@@ -354,6 +409,8 @@ namespace
             bool front, vis;
         };
 
+        // One orbiting droplet: its orbital plane, angle/distance, radius and
+        // cached projected position/scale/depth/visibility.
         struct Drop
         {
             V3 e1, e2;                // orbital plane basis (local)
@@ -400,6 +457,9 @@ namespace
         float ell = 0.12f;
         float punch = 0.f; // transient energy (onset detector)
 
+        // Constructor: initialises the surface grid, spikes and droplets,
+        // sets up the lighting and magnet directions, and performs one physics
+        // step so the first frame has valid geometry.
         explicit LifeformDisplay(LifeformModule *m) : module(m)
         {
             box.pos = Vec(LF_DISP_X, LF_DISP_Y);
@@ -476,6 +536,8 @@ namespace
             stepPhysics(1.f / 60.f);
         }
 
+        // Resets the spike heights/velocities and droplet distances/velocities
+        // to their rest state (used by the RESET button).
         void resetLife()
         {
             for (int i = 0; i < N_SPIKES; ++i)
@@ -492,6 +554,8 @@ namespace
         }
 
         // ---- 3D helpers ----
+        // Projects a world-space point P to 2D (x, y) and a scale factor `s`
+        // using a simple perspective camera at z = LF_CAM.
         static void project(const V3 &P, float &x, float &y, float &s)
         {
             s = LF_CAM / (LF_CAM - P.z);
@@ -499,6 +563,9 @@ namespace
             y = P.y * s;
         }
 
+        // Rotates the body orientation Rm by an angular velocity vector w over
+        // dt, using the Rodrigues formula, and re-orthonormalises the matrix
+        // to prevent numerical drift.
         void rotateBy(V3 w, float dt)
         {
             const float wl = len3(w);
@@ -537,6 +604,9 @@ namespace
         }
 
         // Surface radius (px) for a local direction d with world direction wd
+        // Returns the radius of the body surface at a given local direction,
+        // including the wobble/ripple/ellipse/stretch terms and magnet
+        // alignment, clamped so it stays inside the glass.
         float surfaceR(const V3 &d, const V3 &wd) const
         {
             const float n = std::sin(2.1f * d.x + 1.7f * d.y + wt * 0.90f) * 0.50f + std::sin(3.2f * d.y - 2.4f * d.z - wt * 1.30f + 1.7f) * 0.30f + std::sin(1.6f * d.z + 2.2f * d.x + wt * 0.55f) * 0.40f + std::sin(5.0f * d.x + 4.1f * d.y + 3.7f * d.z + wt * 2.10f) * 0.12f;
@@ -546,6 +616,10 @@ namespace
             return std::min(r, LF_DISH_R * 0.80f - oLen);
         }
 
+        // Advances the visual physics by dt: reads the module's smoothed audio
+        // state, runs the onset detector, updates the body shape/tumble/offset,
+        // integrates the spikes and droplets, and finally rebuilds the
+        // projected geometry for drawing.
         void stepPhysics(float dt)
         {
             t += dt;
@@ -745,6 +819,8 @@ namespace
         }
 
         // Build the projected 3D scene for this frame
+        // Computes world positions and normals of the surface grid, the
+        // projected silhouette, and the projected geometry of every spike.
         void buildGeometry()
         {
             const float R = LF_DISH_R;
@@ -839,6 +915,8 @@ namespace
         }
 
         // ----- Drawing (flat fills only) -----
+        // Draws the white bezel ring, the perforation dots, the groove and the
+        // glass fill for the dish.
         void drawDish(NVGcontext *vg, float cx, float cy, float R)
         {
             // Light bezel ring
@@ -875,6 +953,8 @@ namespace
             nvgFill(vg);
         }
 
+        // Draws the soft contact shadow beneath the body, following its
+        // offset and size.
         void drawShadow(NVGcontext *vg, float cx, float cy)
         {
             const float bb = bodyBase;
@@ -884,6 +964,7 @@ namespace
             nvgFill(vg);
         }
 
+        // Builds a closed path along the projected silhouette polygon.
         void silhouettePath(NVGcontext *vg, float bcx, float bcy)
         {
             nvgBeginPath(vg);
@@ -900,6 +981,8 @@ namespace
             nvgClosePath(vg);
         }
 
+        // Draws the black body silhouette with a thin cool rim, plus the
+        // normal-based specular highlights that slide over the lobes.
         void drawBody(NVGcontext *vg, float cx, float cy, float gloss)
         {
             const float bcx = cx + offX, bcy = cy + offY;
@@ -958,6 +1041,9 @@ namespace
             }
         }
 
+        // Draws the spikes for either the back (front=false) or the front
+        // (front=true) of the body: first a combined dark silhouette pass, then
+        // edge glints, then bright tips where they catch the light.
         void drawSpikes(NVGcontext *vg, float cx, float cy, float gloss, bool front)
         {
             // Pass 1: dark silhouettes (single path)
@@ -1027,6 +1113,8 @@ namespace
             }
         }
 
+        // Draws the orbiting droplets for either the back or the front of the
+        // body (as determined by their depth z), with a small specular dot.
         void drawDrops(NVGcontext *vg, float cx, float cy, float gloss, bool front)
         {
             for (int i = 0; i < N_DROPS; ++i)
@@ -1055,6 +1143,9 @@ namespace
             }
         }
 
+        // Main draw entry point: advances the frame (unless paused), draws the
+        // dish, then back-to-front spikes/droplets/body/front spikes/droplets,
+        // the glass lip, and the readout row (FIELD / status / ENV).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1131,10 +1222,15 @@ namespace
     // =====================================================================
     //  Panel background
     // =====================================================================
+    // Static artwork: base panel, display bezel, the three button cells, the
+    // two rows of knob/CV plates, and the four I/O plates.
     struct LFPanelBackground : TransparentWidget
     {
         LFPanelBackground() { box.size = Vec(LF_PANEL_W, LF_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, the PAUSE/RESET/AUDIO
+        // buttons, the CONTROLS section with its six knob/CV plates, and the
+        // I/O section with its four plates.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1178,8 +1274,13 @@ namespace
 // =====================================================================
 //  Module widget
 // =====================================================================
+// Places the static panel, the live LifeformDisplay, screws, the three
+// buttons with their lights, the six knob/CV pairs and the four I/O jacks.
 struct LifeformWidget : ModuleWidget
 {
+    // Builds the widget tree: background, display, screws, PAUSE/RESET/AUDIO
+    // buttons plus the PAUSE/AUDIO lights, the six CONTROL knob/CV pairs, and
+    // the AUDIO/PULSE inputs and ENV/FIELD outputs.
     explicit LifeformWidget(LifeformModule *module)
     {
         setModule(module);

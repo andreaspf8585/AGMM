@@ -9,6 +9,42 @@
 #include <algorithm>
 #include <memory>
 
+// ============================================================
+// ExpressArp
+// ============================================================
+//
+// -----------------------------------------------------------------------------
+// OVERVIEW
+// -----------------------------------------------------------------------------
+// ExpressArpeggiator is a 28 HP generative arpeggiator/sequencer. It holds a
+// 16-step pattern of notes (all within a chosen root, scale and octave span),
+// and advances through the active steps on each clock edge according to a
+// selected direction (forward, backward, random, drunk, pendulum). Steps can
+// be muted (rests), locked (protected from randomize/mutation), and the
+// pattern can be randomized or probabilistically mutated while it plays.
+//
+// The interactive display shows the pattern as bars over a pitch grid, with
+// per-step note names, gate/mute rows, lock rows, step numbers, a mini
+// keyboard highlighting the scale, direction chips, and status chips. The
+// user can drag on the bars to paint notes, click the gate row to mute a
+// step, click the lock row to lock it, click a step number to set the loop
+// length, and click a direction chip to change the direction.
+//
+// Outputs: V/Oct, gate, end-of-cycle gate, and a 0-10 V step position CV.
+//
+// File structure:
+//   1. Layout constants and note-name table.
+//   2. Scale table (scaleTable()) with 60+ scales.
+//   3. ParamQuantity subclasses for the key/scale knob tooltips.
+//   4. ExpressArpeggiator module: pattern state, config, helpers, sequencing
+//      and process().
+//   5. Anonymous-namespace UI: EAPanel (static art) and EADisplay
+//      (interactive plot with drawing, hit-testing and mouse handlers).
+//   6. ExpressArpeggiatorWidget: places knobs, jacks, the randomize button
+//      and the display, plus the context menu.
+//   7. Model registration.
+// -----------------------------------------------------------------------------
+
 // ------------------------------------------------------------
 // Layout (28 HP = 420 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -25,6 +61,8 @@ static const float EA_CTRL_SEC_Y = 224.f;
 static const float EA_IO_SEC_Y = 302.f;
 static const float EA_IO_TOP = 312.f, EA_IO_W = 34.f, EA_IO_H = 44.f;
 static const float EA_IO_Y = EA_IO_TOP + 31.f; // jack centre (label above)
+// Horizontal centre of I/O cell i (0..9): 5 inputs, the randomize button,
+// then 4 outputs.
 static float eaIoX(int i) { return 39.f + 38.f * (float)i; }
 
 // Display geometry (display-local coordinates), top to bottom:
@@ -51,20 +89,25 @@ static const float EA_CHIP_Y = 132.f, EA_CHIP_H = 12.f;
 static const float EA_STAT_Y = 148.f, EA_STAT_P = 33.f, EA_STAT_W = 30.f, EA_STAT_H = 12.f;
 static const float EA_CAP_Y = 168.f;
 
+// Returns a modulo into 0..11 (works for negative values too).
 static inline int eaMod12(int a) { return ((a % 12) + 12) % 12; }
 
+// Names of the twelve pitch classes, indexed by pitch class.
 static const char *const EA_NN[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
 // ----------------------------------------------------------------------------
 // Scale data: names and semitone intervals from the root
 // ----------------------------------------------------------------------------
+// One named scale: a display name plus the semitone offsets from its root.
 struct ScaleDef
 {
     std::string name;
     std::vector<int> intervals; // semitone offsets from root, 0 = root
 };
 
+// Returns the static table of every built-in scale. Built once on first call
+// and reused thereafter.
 static const std::vector<ScaleDef> &scaleTable()
 {
     static const std::vector<ScaleDef> table = {
@@ -157,6 +200,8 @@ static const std::vector<ScaleDef> &scaleTable()
 }
 
 // Tooltip helpers: the key knob shows the note, the scale knob shows the scale name
+// ParamQuantity for the KEY knob: the display string is the note name plus
+// the fixed octave "4" (e.g. "C#4").
 struct EARootQ : rack::engine::ParamQuantity
 {
     std::string getDisplayValueString() override
@@ -166,6 +211,7 @@ struct EARootQ : rack::engine::ParamQuantity
     }
 };
 
+// ParamQuantity for the SCALE knob: the display string is the scale's name.
 struct EAScaleQ : rack::engine::ParamQuantity
 {
     std::string getDisplayValueString() override
@@ -251,6 +297,8 @@ struct ExpressArpeggiator : Module
 
     const std::vector<ScaleDef> &scales = scaleTable();
 
+    // Constructor: configures every parameter (with snapping where useful),
+    // input and output, then generates the initial pattern.
     ExpressArpeggiator()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -286,6 +334,7 @@ struct ExpressArpeggiator : Module
     }
 
     // ---- helpers ----
+    // Returns a random integer in [0, n-1] (returns 0 when n <= 1).
     static int randInt(int n)
     {
         if (n <= 1)
@@ -293,14 +342,20 @@ struct ExpressArpeggiator : Module
         return rack::math::clamp((int)std::floor(rack::random::uniform() * (float)n), 0, n - 1);
     }
 
+    // Reads the KEY knob as a pitch class in 0..11.
     int getRoot() { return rack::math::clamp((int)std::round(params[ROOT_NOTE_PARAM].getValue()), 0, 11); }
+    // Reads the RANGE knob as an octave span in 1..4.
     int getSpan() { return rack::math::clamp((int)std::round(params[OCTAVES_PARAM].getValue()), 1, 4); }
+    // Reads the SCALE knob as an index into the scale table.
     int getScaleIdx()
     {
         return rack::math::clamp((int)std::round(params[SCALE_PARAM].getValue()), 0, (int)scales.size() - 1);
     }
+    // Returns the semitone intervals of the currently selected scale.
     const std::vector<int> &getIntervals() { return scales[getScaleIdx()].intervals; }
 
+    // Returns true if `semi` (relative to `root`) is a pitch class in the
+    // scale's interval list.
     static bool inScale(int semi, int root, const std::vector<int> &iv)
     {
         int r = eaMod12(semi - root);
@@ -311,6 +366,8 @@ struct ExpressArpeggiator : Module
     }
 
     // Nearest scale note, folded into [root, root + 12*span - 1]
+    // Finds the closest scale note to `s`, then octave-folds it into the
+    // current root..root+span range.
     int fixNote(int s)
     {
         int root = getRoot(), span = getSpan();
@@ -337,8 +394,12 @@ struct ExpressArpeggiator : Module
         return best;
     }
 
+    // Quantizes a (possibly fractional) semitone value to the nearest scale
+    // note using fixNote().
     int quantizeToScale(float semiF) { return fixNote((int)std::lround(semiF)); }
 
+    // Picks a uniformly random scale note within the current root/span,
+    // choosing a random scale degree and a random octave.
     int randomNote()
     {
         int root = getRoot(), span = getSpan();
@@ -348,6 +409,8 @@ struct ExpressArpeggiator : Module
         return root + d + 12 * o;
     }
 
+    // Builds a 12-bit mask of the absolute pitch classes in the given scale
+    // with the given root, used for drawing the pitch grid and keyboard.
     void updateScaleMask(int root, int scaleIdx)
     {
         uint16_t m = 0;
@@ -356,6 +419,7 @@ struct ExpressArpeggiator : Module
         scaleMask = m;
     }
 
+    // Re-fits every stored pattern note to the current root/scale/span.
     void requantizeAll()
     {
         for (int i = 0; i < 16; ++i)
@@ -363,6 +427,8 @@ struct ExpressArpeggiator : Module
     }
 
     // Whole new pattern: clears locks and mutes
+    // Generates a completely fresh pattern, resets the playhead and refresh
+    // state, and refreshes the cached root/scale/span.
     void initPattern()
     {
         lastRoot = getRoot();
@@ -387,6 +453,8 @@ struct ExpressArpeggiator : Module
         playPc = -1;
     }
 
+    // Rack reset hook: generates a fresh pattern and invalidates the glide
+    // output so the next pitch snaps.
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
@@ -395,6 +463,8 @@ struct ExpressArpeggiator : Module
     }
 
     // Randomize unlocked steps (keeps the playhead where it is)
+    // Replaces every unlocked step with a new random scale note and lights
+    // its glow, without touching the playhead.
     void randomizePattern()
     {
         for (int i = 0; i < 16; ++i)
@@ -407,6 +477,8 @@ struct ExpressArpeggiator : Module
         randFlash = 1.f;
     }
 
+    // With probability `p`, replaces one random unlocked active step with a
+    // new random scale note and flashes it. No-op if no unlocked steps.
     void maybeMutate(float p)
     {
         if (p <= 0.f || rack::random::uniform() >= p)
@@ -424,6 +496,9 @@ struct ExpressArpeggiator : Module
     }
 
     // Returns true at the end of a cycle
+    // Advances `currentStep` according to the direction mode (forward,
+    // backward, random, drunk, pendulum) and reports whether a full cycle
+    // just ended.
     bool advance(int dir)
     {
         int n = numSteps;
@@ -484,6 +559,10 @@ struct ExpressArpeggiator : Module
         return eoc;
     }
 
+    // Plays the next step: advances (or initializes) the playhead, decides
+    // whether the step is a rest (muted or by REST probability), sets the
+    // gate/pitch state, fires the end-of-cycle pulse if a cycle ended, and
+    // applies mutation.
     void doStep(float restP, float gateLen, float mutP)
     {
         int dir = rack::math::clamp((int)std::round(params[DIRECTION_PARAM].getValue()), 0, 4);
@@ -523,6 +602,11 @@ struct ExpressArpeggiator : Module
         maybeMutate(mutP);
     }
 
+    // Main callback: re-fits notes when root/scale/range changes, reads
+    // controls and CVs, handles the randomize button/trigger and reset input,
+    // advances on each clock edge, applies glide to the V/Oct output, and
+    // writes gate, end-of-cycle and step-position outputs. Also decays the
+    // display flashes and updates the randomize light.
     void process(const ProcessArgs &args) override
     {
         const float dt = args.sampleTime;
@@ -612,6 +696,8 @@ struct ExpressArpeggiator : Module
         vTranspose = trans;
     }
 
+    // Serialises the 16 pattern notes plus the lock and mute flags so a patch
+    // reopens with the same pattern.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -628,6 +714,9 @@ struct ExpressArpeggiator : Module
         return root;
     }
 
+    // Restores the pattern notes and lock/mute flags from a saved patch,
+    // clamping notes to a sane range, then refreshes the target pitch and
+    // invalidates the glide output so it snaps.
     void dataFromJson(json_t *root) override
     {
         json_t *n = json_object_get(root, "notes");
@@ -665,6 +754,8 @@ struct ExpressArpeggiator : Module
 namespace
 {
 
+    // Pitch classes of the seven white keys and the five black keys, and the
+    // index of the white key to the left of each black key.
     const int EA_WPC[7] = {0, 2, 4, 5, 7, 9, 11}; // white keys
     const int EA_BPC[5] = {1, 3, 6, 8, 10};       // black keys
     const int EA_BIDX[5] = {0, 1, 3, 4, 5};       // white key left of each black key
@@ -701,6 +792,8 @@ namespace
     }
 
     // Small padlock glyph (flat)
+    // Draws the little lock icon used in the lock row: a closed shackle and a
+    // body, brightened when `on`.
     void drawLock(NVGcontext *vg, float cx, float cy, bool on)
     {
         NVGcolor col = on ? agmm::violet() : agmm::dim();
@@ -724,6 +817,9 @@ namespace
     {
         EAPanel() { box.size = Vec(EA_W, EA_H); }
 
+        // Draws all static panel art: base panel, bezel, the two side block
+        // headers, the CONTROL section with its ten knob plates, and the I/O
+        // row (inputs + randomize button + tinted outputs).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -754,6 +850,7 @@ namespace
     // ------------------------------------------------------------
     // Pattern display (interactive)
     // ------------------------------------------------------------
+    // Hit-test zones used by the interactive display.
     enum
     {
         Z_NONE = 0,
@@ -764,6 +861,9 @@ namespace
         Z_DIR
     };
 
+    // Interactive display: draws the pattern and handles hover/drag/click
+    // to paint notes, toggle mute/lock, set the step count and set the
+    // direction.
     struct EADisplay : Widget
     {
         ExpressArpeggiator *module = nullptr;
@@ -778,6 +878,8 @@ namespace
         }
 
         // ---- hit testing ----
+        // Maps a display-local point `p` to a zone (bars/gate/lock/step-number
+        // /direction) and the affected index, returning Z_NONE if none.
         int zoneAt(Vec p, int &idx) const
         {
             idx = -1;
@@ -819,6 +921,8 @@ namespace
         }
 
         // ---- paint a note from the pointer position ----
+        // Converts a point inside the bars area to a scale note and writes it
+        // into the affected step (used on press and while dragging).
         void applyEdit(Vec p)
         {
             if (!module)
@@ -834,6 +938,9 @@ namespace
         }
 
         // ---- mouse ----
+        // Handles a left press: bars start a paint-drag, gate toggles mute,
+        // lock toggles lock, a step number sets the loop length, and a
+        // direction chip sets the direction.
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
@@ -870,6 +977,8 @@ namespace
             Widget::onButton(e);
         }
 
+        // Continues a paint-drag: moves the drag position by the mouse delta
+        // and applies the edit at the new point.
         void onDragMove(const DragMoveEvent &e) override
         {
             if (!editing || !module)
@@ -878,12 +987,15 @@ namespace
             applyEdit(dragPos);
         }
 
+        // Ends a paint-drag.
         void onDragEnd(const DragEndEvent &e) override
         {
             editing = false;
             Widget::onDragEnd(e);
         }
 
+        // Updates the hover zone/index from the pointer position and consumes
+        // the event when over an interactive zone.
         void onHover(const HoverEvent &e) override
         {
             int idx;
@@ -896,6 +1008,7 @@ namespace
                 Widget::onHover(e);
         }
 
+        // Clears the hover state when the pointer leaves the widget.
         void onLeave(const LeaveEvent &e) override
         {
             hoverZone = Z_NONE;
@@ -904,6 +1017,8 @@ namespace
         }
 
         // ---- static background: flat screen + row labels ----
+        // Draws the flat screen background and the row labels in the left
+        // column (never over the bars).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -918,6 +1033,10 @@ namespace
         }
 
         // ---- live content ----
+        // Layer-1 overlay that draws the readout row, pitch grid, bars with
+        // tips and contour, note names, gate/mute row, lock row, step numbers
+        // with playhead, hover outline, mini keyboard, direction chips, status
+        // chips and the help/position caption.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1411,8 +1530,14 @@ namespace
 // ----------------------------------------------------------------------------
 // Module widget
 // ----------------------------------------------------------------------------
+// ModuleWidget: adds the static panel, screws, the interactive display, the
+// ten knobs, the I/O jacks, the randomize button and its light, and the
+// context menu.
 struct ExpressArpeggiatorWidget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, interactive display, the
+    // ten knobs (positioned from the EA_KNOBS table), the five inputs, the
+    // randomize LED button, and the four outputs.
     ExpressArpeggiatorWidget(ExpressArpeggiator *module)
     {
         setModule(module);
@@ -1450,6 +1575,8 @@ struct ExpressArpeggiatorWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(eaIoX(9), EA_IO_Y), module, ExpressArpeggiator::STEP_OUTPUT));
     }
 
+    // Adds the right-click menu: bulk lock/unlock, unmute-all, randomize the
+    // unlocked steps, and generate a completely new pattern.
     void appendContextMenu(ui::Menu *menu) override
     {
         ExpressArpeggiator *module = dynamic_cast<ExpressArpeggiator *>(this->module);

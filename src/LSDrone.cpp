@@ -6,6 +6,29 @@
 #include <algorithm>
 #include <memory>
 
+// ============================================================================
+// LSDrone – Cathedral Drone
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// LSDrone is a 36 HP cathedral-style drone synthesizer with two detunable
+// oscillators, a resonant low-pass, an LFO, a drift generator, a modulated
+// stereo delay, a reverb with shimmer, an echo, and a final low-pass filter.
+// Each of the 23 main parameters has a dedicated CV input and attenuverter,
+// and the display can show the output waveform, a bar-graph spectrum, or a
+// continuous spectrum curve.
+//
+// File structure:
+//   1. LSDroneEngine – the full audio DSP chain (unchanged from the original).
+//   2. LSDrone module – parameter/CV handling, scope and FFT ring buffers.
+//   3. LSAnalyzer – a small real-FFT analyzer used by the BARS/SPECTRUM views.
+//   4. UI widgets – panel background, display (wave/bars/spectrum), CV-range
+//      toggle cell, and display-mode switch.
+//   5. LSDroneWidget – places all controls, jacks and the display.
+//   6. Model registration.
+// ============================================================================
+
 // ============================================================
 // Cathedral Drone engine – UNCHANGED from original
 // ============================================================
@@ -54,7 +77,9 @@ struct LSDroneEngine
     float lpfState = 0.0f;
     float lpfState2 = 0.0f;
 
+    // Constructor: does nothing heavy (buffers allocated in init()).
     LSDroneEngine() {}
+    // Destructor: frees all delay/reverb/echo buffers.
     ~LSDroneEngine()
     {
         delete[] delayBufferL;
@@ -64,6 +89,8 @@ struct LSDroneEngine
         delete[] echoBufferR;
     }
 
+    // Allocates all delay/reverb/echo buffers for the given sample rate and
+    // zero-initialises them.
     void init(float sr)
     {
         sampleRate = sr;
@@ -77,30 +104,55 @@ struct LSDroneEngine
         echoBufferR = new float[echoLength]();
     }
 
+    // Sets oscillator A fine-tune (in semitones).
     void setFineA(float v) { oscA.fine = v; }
+    // Sets oscillator B fine-tune (in semitones).
     void setFineB(float v) { oscB.fine = v; }
+    // Sets oscillator B detune relative to A (in semitones).
     void setDetune(float v) { detune = v; }
+    // Sets the A/B mix (0 = all A, 1 = all B).
     void setMix(float v) { mix = v; }
+    // Sets the pre-filter cutoff (0..1).
     void setFilterCutoff(float v) { filterCutoff = v; }
+    // Sets the pre-filter resonance (0..1, currently only affects the final LPF).
     void setFilterReso(float v) { filterReso = v; }
+    // Sets the LFO rate (Hz).
     void setLfoRate(float v) { lfoRate = v; }
+    // Sets the LFO depth (semitones).
     void setLfoDepth(float v) { lfoDepth = v; }
+    // Sets the drift amount (0..1).
     void setDrift(float v) { drift = v; }
+    // Sets the delay time (seconds).
     void setDelayTime(float v) { delayTime = v; }
+    // Sets the delay feedback (0..0.98).
     void setDelayFeedback(float v) { delayFeedback = v; }
+    // Sets the delay diffusion (0..1).
     void setDelayDiffusion(float v) { delayDiffusion = v; }
+    // Sets the reverb decay (0.5..0.99).
     void setRevDecay(float v) { revDecay = v; }
+    // Sets the reverb damping (0..1).
     void setRevDamping(float v) { revDamping = v; }
+    // Sets the wash mix (0..1).
     void setWash(float v) { washMix = v; }
+    // Sets the shimmer amount (0..1).
     void setShimmer(float v) { shimmer = v; }
+    // Sets the delay modulation rate (Hz).
     void setModRate(float v) { modRate = v; }
+    // Sets the delay modulation depth (0..1).
     void setModDepth(float v) { modDepth = v; }
+    // Sets the echo time (seconds).
     void setEchoTime(float v) { echoTime = v; }
+    // Sets the echo feedback (0..0.95).
     void setEchoFeedback(float v) { echoFeedback = v; }
+    // Sets the echo mix (0..1).
     void setEchoMix(float v) { echoMix = v; }
+    // Sets the final low-pass cutoff (0..1).
     void setLpfCutoff(float v) { lpfCutoff = v; }
+    // Sets the final low-pass resonance (0..1).
     void setLpfReso(float v) { lpfReso = v; }
 
+    // Generates one sample of the given oscillator at the specified pitch
+    // modulation (semitones), advancing its phase.
     float processOscillator(Oscillator &osc, float pitchMod)
     {
         float freq = osc.freq * std::pow(2.0f, pitchMod / 12.0f);
@@ -110,6 +162,9 @@ struct LSDroneEngine
         return std::sin(osc.phase * 2.0f * float(M_PI));
     }
 
+    // Main DSP callback: computes the two oscillators, mixes, pre-filters,
+    // modulates/runs the stereo delay, reverb, shimmer, wash, echo, final LPF,
+    // and writes the left/right output (with soft tanh limiting).
     void process(float cvA, float cvB, float &leftOut, float &rightOut)
     {
         lfoPhase += lfoRate / sampleRate;
@@ -378,6 +433,8 @@ struct LSDrone : Module
     int fftHead = 0;
     float dispSampleRate = 44100.f;
 
+    // Constructor: configures every parameter, attenuverter, CV input and
+    // output; sets up the default values.
     LSDrone()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -441,11 +498,14 @@ struct LSDrone : Module
         configOutput(OUTPUT_RIGHT, "R out");
     }
 
+    // Called when the sample rate changes: re-initialises the engine's buffers.
     void onSampleRateChange() override
     {
         engine.init(APP->engine->getSampleRate());
     }
 
+    // Combines a knob value with its CV and attenuverter, normalises the CV
+    // according to the selected CV range, and clamps to [minV, maxV].
     float getParamWithCV(ParamId paramId, InputId cvId, ParamId attenId, float minV, float maxV)
     {
         float knob = params[paramId].getValue();
@@ -462,6 +522,7 @@ struct LSDrone : Module
         return clamp(value, minV, maxV);
     }
 
+    // Serialises the CV range mode and the display view mode.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -470,6 +531,8 @@ struct LSDrone : Module
         return root;
     }
 
+    // Restores the CV range mode and display view mode from a patch,
+    // clamping the view mode to a valid value.
     void dataFromJson(json_t *root) override
     {
         json_t *mode = json_object_get(root, "cvRangeMode");
@@ -488,6 +551,9 @@ struct LSDrone : Module
         }
     }
 
+    // Main audio callback: reads every parameter with its CV/attenuverter,
+    // runs the engine, writes the stereo output, and updates the scope ring
+    // buffer and the FFT ring buffer for the display.
     void process(const ProcessArgs &args) override
     {
         engine.setFineA(getParamWithCV(PARAM_FINE_A, CV_FINE_A, PARAM_ATTEN_FINE_A, -12, 12));
@@ -569,6 +635,8 @@ namespace
         float sinT[LS_FFT_N / 2];
         float db[LS_FFT_N / 2];
 
+        // Constructor: precomputes the Hann window, the twiddle factors, and
+        // initialises the magnitude buffer.
         LSAnalyzer()
         {
             for (int n = 0; n < LS_FFT_N; ++n)
@@ -585,6 +653,9 @@ namespace
             }
         }
 
+        // Runs an in-place radix-2 FFT on the latest window from the ring
+        // buffer, then converts magnitudes to dB with fast attack / slow
+        // release smoothing.
         void update(const float *ring, int head)
         {
             const int N = LS_FFT_N;
@@ -645,6 +716,7 @@ namespace
             }
         }
 
+        // Returns the interpolated dB value at a fractional bin position.
         float dbAt(float pos) const
         {
             if (pos < 0.f)
@@ -658,6 +730,8 @@ namespace
         }
 
         // level of a frequency band; interpolates for narrow bands, takes the max for wide ones
+        // Returns the level in dB of a frequency band [f0, f1], either by
+        // interpolating (narrow bands) or by taking the maximum bin (wide).
         float bandDb(float f0, float f1, float binHz) const
         {
             float b0 = f0 / binHz, b1 = f1 / binHz;
@@ -672,6 +746,7 @@ namespace
         }
     };
 
+    // Converts a dB value to a 0..1 normalised height for the display.
     float dbToNorm(float d)
     {
         float n = (d - LS_DB_MIN) / (0.f - LS_DB_MIN);
@@ -709,6 +784,7 @@ static const float LS_SEC_Y = 315.f;
 static const float LS_IO_TOP = 322.f, LS_IO_H = 36.f, LS_IO_W = 60.f; // label +8, jack +24
 static const float LS_VIEW_W = 150.f;                                 // display-mode switch plate
 
+// Returns the horizontal centre of control column `col` (0..5) on the panel.
 static float lsColX(int col) { return LS_PANEL_W / 12.f * (2 * col + 1); }
 // 540/12=45 -> 45, 135, 225, 315, 405, 495
 
@@ -759,10 +835,16 @@ namespace
     // ------------------------------------------------------------
     // Panel background
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the 24 control cells (23
+    // parameter cells plus the CV-range cell), and the I/O row with the
+    // display-mode switch plate in the middle.
     struct LSPanelBackground : TransparentWidget
     {
         LSPanelBackground() { box.size = Vec(LS_PANEL_W, LS_PANEL_H); }
 
+        // Draws all static panel art: base panel, bezel, control cells with
+        // their labels/CV/ATT captions, the I/O plates (outputs tinted) and
+        // the display-mode switch plate.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -805,6 +887,9 @@ namespace
     // ------------------------------------------------------------
     // Scope display widget (WAVE / BARS / SPECTRUM)
     // ------------------------------------------------------------
+    // Live display: chooses between the scope waveform, a bar spectrum, or a
+    // continuous spectrum curve, and also draws the L/R meters, the readout
+    // row (delay/wash) and the frequency-axis labels for the analyzer views.
     struct LSDisplayWidget : TransparentWidget
     {
         LSDrone *module = nullptr;
@@ -812,6 +897,7 @@ namespace
         float barLvl[LS_BARS] = {};
         float barPeak[LS_BARS] = {};
 
+        // Constructor: positions the widget and allocates the FFT analyzer.
         LSDisplayWidget(LSDrone *m) : module(m)
         {
             box.pos = Vec(LS_DISP_X, LS_DISP_Y);
@@ -819,19 +905,28 @@ namespace
             an.reset(new LSAnalyzer());
         }
 
+        // Returns the width of the scope area (the rest is meters).
         static float scopeW() { return LS_SCOPE_W; }
 
+        // Returns the current view mode (or WAVE when there is no module).
         int mode() const { return module ? (int)module->viewMode : (int)LSDrone::VIEW_WAVE; }
+        // Returns the current display sample rate (or 48 kHz as a fallback).
         float sampleRate() const { return (module && module->dispSampleRate > 1000.f) ? module->dispSampleRate : 48000.f; }
+        // Returns the upper frequency limit of the analyzer (min(18 kHz, 0.45*fs)).
         float fMax() const { return std::min(18000.f, sampleRate() * 0.45f); }
+        // Returns the width of one FFT bin in Hz.
         float binHz() const { return sampleRate() / (float)LS_FFT_N; }
 
+        // Maps a frequency f (Hz) to an x pixel using a logarithmic axis
+        // between `fmin` and fMax().
         float freqToX(float f, float fmin) const
         {
             float fmax = fMax();
             return scopeW() * std::log(f / fmin) / std::log(fmax / fmin);
         }
 
+        // Called every UI frame: refreshes the FFT and, in BARS mode, updates
+        // the smoothed bar levels and peak-hold values.
         void step() override
         {
             if (module && module->viewMode != LSDrone::VIEW_WAVE)
@@ -854,6 +949,10 @@ namespace
             Widget::step();
         }
 
+        // Static layer: fills the display screen, draws the mode-appropriate
+        // grid (time grid for WAVE, level lines for BARS/SPECTRUM, plus
+        // frequency grid lines for SPECTRUM), and the divider above the
+        // readout row.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -907,6 +1006,8 @@ namespace
         }
 
         // ---------- waveform ----------
+        // Draws the min/max waveform columns from the module's scope ring
+        // buffer (or a demo burst when there is no module).
         void drawWave(NVGcontext *vg)
         {
             const float mid = LS_SCOPE_H / 2.f;
@@ -939,6 +1040,8 @@ namespace
         }
 
         // ---------- bars ----------
+        // Draws the bar spectrum with peak-hold lines from the barLvl/barPeak
+        // arrays.
         void drawBars(NVGcontext *vg)
         {
             const float colW = scopeW() / (float)LS_BARS;
@@ -969,6 +1072,8 @@ namespace
         }
 
         // ---------- spectrum ----------
+        // Draws the continuous spectrum curve (filled area plus 1.2 px line)
+        // from the analyzer's dB values.
         void drawSpectrum(NVGcontext *vg)
         {
             const float sw = scopeW();
@@ -1010,6 +1115,9 @@ namespace
             nvgStroke(vg);
         }
 
+        // Layer-1 overlay: dispatches to the wave/bars/spectrum draw routine,
+        // clips it to the scope, then draws the meters and the readout row
+        // (delay, wash, frequency labels).
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1069,16 +1177,20 @@ namespace
     // ------------------------------------------------------------
     // CV range cell (click to toggle)
     // ------------------------------------------------------------
+    // Clickable cell that toggles the module's CV range mode and shows the
+    // current range ("-5/+5V" or "0/+10V").
     struct LSCvRangeWidget : TransparentWidget
     {
         LSDrone *module = nullptr;
 
+        // Constructor: positions the widget over the 24th cell.
         LSCvRangeWidget(LSDrone *m, float cx, float top) : module(m)
         {
             box.pos = Vec(cx - LS_CELL_W / 2.f, top);
             box.size = Vec(LS_CELL_W, LS_CELL_H);
         }
 
+        // Toggles the CV range mode on a left click.
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1090,6 +1202,7 @@ namespace
             }
         }
 
+        // Draws the current range value box and the "CLICK TO TOGGLE" hint.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1116,19 +1229,25 @@ namespace
     // ------------------------------------------------------------
     // Display-mode switch (WAVE | BARS | SPEC) - click a segment
     // ------------------------------------------------------------
+    // Segmented switch that selects the display view mode by clicking one of
+    // its three segments.
     struct LSViewWidget : TransparentWidget
     {
         LSDrone *module = nullptr;
 
+        // Constructor: positions the widget in the I/O row.
         LSViewWidget(LSDrone *m, float cx) : module(m)
         {
             box.pos = Vec(cx - LS_VIEW_W / 2.f, LS_IO_TOP);
             box.size = Vec(LS_VIEW_W, LS_IO_H);
         }
 
+        // Left inset of the segment strip.
         static float segX() { return 8.f; }
+        // Width of one segment.
         static float segW() { return (LS_VIEW_W - 16.f) / 3.f; }
 
+        // Selects the view mode corresponding to the clicked segment.
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1140,6 +1259,8 @@ namespace
             }
         }
 
+        // Draws the three-segment switch, highlighting the current mode and
+        // hiding the separators adjacent to it.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1187,10 +1308,15 @@ namespace
 } // namespace
 
 // ============================================================
-// Module widget
+// Module widget: adds the static panel, screws, the live display, the CV
+// range cell, the display-mode switch, the 23 parameter/CV/attenuverter
+// triplets, and the I/O jacks.
 // ============================================================
 struct LSDroneWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, CV-range
+    // and display-mode widgets, the 23 knob/jack/trimpot cells, and the four
+    // I/O jacks.
     LSDroneWidget(LSDrone *module)
     {
         setModule(module);
@@ -1227,6 +1353,9 @@ struct LSDroneWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(lsColX(5), jy), module, LSDrone::OUTPUT_RIGHT));
     }
 
+    // Adds the right-click menu: a CV-range submenu (bipolar/unipolar) and a
+    // display-mode submenu (waveform/bars/spectrum), each with a checkmark on
+    // the active option.
     void appendContextMenu(Menu *menu) override
     {
         LSDrone *module = dynamic_cast<LSDrone *>(this->module);
@@ -1241,10 +1370,12 @@ struct LSDroneWidget : ModuleWidget
         {
             LSDrone *module;
             LSDrone::CVRange range;
+            // Sets the module's CV range mode to this item's range.
             void onAction(const ActionEvent &e) override
             {
                 module->cvRangeMode = range;
             }
+            // Shows a checkmark when this item's range is the active mode.
             void step() override
             {
                 rightText = CHECKMARK(module->cvRangeMode == range);
@@ -1270,10 +1401,12 @@ struct LSDroneWidget : ModuleWidget
         {
             LSDrone *module;
             LSDrone::ViewMode mode;
+            // Sets the module's display view mode to this item's mode.
             void onAction(const ActionEvent &e) override
             {
                 module->viewMode = mode;
             }
+            // Shows a checkmark when this item's mode is the active mode.
             void step() override
             {
                 rightText = CHECKMARK(module->viewMode == mode);
