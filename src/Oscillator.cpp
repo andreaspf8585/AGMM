@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -26,25 +27,22 @@ static const int OS_HARM[OS_LV] = {1023, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1};
 static const float OS_PANEL_W = RACK_GRID_WIDTH * 24; // 360
 static const float OS_PANEL_H = RACK_GRID_HEIGHT;	  // 380
 
-// Display
-static const float OS_DISP_W = 228.f;
-static const float OS_DISP_H = 140.f;
-static const float OS_DISP_X = (OS_PANEL_W - OS_DISP_W) / 2.f; // 66
-static const float OS_DISP_Y = 44.f;
+// Display (wide: the whole width of the panel, with its own rows)
+static const float OS_DISP_W = 328.f;
+static const float OS_DISP_H = 160.f;
+static const float OS_DISP_X = 16.f;
+static const float OS_DISP_Y = 34.f;
 
 // Display geometry (display-local)
-static const float OS_WX0 = 8.f, OS_WX1 = 110.f;   // waveform box
-static const float OS_SX0 = 118.f, OS_SX1 = 220.f; // spectrum box
-static const float OS_PY0 = 18.f, OS_PY1 = 80.f;
-static const float OS_WYC = 49.f, OS_WAMP = 27.f;
+// header row 0-18, captions y=26, plots 33-93, axis labels y=101,
+// wave bank 110-140, footer divider 146, footer text y=153
+static const float OS_WX0 = 8.f, OS_WX1 = 160.f;   // waveform box
+static const float OS_SX0 = 168.f, OS_SX1 = 320.f; // spectrum box
+static const float OS_PY0 = 33.f, OS_PY1 = 93.f;
+static const float OS_WYC = 63.f, OS_WAMP = 27.f;
 static const float OS_DB_TOP = 6.f, OS_DB_BOT = -60.f;
-static const float OS_GX0 = 8.f, OS_GY0 = 90.f, OS_GCW = 212.f / 15.f;
-static const float OS_GRP = 18.f, OS_GCH = 16.f;
-
-static const float OS_CTRL_SEC_Y = 204.f;
-static const float OS_IO_SEC_Y = 283.f;
-static const float OS_IO_Y = 327.f;
-static inline float osIoX(int i) { return 40.f + 40.f * (float)i; }
+static const float OS_GX0 = 8.f, OS_GY0 = 110.f, OS_GW = 312.f, OS_GCW = 312.f / 15.f;
+static const float OS_GRP = 16.f, OS_GCH = 14.f;
 
 // ------------------------------------------------------------
 // Waveforms
@@ -523,12 +521,14 @@ struct Oscillator : Module
 
 		configOutput(OUT_OUTPUT, "Polyphonic");
 		configOutput(SUM_OUTPUT, "Sum of all voices");
+		configBypass(VOCT_INPUT, OUT_OUTPUT);
 
 		tab = &osTables();
 	}
 
-	void onReset() override
+	void onReset(const ResetEvent &e) override
 	{
+		Module::onReset(e);
 		std::memset(phase, 0, sizeof(phase));
 		std::memset(fb1, 0, sizeof(fb1));
 		std::memset(fb2, 0, sizeof(fb2));
@@ -689,114 +689,48 @@ struct Oscillator : Module
 };
 
 // ------------------------------------------------------------
-// Knob layout: two columns beside the display, then a row of five
-// (FREQ sits at the left end of the control row)
+// Control layout: two rows of labelled plates.
+// Row 1: knob + its CV / input jack. Row 2: knobs and the two outputs.
 // ------------------------------------------------------------
-struct OSKnob
+struct OSCell
 {
-	int param;
-	float x, y;
-	int ticks;
-	bool bipolar;
 	const char *label;
-};
-static const OSKnob OS_KNOBS[9] = {
-	{Oscillator::WAVE_PARAM, 28.f, 84.f, 15, false, "WAVE"},
-	{Oscillator::COARSE_PARAM, 28.f, 150.f, 9, true, "COARSE"},
-	{Oscillator::DETUNE_PARAM, 332.f, 84.f, 9, true, "DETUNE"},
-	{Oscillator::FB_PARAM, 332.f, 150.f, 11, false, "FEEDBACK"},
-	{Oscillator::FREQ_PARAM, 40.f, 236.f, 9, true, "FREQ"},
-	{Oscillator::FM_PARAM, 110.f, 236.f, 11, false, "FM"},
-	{Oscillator::LOCUT_PARAM, 180.f, 236.f, 11, false, "LO CUT"},
-	{Oscillator::HICUT_PARAM, 250.f, 236.f, 11, false, "HI CUT"},
-	{Oscillator::LEVEL_PARAM, 320.f, 236.f, 11, false, "LEVEL"},
+	float cx, top, w, h;
+	int param;	// -1 = none
+	int input;	// -1 = none
+	int output; // -1 = none
+	const char *jackLabel;
+	bool bipolar;
 };
 
-// ------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace)
-// ------------------------------------------------------------
+static const float OS_R1_TOP = 204.f, OS_R1_H = 84.f;
+static const float OS_R2_TOP = 294.f, OS_R2_H = 62.f;
+static const int OS_NCELL = 11;
+static const OSCell OS_CELLS[OS_NCELL] = {
+	// row 1 (pitch 57)
+	{"FREQ", 37.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::FREQ_PARAM, Oscillator::VOCT_INPUT, -1, "V/O", true},
+	{"FM", 94.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::FM_PARAM, Oscillator::FM_INPUT, -1, "IN", false},
+	{"WAVE", 151.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::WAVE_PARAM, Oscillator::WAVE_CV_INPUT, -1, "CV", false},
+	{"FEEDBACK", 208.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::FB_PARAM, Oscillator::FB_CV_INPUT, -1, "CV", false},
+	{"LO CUT", 265.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::LOCUT_PARAM, Oscillator::LOCUT_CV_INPUT, -1, "CV", false},
+	{"HI CUT", 322.5f, OS_R1_TOP, 54.f, OS_R1_H, Oscillator::HICUT_PARAM, Oscillator::HICUT_CV_INPUT, -1, "CV", false},
+	// row 2 (pitch 68)
+	{"COARSE", 44.f, OS_R2_TOP, 62.f, OS_R2_H, Oscillator::COARSE_PARAM, -1, -1, nullptr, true},
+	{"DETUNE", 112.f, OS_R2_TOP, 62.f, OS_R2_H, Oscillator::DETUNE_PARAM, -1, -1, nullptr, true},
+	{"LEVEL", 180.f, OS_R2_TOP, 62.f, OS_R2_H, Oscillator::LEVEL_PARAM, -1, -1, nullptr, false},
+	{"POLY OUT", 248.f, OS_R2_TOP, 62.f, OS_R2_H, -1, -1, Oscillator::OUT_OUTPUT, nullptr, false},
+	{"SUM OUT", 316.f, OS_R2_TOP, 62.f, OS_R2_H, -1, -1, Oscillator::SUM_OUTPUT, nullptr, false},
+};
+static inline float osKnobY(const OSCell &c) { return c.top + 38.f; }
+static inline float osJackY(const OSCell &c)
+{
+	return (c.output >= 0) ? c.top + 38.f : c.top + 66.f;
+}
+
+namespace ag = agmm;
+
 namespace
 {
-
-	NVGcolor colBgTop() { return nvgRGB(0x25, 0x28, 0x30); }
-	NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-	NVGcolor colText() { return nvgRGB(0xd6, 0xdc, 0xe6); }
-	NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa5); }
-	NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-	NVGcolor colBright() { return nvgRGB(0x7a, 0xec, 0xff); }
-	NVGcolor colWarm() { return nvgRGB(0xff, 0x9c, 0x6a); }
-	NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-
-	NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
-
-	void setFont(NVGcontext *vg)
-	{
-		std::shared_ptr<window::Font> font =
-			APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-		if (font)
-			nvgFontFaceId(vg, font->handle);
-	}
-
-	void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-				  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-	{
-		setFont(vg);
-		nvgFontSize(vg, size);
-		nvgTextLetterSpacing(vg, spacing);
-		nvgTextAlign(vg, align);
-		nvgFillColor(vg, col);
-		nvgText(vg, x, y, s, NULL);
-	}
-
-	void drawLogo(NVGcontext *vg, float cx, float cy)
-	{
-		const float w = 64.f, h = 18.f;
-		float x = cx - w / 2.f, y = cy - h / 2.f;
-
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-		nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-		nvgFill(vg);
-
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x, y, w, h, 7.f);
-		nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-										   nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-		nvgFill(vg);
-		nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-											 nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-		nvgStrokeWidth(vg, 1.2f);
-		nvgStroke(vg);
-
-		const float s = 2.2f;
-		float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-		nvgBeginPath(vg);
-		nvgRect(vg, tx + s, ty, s, s);
-		nvgRect(vg, tx, ty + s * 1.4f, s, s);
-		nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-		nvgFillColor(vg, colAccent());
-		nvgFill(vg);
-
-		drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-				 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-	}
-
-	void drawKnobTicks(NVGcontext *vg, float cx, float cy, float r0, float r1, int n = 11)
-	{
-		nvgLineCap(vg, NVG_ROUND);
-		for (int i = 0; i < n; ++i)
-		{
-			float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-			bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-			float ra = major ? r0 - 1.5f : r0;
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-			nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-			nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-			nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
-			nvgStroke(vg);
-		}
-	}
 
 	void noteString(float f, char *buf, size_t n)
 	{
@@ -812,177 +746,31 @@ namespace
 	}
 
 	// ------------------------------------------------------------
-	// Panel background
+	// Panel background: title, display frame, labelled plates
 	// ------------------------------------------------------------
 	struct OSPanelBackground : TransparentWidget
 	{
 		OSPanelBackground() { box.size = Vec(OS_PANEL_W, OS_PANEL_H); }
 
-		void label(NVGcontext *vg, float x, float y, const char *txt)
-		{
-			drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-		}
-
-		void plate(NVGcontext *vg, float x, float y, float w, float h)
-		{
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x, y, w, h, 6.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-											   nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		void ring(NVGcontext *vg, float cx, float cy, float r)
-		{
-			nvgBeginPath(vg);
-			nvgCircle(vg, cx, cy, r);
-			nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-											   nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		void section(NVGcontext *vg, float y, const char *txt)
-		{
-			float x1 = 12.f, x2 = OS_PANEL_W - 12.f, cx = OS_PANEL_W / 2.f;
-			float w = 14.f + (float)strlen(txt) * 7.f;
-			drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, x1, y);
-			nvgLineTo(vg, cx - w / 2.f, y);
-			nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-												 nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, cx + w / 2.f, y);
-			nvgLineTo(vg, x2, y);
-			nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-												 nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		void cell(NVGcontext *vg, float cx, float cy, const char *txt, bool isOutput)
-		{
-			const float w = 32.f, top = -27.f, h = 44.f;
-			float x = cx - w / 2.f, y = cy + top;
-			plate(vg, x, y, w, h);
-
-			NVGcolor c = isOutput ? nvgRGBA(0x3d, 0xe0, 0xff, 170) : nvgRGBA(0xff, 0x9c, 0x6a, 170);
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
-			nvgFillColor(vg, c);
-			nvgFill(vg);
-
-			label(vg, cx, cy - 19.f, txt);
-		}
-
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
+			ag::panelBase(vg, OS_PANEL_W, OS_PANEL_H, "OSCILLATOR");
+			ag::bezel(vg, OS_DISP_X, OS_DISP_Y, OS_DISP_W, OS_DISP_H);
 
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, OS_PANEL_W, OS_PANEL_H);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, OS_PANEL_H, colBgTop(), colBgBottom()));
-			nvgFill(vg);
-
-			nvgStrokeWidth(vg, 1.f);
-			for (int y = 0; y < (int)OS_PANEL_H; y += 3)
+			for (int i = 0; i < OS_NCELL; ++i)
 			{
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, 0, y + 0.5f);
-				nvgLineTo(vg, OS_PANEL_W, y + 0.5f);
-				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-				nvgStroke(vg);
+				const OSCell &c = OS_CELLS[i];
+				ag::cell(vg, c.cx, c.top, c.w, c.h, c.label, c.output >= 0);
+				if (c.jackLabel)
+					ag::text(vg, c.cx + 14.5f, osJackY(c), c.jackLabel, 7.f, ag::dim(), ag::ALIGN_L, 0.f);
 			}
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, OS_PANEL_W, OS_PANEL_H);
-			nvgFillPaint(vg, nvgRadialGradient(vg, OS_PANEL_W / 2.f, OS_PANEL_H * 0.4f,
-											   OS_PANEL_H * 0.35f, OS_PANEL_H * 0.85f,
-											   nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0.5f, 0.5f, OS_PANEL_W - 1.f, OS_PANEL_H - 1.f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, OS_PANEL_W, 2.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, OS_PANEL_W, 0,
-											   nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-			nvgFill(vg);
-
-			drawLogo(vg, OS_PANEL_W / 2.f, 15.f);
-			drawText(vg, OS_PANEL_W / 2.f, 32.f, "OSCILLATOR", 12.f, colText(),
-					 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-			// ---- Display bezel ----
-			float bx = OS_DISP_X - 5.f, by = OS_DISP_Y - 5.f;
-			float bw = OS_DISP_W + 10.f, bh = OS_DISP_H + 10.f;
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-											   nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-			nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-			nvgFill(vg);
-
-			// ---- Knobs ----
-			section(vg, OS_CTRL_SEC_Y, "CONTROL");
-			for (int k = 0; k < 9; ++k)
-			{
-				const OSKnob &kn = OS_KNOBS[k];
-				ring(vg, kn.x, kn.y, 17.f);
-				drawKnobTicks(vg, kn.x, kn.y, 21.f, 24.f, kn.ticks);
-				label(vg, kn.x, kn.y + 29.f, kn.label);
-			}
-
-			// ---- I/O ----
-			section(vg, OS_IO_SEC_Y, "I / O");
-			const char *io[8] = {"V/OCT", "FM", "FB CV", "WAVE", "LO CV", "HI CV", "POLY", "SUM"};
-			for (int i = 0; i < 8; ++i)
-				cell(vg, osIoX(i), OS_IO_Y, io[i], i >= 6);
-
-			drawText(vg, OS_PANEL_W / 2.f, 366.f, "POLYPHONIC VCO  -  30 WAVES  -  FEEDBACK", 6.f,
-					 nvgRGBA(0x8a, 0x95, 0xa5, 120), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
-
 			Widget::draw(args);
 		}
 	};
 
 	// ------------------------------------------------------------
-	// Live value arcs around the knobs
+	// Value arcs around the knobs (flat track + flat arc)
 	// ------------------------------------------------------------
 	struct OSKnobArcs : TransparentWidget
 	{
@@ -993,42 +781,35 @@ namespace
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
-			const float R = 17.2f;
+			const float R = 18.f;
 			const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
 			const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
 
-			for (int k = 0; k < 9; ++k)
+			for (int i = 0; i < OS_NCELL; ++i)
 			{
-				const OSKnob &kn = OS_KNOBS[k];
+				const OSCell &c = OS_CELLS[i];
+				if (c.param < 0)
+					continue;
+				float cx = c.cx, cy = osKnobY(c);
 
 				nvgBeginPath(vg);
-				nvgArc(vg, kn.x, kn.y, R, a0, a1, NVG_CW);
-				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+				nvgArc(vg, cx, cy, R, a0, a1, NVG_CW);
+				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
 				nvgStrokeWidth(vg, 2.f);
-				nvgLineCap(vg, NVG_ROUND);
+				nvgLineCap(vg, NVG_BUTT);
 				nvgStroke(vg);
 
 				if (!module)
 					continue;
-				float v = module->paramQuantities[kn.param]->getScaledValue();
-				float from = kn.bipolar ? 0.5f : 0.f;
+				float v = module->paramQuantities[c.param]->getScaledValue();
+				float from = c.bipolar ? 0.5f : 0.f;
 				float lo = std::min(from, v), hi = std::max(from, v);
 				if (hi - lo < 0.004f)
 					continue;
-
-				float s = a0 + (a1 - a0) * lo;
-				float e = a0 + (a1 - a0) * hi;
-				NVGcolor col = (kn.bipolar && v < 0.5f) ? colWarm() : colAccent();
-
+				NVGcolor col = (c.bipolar && v < 0.5f) ? ag::warm() : ag::accent();
 				nvgBeginPath(vg);
-				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-				nvgStrokeColor(vg, withA(col, 0.18f));
-				nvgStrokeWidth(vg, 5.f);
-				nvgStroke(vg);
-
-				nvgBeginPath(vg);
-				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-				nvgStrokeColor(vg, withA(col, 0.95f));
+				nvgArc(vg, cx, cy, R, a0 + (a1 - a0) * lo, a0 + (a1 - a0) * hi, NVG_CW);
+				nvgStrokeColor(vg, col);
 				nvgStrokeWidth(vg, 2.f);
 				nvgStroke(vg);
 			}
@@ -1074,7 +855,7 @@ namespace
 		// ---- hit testing ----
 		int galleryAt(Vec p) const
 		{
-			if (p.x < OS_GX0 || p.x >= OS_GX0 + 212.f)
+			if (p.x < OS_GX0 || p.x >= OS_GX0 + OS_GW)
 				return -1;
 			float ry = p.y - OS_GY0;
 			if (ry < 0.f || ry >= 2.f * OS_GRP)
@@ -1129,6 +910,25 @@ namespace
 			return OS_SX0 + (std::log10(f) - 1.30103f) / 3.f * (OS_SX1 - OS_SX0);
 		}
 
+		static void hline(NVGcontext *vg, float x0, float x1, float y, int alpha)
+		{
+			nvgBeginPath(vg);
+			nvgMoveTo(vg, x0, y + 0.5f);
+			nvgLineTo(vg, x1, y + 0.5f);
+			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, alpha));
+			nvgStrokeWidth(vg, 1.f);
+			nvgStroke(vg);
+		}
+		static void vline(NVGcontext *vg, float x, float y0, float y1, int alpha)
+		{
+			nvgBeginPath(vg);
+			nvgMoveTo(vg, x + 0.5f, y0);
+			nvgLineTo(vg, x + 0.5f, y1);
+			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, alpha));
+			nvgStrokeWidth(vg, 1.f);
+			nvgStroke(vg);
+		}
+
 		// ---- simulate one cycle with the same feedback law as the DSP ----
 		void simulate(int wave, float fb)
 		{
@@ -1174,89 +974,44 @@ namespace
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
+			ag::screen(vg, 0.f, 0.f, OS_DISP_W, OS_DISP_H);
 
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, 0, 0, OS_DISP_W, OS_DISP_H, 4.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, OS_DISP_H,
-											   nvgRGB(0x0a, 0x16, 0x1f), nvgRGB(0x03, 0x06, 0x09)));
-			nvgFill(vg);
+			// header and footer dividers
+			hline(vg, 8.f, OS_DISP_W - 8.f, 18.f, 40);
+			hline(vg, 8.f, OS_DISP_W - 8.f, 146.f, 40);
 
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, 0.5f, 0.5f, OS_DISP_W - 1.f, OS_DISP_H - 1.f, 4.f);
-			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
+			// captions (their own row above the plots)
+			ag::text(vg, OS_WX0, 26.f, "WAVEFORM", 7.f, ag::dim(), ag::ALIGN_L, 0.8f);
+			ag::text(vg, OS_SX0, 26.f, "SPECTRUM", 7.f, ag::dim(), ag::ALIGN_L, 0.8f);
 
 			// Waveform box + grid
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, OS_WX0, OS_PY0, OS_WX1 - OS_WX0, OS_PY1 - OS_PY0, 3.f);
-			nvgFillColor(vg, nvgRGBA(255, 255, 255, 5));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
+			ag::plotFrame(vg, OS_WX0, OS_PY0, OS_WX1 - OS_WX0, OS_PY1 - OS_PY0);
 			for (int i = 1; i < 4; ++i)
-			{
-				float x = OS_WX0 + (OS_WX1 - OS_WX0) * (float)i / 4.f;
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, x + 0.5f, OS_PY0 + 1.f);
-				nvgLineTo(vg, x + 0.5f, OS_PY1 - 1.f);
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 12));
-				nvgStrokeWidth(vg, 1.f);
-				nvgStroke(vg);
-			}
+				vline(vg, OS_WX0 + (OS_WX1 - OS_WX0) * (float)i / 4.f, OS_PY0 + 1.f, OS_PY1 - 1.f, 14);
 			for (int i = -1; i <= 1; ++i)
-			{
-				float y = OS_WYC - (float)i * OS_WAMP;
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, OS_WX0 + 1.f, y + 0.5f);
-				nvgLineTo(vg, OS_WX1 - 1.f, y + 0.5f);
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, i == 0 ? 42 : 12));
-				nvgStrokeWidth(vg, 1.f);
-				nvgStroke(vg);
-			}
+				hline(vg, OS_WX0 + 1.f, OS_WX1 - 1.f, OS_WYC - (float)i * OS_WAMP, i == 0 ? 44 : 14);
 
 			// Spectrum box + grid
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, OS_SX0, OS_PY0, OS_SX1 - OS_SX0, OS_PY1 - OS_PY0, 3.f);
-			nvgFillColor(vg, nvgRGBA(255, 255, 255, 5));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
+			ag::plotFrame(vg, OS_SX0, OS_PY0, OS_SX1 - OS_SX0, OS_PY1 - OS_PY0);
 			const float gf[9] = {50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000};
 			for (int i = 0; i < 9; ++i)
 			{
 				bool major = (gf[i] == 100.f || gf[i] == 1000.f || gf[i] == 10000.f);
-				float x = freqX(gf[i]);
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, x + 0.5f, OS_PY0 + 1.f);
-				nvgLineTo(vg, x + 0.5f, OS_PY1 - 1.f);
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, major ? 30 : 12));
-				nvgStrokeWidth(vg, 1.f);
-				nvgStroke(vg);
+				vline(vg, freqX(gf[i]), OS_PY0 + 1.f, OS_PY1 - 1.f, major ? 36 : 14);
 			}
 			const float gd[3] = {0.f, -20.f, -40.f};
 			for (int i = 0; i < 3; ++i)
-			{
-				float y = dbY(gd[i]);
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, OS_SX0 + 1.f, y + 0.5f);
-				nvgLineTo(vg, OS_SX1 - 1.f, y + 0.5f);
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, i == 0 ? 36 : 12));
-				nvgStrokeWidth(vg, 1.f);
-				nvgStroke(vg);
-			}
-			NVGcolor lc = nvgRGBA(0x8a, 0x95, 0xa5, 170);
-			drawText(vg, freqX(100.f), 85.f, "100", 5.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-			drawText(vg, freqX(1000.f), 85.f, "1k", 5.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-			drawText(vg, freqX(10000.f), 85.f, "10k", 5.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+				hline(vg, OS_SX0 + 1.f, OS_SX1 - 1.f, dbY(gd[i]), i == 0 ? 40 : 14);
 
-			// Gallery backdrop
+			// frequency labels in their own row below the spectrum
+			ag::text(vg, freqX(100.f), 101.f, "100", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+			ag::text(vg, freqX(1000.f), 101.f, "1k", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+			ag::text(vg, freqX(10000.f), 101.f, "10k", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+
+			// Wave bank backdrop
 			nvgBeginPath(vg);
-			nvgRoundedRect(vg, OS_GX0 - 2.f, OS_GY0 - 2.f, 216.f, 2.f * OS_GRP + 2.f, 3.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+			nvgRoundedRect(vg, OS_GX0 - 2.f, OS_GY0 - 2.f, OS_GW + 4.f, 2.f * OS_GRP + 2.f, 3.f);
+			nvgFillColor(vg, nvgRGBA(255, 255, 255, 6));
 			nvgFill(vg);
 
 			Widget::draw(args);
@@ -1312,42 +1067,29 @@ namespace
 				auto yOf = [&](float v)
 				{ return OS_WYC - rack::math::clamp(v, -1.15f, 1.15f) * OS_WAMP; };
 
-				// fill
 				nvgBeginPath(vg);
 				nvgMoveTo(vg, wx, OS_WYC);
 				for (int i = 0; i < OS_SIM; ++i)
 					nvgLineTo(vg, wx + (float)i / (float)(OS_SIM - 1) * ww, yOf(curve[i]));
 				nvgLineTo(vg, wx + ww, OS_WYC);
 				nvgClosePath(vg);
-				nvgFillColor(vg, withA(colAccent(), 0.10f));
+				nvgFillColor(vg, ag::withA(ag::accent(), 0.12f));
 				nvgFill(vg);
 
-				nvgLineCap(vg, NVG_ROUND);
 				nvgLineJoin(vg, NVG_ROUND);
-				for (int pass = 0; pass < 2; ++pass)
+				nvgBeginPath(vg);
+				for (int i = 0; i < OS_SIM; ++i)
 				{
-					nvgBeginPath(vg);
-					for (int i = 0; i < OS_SIM; ++i)
-					{
-						float x = wx + (float)i / (float)(OS_SIM - 1) * ww;
-						float y = yOf(curve[i]);
-						if (i == 0)
-							nvgMoveTo(vg, x, y);
-						else
-							nvgLineTo(vg, x, y);
-					}
-					if (pass == 0)
-					{
-						nvgStrokeColor(vg, withA(colAccent(), 0.16f));
-						nvgStrokeWidth(vg, 4.f);
-					}
+					float x = wx + (float)i / (float)(OS_SIM - 1) * ww;
+					float y = yOf(curve[i]);
+					if (i == 0)
+						nvgMoveTo(vg, x, y);
 					else
-					{
-						nvgStrokeColor(vg, withA(colBright(), 0.95f));
-						nvgStrokeWidth(vg, 1.3f);
-					}
-					nvgStroke(vg);
+						nvgLineTo(vg, x, y);
 				}
+				nvgStrokeColor(vg, ag::bright());
+				nvgStrokeWidth(vg, 1.3f);
+				nvgStroke(vg);
 
 				// voice phase cursors
 				for (int c = nV - 1; c >= 0; --c)
@@ -1357,35 +1099,26 @@ namespace
 					float x = wx + p * ww, y = yOf(curve[idx]);
 					if (c == 0)
 					{
+						vline(vg, x, OS_PY0 + 1.f, OS_PY1 - 1.f, 50);
 						nvgBeginPath(vg);
-						nvgMoveTo(vg, x + 0.5f, OS_PY0 + 1.f);
-						nvgLineTo(vg, x + 0.5f, OS_PY1 - 1.f);
-						nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 50));
-						nvgStrokeWidth(vg, 1.f);
-						nvgStroke(vg);
-						nvgBeginPath(vg);
-						nvgCircle(vg, x, y, 5.f);
-						nvgFillColor(vg, withA(colBright(), 0.25f));
-						nvgFill(vg);
-						nvgBeginPath(vg);
-						nvgCircle(vg, x, y, 2.4f);
-						nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, 0.97f));
+						nvgCircle(vg, x, y, 2.6f);
+						nvgFillColor(vg, nvgRGB(255, 255, 255));
 						nvgFill(vg);
 					}
 					else
 					{
 						nvgBeginPath(vg);
 						nvgCircle(vg, x, y, 1.7f);
-						nvgFillColor(vg, withA(colWarm(), 0.85f));
+						nvgFillColor(vg, ag::warm());
 						nvgFill(vg);
 					}
 				}
 				nvgRestore(vg);
 
-				char b[32];
-				snprintf(b, sizeof(b), "WAVEFORM  FB %.0f%%", fb * 100.f);
-				drawText(vg, OS_WX0, 85.f, b, 5.2f, nvgRGBA(0x8a, 0x95, 0xa5, 190),
-						 NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+				// feedback readout, right end of the caption row
+				char b[24];
+				snprintf(b, sizeof(b), "FB %.0f%%", fb * 100.f);
+				ag::text(vg, OS_WX1, 26.f, b, 7.f, ag::textCol(), ag::ALIGN_R, 0.5f);
 			}
 
 			// ================= spectrum + filter curve =================
@@ -1416,7 +1149,7 @@ namespace
 				nvgBeginPath(vg);
 				nvgMoveTo(vg, nx + 0.5f, OS_PY0);
 				nvgLineTo(vg, nx + 0.5f, OS_PY1);
-				nvgStrokeColor(vg, withA(colWarm(), 0.35f));
+				nvgStrokeColor(vg, ag::withA(ag::warm(), 0.4f));
 				nvgStrokeWidth(vg, 1.f);
 				nvgStroke(vg);
 
@@ -1434,7 +1167,7 @@ namespace
 					float yR = dbY(db);
 					nvgBeginPath(vg);
 					nvgRect(vg, x - 1.f, yR, 2.f, OS_PY1 - yR);
-					nvgFillColor(vg, withA(colAccent(), 0.20f));
+					nvgFillColor(vg, ag::withA(ag::accent(), 0.22f));
 					nvgFill(vg);
 
 					float dbF = db + 10.f * std::log10(std::max(filtPow(f), 1e-9f));
@@ -1443,69 +1176,48 @@ namespace
 						float yF = dbY(dbF);
 						nvgBeginPath(vg);
 						nvgRect(vg, x - 1.f, yF, 2.f, OS_PY1 - yF);
-						nvgFillPaint(vg, nvgLinearGradient(vg, 0, OS_PY1, 0, yF,
-														   withA(colAccent(), 0.30f), withA(colAccent(), 0.95f)));
-						nvgFill(vg);
-						nvgBeginPath(vg);
-						nvgRect(vg, x - 1.5f, yF - 0.5f, 3.f, 1.4f);
-						nvgFillColor(vg, withA(colBright(), 0.95f));
+						nvgFillColor(vg, ag::withA(ag::accent(), 0.85f));
 						nvgFill(vg);
 					}
 				}
 
 				// filter response curve (0 dB reference)
 				const int NP = 56;
-				nvgLineCap(vg, NVG_ROUND);
 				nvgLineJoin(vg, NVG_ROUND);
-				for (int pass = 0; pass < 2; ++pass)
+				nvgBeginPath(vg);
+				for (int i = 0; i < NP; ++i)
 				{
-					nvgBeginPath(vg);
-					for (int i = 0; i < NP; ++i)
-					{
-						float t = (float)i / (float)(NP - 1);
-						float f = 20.f * std::pow(1000.f, t);
-						float db = 10.f * std::log10(std::max(filtPow(f), 1e-9f));
-						float x = OS_SX0 + t * (OS_SX1 - OS_SX0);
-						float y = dbY(db);
-						if (i == 0)
-							nvgMoveTo(vg, x, y);
-						else
-							nvgLineTo(vg, x, y);
-					}
-					if (pass == 0)
-					{
-						nvgStrokeColor(vg, withA(colViolet(), 0.18f));
-						nvgStrokeWidth(vg, 3.5f);
-					}
+					float t = (float)i / (float)(NP - 1);
+					float f = 20.f * std::pow(1000.f, t);
+					float db = 10.f * std::log10(std::max(filtPow(f), 1e-9f));
+					float x = OS_SX0 + t * (OS_SX1 - OS_SX0);
+					float y = dbY(db);
+					if (i == 0)
+						nvgMoveTo(vg, x, y);
 					else
-					{
-						nvgStrokeColor(vg, withA(colViolet(), 0.95f));
-						nvgStrokeWidth(vg, 1.1f);
-					}
-					nvgStroke(vg);
+						nvgLineTo(vg, x, y);
 				}
+				nvgStrokeColor(vg, ag::violet());
+				nvgStrokeWidth(vg, 1.2f);
+				nvgStroke(vg);
 
 				// cutoff markers
-				if (lo > 0.f)
+				float cuts[2] = {lo, hi};
+				for (int i = 0; i < 2; ++i)
 				{
-					float x = freqX(lo);
+					if (cuts[i] <= 0.f)
+						continue;
 					nvgBeginPath(vg);
-					nvgCircle(vg, x, dbY(-3.f), 2.2f);
-					nvgFillColor(vg, withA(colViolet(), 0.95f));
-					nvgFill(vg);
-				}
-				if (hi > 0.f)
-				{
-					float x = freqX(hi);
-					nvgBeginPath(vg);
-					nvgCircle(vg, x, dbY(-3.f), 2.2f);
-					nvgFillColor(vg, withA(colViolet(), 0.95f));
+					nvgCircle(vg, freqX(cuts[i]), dbY(-3.f), 2.2f);
+					nvgFillColor(vg, ag::violet());
 					nvgFill(vg);
 				}
 				nvgRestore(vg);
 
-				drawText(vg, OS_SX0 + 3.f, OS_PY0 + 5.f, "SPECTRUM", 5.2f, nvgRGBA(0x8a, 0x95, 0xa5, 190),
-						 NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+				// voices readout, right end of the caption row
+				char b[24];
+				snprintf(b, sizeof(b), "%d VOICE%s", nV, nV == 1 ? "" : "S");
+				ag::text(vg, OS_SX1, 26.f, b, 7.f, ag::textCol(), ag::ALIGN_R, 0.5f);
 			}
 
 			// ================= wave bank =================
@@ -1519,19 +1231,17 @@ namespace
 				bool hov = (i == hoverIdx);
 
 				nvgBeginPath(vg);
-				nvgRoundedRect(vg, x0, y0, w, OS_GCH, 2.5f);
-				nvgFillColor(vg, act ? withA(colAccent(), 0.22f) : nvgRGBA(255, 255, 255, hov ? 14 : 6));
+				nvgRoundedRect(vg, x0, y0, w, OS_GCH, 2.f);
+				nvgFillColor(vg, act ? ag::withA(ag::accent(), 0.22f) : nvgRGBA(255, 255, 255, hov ? 16 : 6));
 				nvgFill(vg);
 				if (act || hov)
 				{
-					nvgStrokeColor(vg, act ? withA(colAccent(), 0.9f) : withA(colBright(), 0.6f));
+					nvgStrokeColor(vg, act ? ag::accent() : ag::withA(ag::bright(), 0.6f));
 					nvgStrokeWidth(vg, 1.f);
 					nvgStroke(vg);
 				}
 
-				// thumbnail
-				float tx = x0 + 2.f, tw = w - 4.f, yc = y0 + OS_GCH * 0.5f, amp = 5.8f;
-				nvgLineCap(vg, NVG_ROUND);
+				float tx = x0 + 2.f, tw = w - 4.f, yc = y0 + OS_GCH * 0.5f, amp = 4.8f;
 				nvgLineJoin(vg, NVG_ROUND);
 				nvgBeginPath(vg);
 				for (int j = 0; j < 24; ++j)
@@ -1543,65 +1253,40 @@ namespace
 					else
 						nvgLineTo(vg, x, y);
 				}
-				nvgStrokeColor(vg, act ? withA(colBright(), 0.98f)
-									   : nvgRGBA(0x8a, 0x95, 0xa5, hov ? 230 : 150));
+				nvgStrokeColor(vg, act ? ag::bright() : nvgRGBA(0x8a, 0x95, 0xa5, hov ? 230 : 150));
 				nvgStrokeWidth(vg, act ? 1.2f : 0.9f);
 				nvgStroke(vg);
 			}
 
-			// ================= readouts =================
+			// ================= header row =================
 			{
 				char buf[64];
-				NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 230);
-				NVGcolor cm = nvgRGBA(0xff, 0xe6, 0x80, 220);
-				NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 230);
-
-				drawText(vg, 6.f, 8.f, OS_NAMES[wave], 7.5f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-
-				snprintf(buf, sizeof(buf), "V%d", nV);
-				drawText(vg, OS_DISP_W / 2.f - 4.f, 8.f, buf, 7.f, cd, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-
+				ag::text(vg, 8.f, 9.f, OS_NAMES[wave], 8.f, ag::accent(), ag::ALIGN_L, 1.f);
+				snprintf(buf, sizeof(buf), "%02d/%d", wave + 1, OS_NW);
+				ag::text(vg, OS_DISP_W / 2.f, 9.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
 				noteString(f0, buf, sizeof(buf));
-				drawText(vg, OS_DISP_W - 6.f, 8.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+				ag::text(vg, OS_DISP_W - 8.f, 9.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), ag::ALIGN_R, 0.5f);
+			}
 
+			// ================= footer row =================
+			{
+				char buf[64];
 				if (hoverIdx >= 0)
-					snprintf(buf, sizeof(buf), "%02d %s  -  CLICK", hoverIdx + 1, OS_NAMES[hoverIdx]);
+					snprintf(buf, sizeof(buf), "%02d %s - CLICK", hoverIdx + 1, OS_NAMES[hoverIdx]);
 				else
-					snprintf(buf, sizeof(buf), "WAVE %02d/%d", wave + 1, OS_NW);
-				drawText(vg, OS_GX0, 132.5f, buf, 5.5f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+					snprintf(buf, sizeof(buf), "CLICK A WAVE");
+				ag::text(vg, 8.f, 153.f, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
 
 				std::string ls = (lo > 0.f) ? osHzStr(lo) : std::string("OFF");
 				std::string hs = (hi > 0.f) ? osHzStr(hi) : std::string("OFF");
 				snprintf(buf, sizeof(buf), "LC %s  HC %s", ls.c_str(), hs.c_str());
-				drawText(vg, OS_DISP_W / 2.f + 22.f, 132.5f, buf, 5.2f, nvgRGBA(0xb0, 0x5a, 0xff, 220),
-						 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.6f);
+				ag::text(vg, OS_DISP_W / 2.f + 24.f, 153.f, buf, 7.f, ag::violet(), ag::ALIGN_C, 0.3f);
 
 				snprintf(buf, sizeof(buf), "PK %.1fV", pk);
-				drawText(vg, OS_DISP_W - 8.f, 132.5f, buf, 5.5f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+				ag::text(vg, OS_DISP_W - 8.f, 153.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
 			}
 
-			// ================= scanlines, vignette, glass =================
-			nvgBeginPath(vg);
-			for (int y = 0; y < (int)OS_DISP_H; y += 3)
-				nvgRect(vg, 0, y + 1, OS_DISP_W, 1);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, OS_DISP_W, OS_DISP_H);
-			nvgFillPaint(vg, nvgRadialGradient(vg, OS_DISP_W / 2.f, OS_DISP_H / 2.f,
-											   OS_DISP_W * 0.45f, OS_DISP_W * 0.85f,
-											   nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 115)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, OS_DISP_W, OS_DISP_H * 0.30f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, OS_DISP_H * 0.30f,
-											   nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-			nvgFill(vg);
-
 			nvgRestore(vg);
-
 			Widget::drawLayer(args, layer);
 		}
 	};
@@ -1628,20 +1313,16 @@ struct OscillatorWidget : ModuleWidget
 
 		addChild(new OSDisplayWidget(module));
 
-		for (int k = 0; k < 9; ++k)
+		for (int i = 0; i < OS_NCELL; ++i)
 		{
-			addParam(createParamCentered<RoundSmallBlackKnob>(
-				Vec(OS_KNOBS[k].x, OS_KNOBS[k].y), module, OS_KNOBS[k].param));
+			const OSCell &c = OS_CELLS[i];
+			if (c.param >= 0)
+				addParam(createParamCentered<RoundSmallBlackKnob>(Vec(c.cx, osKnobY(c)), module, c.param));
+			if (c.input >= 0)
+				addInput(createInputCentered<DarkPJ301MPort>(Vec(c.cx, osJackY(c)), module, c.input));
+			if (c.output >= 0)
+				addOutput(createOutputCentered<DarkPJ301MPort>(Vec(c.cx, osJackY(c)), module, c.output));
 		}
-
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(0), OS_IO_Y), module, Oscillator::VOCT_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(1), OS_IO_Y), module, Oscillator::FM_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(2), OS_IO_Y), module, Oscillator::FB_CV_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(3), OS_IO_Y), module, Oscillator::WAVE_CV_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(4), OS_IO_Y), module, Oscillator::LOCUT_CV_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(osIoX(5), OS_IO_Y), module, Oscillator::HICUT_CV_INPUT));
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(osIoX(6), OS_IO_Y), module, Oscillator::OUT_OUTPUT));
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(osIoX(7), OS_IO_Y), module, Oscillator::SUM_OUTPUT));
 	}
 };
 

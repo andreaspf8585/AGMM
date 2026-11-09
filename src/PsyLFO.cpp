@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -17,25 +18,29 @@ static const float PL_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
 static const float PL_DISP_W = 200.f;
 static const float PL_DISP_H = 200.f;
-static const float PL_DISP_X = (PL_PANEL_W - PL_DISP_W) / 2.f;
+static const float PL_DISP_X = (PL_PANEL_W - PL_DISP_W) / 2.f; // 110
 static const float PL_DISP_Y = 46.f;
 
-// Side blocks: pendulum 1 on the left, pendulum 2 on the right
-static const float PL_LCOL[2] = {32.f, 72.f};
-static const float PL_RCOL[2] = {348.f, 388.f};
-static const float PL_KNOB_Y = 108.f;
-static const float PL_OUT_Y[2] = {176.f, 232.f};
+// Side blocks: pendulum 1 on the left, pendulum 2 on the right (88 px wide each)
+static const float PL_LBLOCK_X = 12.f, PL_RBLOCK_X = 320.f, PL_BLOCK_W = 88.f;
+static const float PL_LCOL[2] = {34.f, 78.f};
+static const float PL_RCOL[2] = {342.f, 386.f};
+static const float PL_CAP_Y = 46.f;
+static const float PL_LED_Y = 62.f;
+static const float PL_CELL_W = 40.f;
+static const float PL_KNOB_TOP = 72.f, PL_KNOB_H = 62.f; // MASS / LENGTH cells
+static const float PL_OUT_TOP[2] = {142.f, 198.f};       // X Y / V/OCT GATE
+static const float PL_OUT_H = 52.f;
+static float plKnobY() { return PL_KNOB_TOP + 38.f; }
+static float plOutY(int row) { return PL_OUT_TOP[row] + 32.f; }
 
-// Bottom control row
-static const float PL_CTRL_Y = 312.f;
-static const float PL_SPEED_X = 34.f;
-static const float PL_SPDCV_X = 78.f;
-static const float PL_GRAV_X = 130.f;
-static const float PL_DAMP_X = 182.f;
-static const float PL_KICKB_X = 246.f;
-static const float PL_KICKI_X = 290.f;
-static const float PL_RSTB_X = 346.f;
-static const float PL_RSTI_X = 390.f;
+// Bottom control row: 8 cells
+static const float PL_CTRL_CAP_Y = 268.f;
+static const float PL_CTRL_TOP = 278.f;
+static const float PL_CTRL_H = 52.f;
+static const float PL_CTRL_W = 46.f;
+static float plCtrlX(int i) { return 35.f + 50.f * (float)i; }
+static float plCtrlY() { return PL_CTRL_TOP + 34.f; }
 
 // ------------------------------------------------------------
 // Module
@@ -173,14 +178,21 @@ struct PsyLFO : Module
 
         std::random_device rd;
         rng.seed(rd());
-        onReset();
+        resetState();
 
         // Initial random voltages
         generateRandomVoct1();
         generateRandomVoct2();
     }
 
-    void onReset() override
+    void onReset(const ResetEvent &e) override
+    {
+        Module::onReset(e);
+        resetState();
+    }
+
+    // Randomise the pendulums and clear the display/gate state
+    void resetState()
     {
         std::uniform_real_distribution<double> angleDist(-M_PI, M_PI);
         std::uniform_real_distribution<double> omegaDist(-2.0, 2.0);
@@ -371,7 +383,7 @@ struct PsyLFO : Module
         bool resetNow = (params[RESET_BUTTON].getValue() > 0.5f) ||
                         (inputs[RESET_CV_INPUT].getVoltage() > 1.0f);
         if (resetNow && !lastResetState)
-            onReset();
+            resetState();
         lastResetState = resetNow;
 
         bool kickNow = (params[KICK_BUTTON].getValue() > 0.5f) ||
@@ -385,7 +397,7 @@ struct PsyLFO : Module
         rk4(dt);
 
         if (!isValid())
-            onReset();
+            resetState();
 
         // Detect zero crossings and generate random voltages + gate triggers
         double currentSign1 = (theta1 >= 0) ? 1.0 : -1.0;
@@ -475,16 +487,16 @@ struct PsyLFO : Module
         json_t *j;
         j = json_object_get(root, "voct1Range");
         if (j)
-            voct1Range = (VoctRange)json_integer_value(j);
+            voct1Range = (VoctRange)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_RANGES - 1);
         j = json_object_get(root, "voct2Range");
         if (j)
-            voct2Range = (VoctRange)json_integer_value(j);
+            voct2Range = (VoctRange)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_RANGES - 1);
         j = json_object_get(root, "gate1Duration");
         if (j)
-            gate1Duration = (GateDuration)json_integer_value(j);
+            gate1Duration = (GateDuration)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_GATE_DURS - 1);
         j = json_object_get(root, "gate2Duration");
         if (j)
-            gate2Duration = (GateDuration)json_integer_value(j);
+            gate2Duration = (GateDuration)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_GATE_DURS - 1);
     }
 };
 
@@ -492,112 +504,15 @@ struct PsyLFO : Module
 // with the same-named helpers in the other module files.
 namespace
 {
+    namespace ag = agmm;
 
-    // ------------------------------------------------------------
-    // Theme (same palette as the other AGMM modules)
-    // ------------------------------------------------------------
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
     NVGcolor colP1() { return nvgRGB(0x3d, 0xe0, 0xff); } // pendulum 1: cyan
     NVGcolor colP2() { return nvgRGB(0xb0, 0x5a, 0xff); } // pendulum 2: violet
 
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    // Cyan / violet LEDs (Rack has no built-in ones)
-    template <typename TBase = GrayModuleLightWidget>
-    struct TPLCyanLight : TBase
-    {
-        TPLCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-    };
-    using PLCyanLight = TPLCyanLight<>;
-
-    template <typename TBase = GrayModuleLightWidget>
-    struct TPLVioletLight : TBase
-    {
-        TPLVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
-    };
-    using PLVioletLight = TPLVioletLight<>;
-
-    // ------------------------------------------------------------
-    // AGMM logo
-    // ------------------------------------------------------------
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        // Pill body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        // Tiny cell triangle
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        // Wordmark
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    // ------------------------------------------------------------
-    // Physical pendulum parts
-    // ------------------------------------------------------------
-
-    // Metal rod: dark body, steel core, highlight toward the light (up-left)
+    // Metal rod: dark outline + flat steel core
     void drawRod(NVGcontext *vg, float x0, float y0, float x1, float y1, float w, NVGcolor steel)
     {
-        float dx = x1 - x0, dy = y1 - y0;
-        float len = std::sqrt(dx * dx + dy * dy);
-        if (len < 0.5f)
-            return;
-        float nx = -dy / len, ny = dx / len;
-        if (nx * -0.7f + ny * -0.7f < 0.f)
-        {
-            nx = -nx;
-            ny = -ny;
-        }
-
         nvgLineCap(vg, NVG_ROUND);
-
         nvgBeginPath(vg);
         nvgMoveTo(vg, x0, y0);
         nvgLineTo(vg, x1, y1);
@@ -611,92 +526,35 @@ namespace
         nvgStrokeColor(vg, steel);
         nvgStrokeWidth(vg, w);
         nvgStroke(vg);
-
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, x0 + nx * w * 0.22f, y0 + ny * w * 0.22f);
-        nvgLineTo(vg, x1 + nx * w * 0.22f, y1 + ny * w * 0.22f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 150));
-        nvgStrokeWidth(vg, w * 0.26f);
-        nvgStroke(vg);
     }
 
-    // Shaded sphere with specular highlight and rim
-    void drawBob(NVGcontext *vg, float cx, float cy, float r, NVGcolor hi, NVGcolor base, NVGcolor edge)
+    // Flat bob: filled disc with a darker rim
+    void drawBob(NVGcontext *vg, float cx, float cy, float r, NVGcolor fill, NVGcolor edge)
     {
         nvgBeginPath(vg);
         nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx - r * 0.35f, cy - r * 0.4f, r * 0.1f, r * 1.25f, hi, base));
+        nvgFillColor(vg, fill);
         nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r - 0.5f);
         nvgStrokeColor(vg, edge);
         nvgStrokeWidth(vg, 1.3f);
         nvgStroke(vg);
-
-        // Bounce light on the lower right
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx + r * 0.38f, cy + r * 0.42f, r * 0.3f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
-        nvgFill(vg);
-
-        // Specular
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx - r * 0.38f, cy - r * 0.42f, r * 0.2f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 210));
-        nvgFill(vg);
     }
 
-    // Pivot bearing: mounting disc, bearing ring, cap with a screw slot
+    // Flat pivot bearing
     void drawHub(NVGcontext *vg, float cx, float cy)
     {
-        // Shadow
         nvgBeginPath(vg);
-        nvgCircle(vg, cx + 2.f, cy + 3.f, 12.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
+        nvgCircle(vg, cx, cy, 10.f);
+        nvgFillColor(vg, nvgRGB(0x24, 0x29, 0x31));
         nvgFill(vg);
-
-        // Mounting disc
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, 12.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, cx, cy - 12.f, cx, cy + 12.f,
-                                           nvgRGB(0x3a, 0x41, 0x4c), nvgRGB(0x12, 0x15, 0x1a)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 50));
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 60));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
 
-        // Four tiny mounting screws
-        for (int i = 0; i < 4; ++i)
-        {
-            float a = (float)M_PI * 0.25f + i * (float)M_PI * 0.5f;
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx + std::cos(a) * 9.f, cy + std::sin(a) * 9.f, 1.1f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 90));
-            nvgFill(vg);
-        }
-
-        // Bearing ring
         nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, 6.5f);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx - 2.f, cy - 2.f, 1.f, 8.f,
-                                           nvgRGB(0xe4, 0xea, 0xf2), nvgRGB(0x4b, 0x54, 0x62)));
+        nvgCircle(vg, cx, cy, 4.5f);
+        nvgFillColor(vg, nvgRGB(0xc9, 0xd1, 0xdc));
         nvgFill(vg);
-
-        // Cap
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, 3.6f);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx - 1.f, cy - 1.f, 0.5f, 4.5f,
-                                           nvgRGB(0xf6, 0xf9, 0xfd), nvgRGB(0x6b, 0x75, 0x84)));
-        nvgFill(vg);
-
-        // Slot
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, cx - 2.4f, cy + 0.6f);
-        nvgLineTo(vg, cx + 2.4f, cy - 0.6f);
-        nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 160));
-        nvgStrokeWidth(vg, 0.9f);
-        nvgStroke(vg);
     }
 
     // Fading motion trail (older = thinner and fainter)
@@ -722,166 +580,61 @@ namespace
     }
 
     // ------------------------------------------------------------
-    // Panel background
+    // Panel background: title, display frame, labelled plates
     // ------------------------------------------------------------
     struct PLPanelBackground : TransparentWidget
     {
         PLPanelBackground() { box.size = Vec(PL_PANEL_W, PL_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
+        // Block caption with hairlines either side of the text
+        static void blockCaption(NVGcontext *vg, float x0, float w, float y, const char *txt, NVGcolor col)
         {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
+            float cx = x0 + w / 2.f;
+            float gap = ag::textWidth(vg, txt, 8.f, 2.f) / 2.f + 6.f;
+            ag::text(vg, cx, y, txt, 8.f, col, ag::ALIGN_C, 2.f);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
+            nvgMoveTo(vg, x0, y);
+            nvgLineTo(vg, std::max(x0, cx - gap), y);
+            nvgMoveTo(vg, std::min(x0 + w, cx + gap), y);
+            nvgLineTo(vg, x0 + w, y);
+            nvgStrokeColor(vg, ag::withA(col, 0.35f));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Caption with an underline (side blocks)
-        void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float x1, float x2)
-        {
-            drawText(vg, cx, y, txt, 8.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            NVGcolor lc = col;
-            lc.a = 0.35f;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y + 8.f);
-            nvgLineTo(vg, x2, y + 8.f);
-            nvgStrokeColor(vg, lc);
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Full-width divider with a centered caption
-        void section(NVGcontext *vg, float y, const char *txt)
-        {
-            float x1 = 14.f, x2 = PL_PANEL_W - 14.f, cx = PL_PANEL_W / 2.f;
-            float w = 10.f + (float)strlen(txt) * 7.f;
-            drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y);
-            nvgLineTo(vg, cx - w / 2.f, y);
-            nvgMoveTo(vg, cx + w / 2.f, y);
-            nvgLineTo(vg, x2, y);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-            label(vg, cx, cy - 19.f, txt);
         }
 
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, PL_PANEL_W, PL_PANEL_H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, PL_PANEL_H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
-
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)PL_PANEL_H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, PL_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
-
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, PL_PANEL_W - 1.f, PL_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // Logo + title
-            drawLogo(vg, PL_PANEL_W / 2.f, 13.f);
-            drawText(vg, PL_PANEL_W / 2.f, 31.f, "PSYLFO", 13.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-
-            // Display bezel
-            float bx = PL_DISP_X - 5.f, by = PL_DISP_Y - 5.f;
-            float bw = PL_DISP_W + 10.f, bh = PL_DISP_H + 10.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
+            ag::panelBase(vg, PL_PANEL_W, PL_PANEL_H, "PSYLFO");
+            ag::bezel(vg, PL_DISP_X, PL_DISP_Y, PL_DISP_W, PL_DISP_H);
 
             // Side blocks
-            caption(vg, 52.f, 54.f, "PENDULUM 1", colP1(), 12.f, 92.f);
-            caption(vg, 368.f, 54.f, "PENDULUM 2", colP2(), 328.f, 408.f);
+            blockCaption(vg, PL_LBLOCK_X, PL_BLOCK_W, PL_CAP_Y, "PENDULUM 1", colP1());
+            blockCaption(vg, PL_RBLOCK_X, PL_BLOCK_W, PL_CAP_Y, "PENDULUM 2", colP2());
+
+            // LED rows (the LED itself is a widget): label left of it
+            ag::text(vg, PL_LBLOCK_X + 36.f, PL_LED_Y, "SPIN", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+            ag::text(vg, PL_RBLOCK_X + 36.f, PL_LED_Y, "SPIN", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
 
             for (int c = 0; c < 2; ++c)
             {
-                ring(vg, PL_LCOL[c], PL_KNOB_Y, 18.f);
-                ring(vg, PL_RCOL[c], PL_KNOB_Y, 18.f);
-                label(vg, PL_LCOL[c], PL_KNOB_Y + 26.f, c == 0 ? "MASS" : "LENGTH");
-                label(vg, PL_RCOL[c], PL_KNOB_Y + 26.f, c == 0 ? "MASS" : "LENGTH");
+                const char *kn = c == 0 ? "MASS" : "LENGTH";
+                ag::cell(vg, PL_LCOL[c], PL_KNOB_TOP, PL_CELL_W, PL_KNOB_H, kn);
+                ag::cell(vg, PL_RCOL[c], PL_KNOB_TOP, PL_CELL_W, PL_KNOB_H, kn);
             }
-
-            jackCell(vg, PL_LCOL[0], PL_OUT_Y[0], "X");
-            jackCell(vg, PL_LCOL[1], PL_OUT_Y[0], "Y");
-            jackCell(vg, PL_LCOL[0], PL_OUT_Y[1], "V/OCT");
-            jackCell(vg, PL_LCOL[1], PL_OUT_Y[1], "GATE");
-            jackCell(vg, PL_RCOL[0], PL_OUT_Y[0], "X");
-            jackCell(vg, PL_RCOL[1], PL_OUT_Y[0], "Y");
-            jackCell(vg, PL_RCOL[0], PL_OUT_Y[1], "V/OCT");
-            jackCell(vg, PL_RCOL[1], PL_OUT_Y[1], "GATE");
+            const char *outs[2][2] = {{"X", "Y"}, {"V/OCT", "GATE"}};
+            for (int r = 0; r < 2; ++r)
+                for (int c = 0; c < 2; ++c)
+                {
+                    ag::cell(vg, PL_LCOL[c], PL_OUT_TOP[r], PL_CELL_W, PL_OUT_H, outs[r][c], true);
+                    ag::cell(vg, PL_RCOL[c], PL_OUT_TOP[r], PL_CELL_W, PL_OUT_H, outs[r][c], true);
+                }
 
             // Global controls
-            section(vg, 270.f, "CONTROL");
-
-            const float labelY = PL_CTRL_Y + 29.f;
-            // Knobs
-            ring(vg, PL_SPEED_X, PL_CTRL_Y, 20.f);
-            ring(vg, PL_GRAV_X, PL_CTRL_Y, 20.f);
-            ring(vg, PL_DAMP_X, PL_CTRL_Y, 20.f);
-            label(vg, PL_SPEED_X, labelY, "SPEED");
-            label(vg, PL_GRAV_X, labelY, "GRAVITY");
-            label(vg, PL_DAMP_X, labelY, "DAMPING");
-            // Jacks
-            const float jx[3] = {PL_SPDCV_X, PL_KICKI_X, PL_RSTI_X};
-            const char *jl[3] = {"SPD CV", "KICK IN", "RESET IN"};
-            for (int i = 0; i < 3; ++i)
-            {
-                plate(vg, jx[i] - 17.f, PL_CTRL_Y - 19.f, 34.f, 38.f);
-                label(vg, jx[i], labelY, jl[i]);
-            }
-            // Buttons
-            ring(vg, PL_KICKB_X, PL_CTRL_Y, 17.f);
-            ring(vg, PL_RSTB_X, PL_CTRL_Y, 17.f);
-            label(vg, PL_KICKB_X, labelY, "KICK");
-            label(vg, PL_RSTB_X, labelY, "RESET");
+            ag::sectionHeader(vg, PL_PANEL_W, PL_CTRL_CAP_Y, "CONTROL");
+            const char *names[8] = {"SPEED", "SPD CV", "GRAVITY", "DAMPING", "KICK", "KICK IN", "RESET", "RESET IN"};
+            for (int i = 0; i < 8; ++i)
+                ag::cell(vg, plCtrlX(i), PL_CTRL_TOP, PL_CTRL_W, PL_CTRL_H, names[i]);
 
             Widget::draw(args);
         }
@@ -906,16 +659,12 @@ namespace
             NVGcontext *vg = args.vg;
             const float cx = PL_DISP_W / 2.f, cy = PL_DISP_H / 2.f;
 
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, PL_DISP_W, PL_DISP_H);
-            nvgFillColor(vg, nvgRGB(0x03, 0x05, 0x08));
-            nvgFill(vg);
+            ag::screen(vg, 0.f, 0.f, PL_DISP_W, PL_DISP_H);
 
             // Dial face
             nvgBeginPath(vg);
             nvgCircle(vg, cx, cy, 97.f);
-            nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy - 10.f, 8.f, 100.f,
-                                               nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x09)));
+            nvgFillColor(vg, nvgRGB(0x07, 0x0f, 0x16));
             nvgFill(vg);
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 46));
             nvgStrokeWidth(vg, 1.f);
@@ -957,10 +706,8 @@ namespace
             nvgStroke(vg);
 
             nvgBeginPath(vg);
-            for (int i = 0; i < 36; i += 3)
+            for (int i = 3; i < 36; i += 3)
             {
-                if (i == 0)
-                    continue;
                 float a = i * 10.f * (float)M_PI / 180.f;
                 float dx = std::sin(a), dy = std::cos(a);
                 nvgMoveTo(vg, cx + dx * 94.f, cy + dy * 94.f);
@@ -974,7 +721,7 @@ namespace
             nvgBeginPath(vg);
             nvgMoveTo(vg, cx, cy + 94.f);
             nvgLineTo(vg, cx, cy + 83.f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 220));
+            nvgStrokeColor(vg, ag::accent());
             nvgStrokeWidth(vg, 2.f);
             nvgStroke(vg);
 
@@ -1075,8 +822,6 @@ namespace
 
             float r1 = 4.5f + 3.4f * std::cbrt(m1);
             float r2 = 4.5f + 3.4f * std::cbrt(m2);
-            float e1 = std::min(std::fabs(w1) / 10.f, 1.f);
-            float e2 = std::min(std::fabs(w2) / 10.f, 1.f);
 
             // ---- angle arcs (measured from the vertical) ----
             auto arcAt = [&](float ax, float ay, float r, float th, NVGcolor col)
@@ -1104,97 +849,53 @@ namespace
             nvgStroke(vg);
 
             // ---- trails ----
-            drawTrail(vg, t1x, t1y, tn, colP1(), 4.f, 0.10f);
-            drawTrail(vg, t1x, t1y, tn, colP1(), 1.1f, 0.35f);
-            drawTrail(vg, t2x, t2y, tn, colP2(), 6.f, 0.20f);
+            drawTrail(vg, t1x, t1y, tn, colP1(), 1.4f, 0.55f);
             drawTrail(vg, t2x, t2y, tn, nvgRGB(0xd8, 0xa8, 0xff), 1.8f, 0.95f);
-
-            // ---- shadows ----
-            const float sx = 2.5f, sy = 3.5f;
-            nvgLineCap(vg, NVG_ROUND);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, cx + sx, cy + sy);
-            nvgLineTo(vg, b1x + sx, b1y + sy);
-            nvgLineTo(vg, b2x + sx, b2y + sy);
-            nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgStrokeWidth(vg, 4.6f);
-            nvgLineJoin(vg, NVG_ROUND);
-            nvgStroke(vg);
-            nvgBeginPath(vg);
-            nvgCircle(vg, b1x + sx + 1.f, b1y + sy + 1.f, r1);
-            nvgCircle(vg, b2x + sx + 1.f, b2y + sy + 1.f, r2);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgFill(vg);
 
             // ---- rods ----
             drawRod(vg, cx, cy, b1x, b1y, 4.0f, nvgRGB(0x74, 0x9a, 0xab));
             drawRod(vg, b1x, b1y, b2x, b2y, 3.4f, nvgRGB(0x93, 0x84, 0xb0));
 
-            // ---- halos + gate flashes ----
-            auto halo = [&](float bx, float by, float r, NVGcolor col, float energy, float flash)
+            // ---- gate flashes (expanding ring) ----
+            auto flashRing = [&](float bx, float by, float r, NVGcolor col, float flash)
             {
-                float a = 0.10f + 0.22f * energy + 0.35f * flash;
+                if (flash <= 0.02f)
+                    return;
                 nvgBeginPath(vg);
-                nvgCircle(vg, bx, by, r * 3.f);
-                nvgFillPaint(vg, nvgRadialGradient(vg, bx, by, r * 0.6f, r * 3.f,
-                                                   nvgRGBAf(col.r, col.g, col.b, a),
-                                                   nvgRGBAf(col.r, col.g, col.b, 0.f)));
-                nvgFill(vg);
-                if (flash > 0.02f)
-                {
-                    nvgBeginPath(vg);
-                    nvgCircle(vg, bx, by, r + (1.f - flash) * 16.f);
-                    nvgStrokeColor(vg, nvgRGBAf(col.r, col.g, col.b, 0.8f * flash));
-                    nvgStrokeWidth(vg, 1.5f);
-                    nvgStroke(vg);
-                }
+                nvgCircle(vg, bx, by, r + (1.f - flash) * 16.f);
+                nvgStrokeColor(vg, ag::withA(col, 0.8f * flash));
+                nvgStrokeWidth(vg, 1.5f);
+                nvgStroke(vg);
             };
-            halo(b1x, b1y, r1, colP1(), e1, fl1);
-            halo(b2x, b2y, r2, colP2(), e2, fl2);
+            flashRing(b1x, b1y, r1, colP1(), fl1);
+            flashRing(b2x, b2y, r2, colP2(), fl2);
 
             // ---- bobs ----
-            drawBob(vg, b1x, b1y, r1, nvgRGB(0xd8, 0xf9, 0xff), nvgRGB(0x1f, 0x9f, 0xc0), nvgRGB(0x08, 0x40, 0x55));
-            drawBob(vg, b2x, b2y, r2, nvgRGB(0xf1, 0xe3, 0xff), nvgRGB(0x7a, 0x3a, 0xc8), nvgRGB(0x2d, 0x10, 0x58));
+            drawBob(vg, b1x, b1y, r1, nvgRGB(0x1f, 0x9f, 0xc0), nvgRGB(0xd8, 0xf9, 0xff));
+            drawBob(vg, b2x, b2y, r2, nvgRGB(0x7a, 0x3a, 0xc8), nvgRGB(0xf1, 0xe3, 0xff));
 
             // ---- pivot ----
             drawHub(vg, cx, cy);
-
-            // ---- scanlines ----
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)PL_DISP_H; y += 3)
-                nvgRect(vg, 0, y + 1, PL_DISP_W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
-
-            // ---- glass reflection ----
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, PL_DISP_W, PL_DISP_H * 0.35f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, PL_DISP_H * 0.35f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
 
             // ---- readouts (in the corners, outside the dial) ----
             char buf[32];
             float deg1 = th1 * 180.f / (float)M_PI;
             float deg2 = th2 * 180.f / (float)M_PI;
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-            NVGcolor c2 = nvgRGBA(0xb0, 0x5a, 0xff, 230);
-            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 220);
 
             snprintf(buf, sizeof(buf), "A1 %+4.0f", deg1);
-            drawText(vg, 4.f, 8.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 4.f, 8.f, buf, 7.f, colP1(), ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "W1 %+.1f", w1);
-            drawText(vg, 4.f, 17.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 4.f, 18.f, buf, 7.f, colP1(), ag::ALIGN_L, 0.5f);
 
             snprintf(buf, sizeof(buf), "A2 %+4.0f", deg2);
-            drawText(vg, PL_DISP_W - 4.f, 8.f, buf, 7.f, c2, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, PL_DISP_W - 4.f, 8.f, buf, 7.f, colP2(), ag::ALIGN_R, 0.5f);
             snprintf(buf, sizeof(buf), "W2 %+.1f", w2);
-            drawText(vg, PL_DISP_W - 4.f, 17.f, buf, 7.f, c2, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, PL_DISP_W - 4.f, 18.f, buf, 7.f, colP2(), ag::ALIGN_R, 0.5f);
 
             snprintf(buf, sizeof(buf), "R %.2fM", reach);
-            drawText(vg, 4.f, PL_DISP_H - 8.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 4.f, PL_DISP_H - 8.f, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "G %.1f", grav);
-            drawText(vg, PL_DISP_W - 4.f, PL_DISP_H - 8.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, PL_DISP_W - 4.f, PL_DISP_H - 8.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
 
             Widget::drawLayer(args, layer);
         }
@@ -1222,32 +923,33 @@ struct PsyLFOWidget : ModuleWidget
         addChild(new PLDisplayWidget(module));
 
         // Pendulum 1 (left)
-        addChild(createLightCentered<MediumLight<PLCyanLight>>(Vec(52.f, 76.f), module, PsyLFO::MASS1_LIGHT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_LCOL[0], PL_KNOB_Y), module, PsyLFO::MASS1_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_LCOL[1], PL_KNOB_Y), module, PsyLFO::LEN1_PARAM));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[0], PL_OUT_Y[0]), module, PsyLFO::X1_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[1], PL_OUT_Y[0]), module, PsyLFO::Y1_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[0], PL_OUT_Y[1]), module, PsyLFO::VOCT1_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[1], PL_OUT_Y[1]), module, PsyLFO::GATE1_OUTPUT));
+        addChild(createLightCentered<MediumLight<agmm::CyanLight>>(Vec(PL_LBLOCK_X + 58.f, PL_LED_Y), module, PsyLFO::MASS1_LIGHT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_LCOL[0], plKnobY()), module, PsyLFO::MASS1_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_LCOL[1], plKnobY()), module, PsyLFO::LEN1_PARAM));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[0], plOutY(0)), module, PsyLFO::X1_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[1], plOutY(0)), module, PsyLFO::Y1_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[0], plOutY(1)), module, PsyLFO::VOCT1_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_LCOL[1], plOutY(1)), module, PsyLFO::GATE1_OUTPUT));
 
         // Pendulum 2 (right)
-        addChild(createLightCentered<MediumLight<PLVioletLight>>(Vec(368.f, 76.f), module, PsyLFO::MASS2_LIGHT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_RCOL[0], PL_KNOB_Y), module, PsyLFO::MASS2_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_RCOL[1], PL_KNOB_Y), module, PsyLFO::LEN2_PARAM));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[0], PL_OUT_Y[0]), module, PsyLFO::X2_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[1], PL_OUT_Y[0]), module, PsyLFO::Y2_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[0], PL_OUT_Y[1]), module, PsyLFO::VOCT2_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[1], PL_OUT_Y[1]), module, PsyLFO::GATE2_OUTPUT));
+        addChild(createLightCentered<MediumLight<agmm::VioletLight>>(Vec(PL_RBLOCK_X + 58.f, PL_LED_Y), module, PsyLFO::MASS2_LIGHT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_RCOL[0], plKnobY()), module, PsyLFO::MASS2_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_RCOL[1], plKnobY()), module, PsyLFO::LEN2_PARAM));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[0], plOutY(0)), module, PsyLFO::X2_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[1], plOutY(0)), module, PsyLFO::Y2_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[0], plOutY(1)), module, PsyLFO::VOCT2_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PL_RCOL[1], plOutY(1)), module, PsyLFO::GATE2_OUTPUT));
 
-        // Global controls
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_SPEED_X, PL_CTRL_Y), module, PsyLFO::SPEED_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PL_SPDCV_X, PL_CTRL_Y), module, PsyLFO::SPEED_CV_INPUT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_GRAV_X, PL_CTRL_Y), module, PsyLFO::GRAVITY_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PL_DAMP_X, PL_CTRL_Y), module, PsyLFO::DAMPING_PARAM));
-        addParam(createParamCentered<VCVButton>(Vec(PL_KICKB_X, PL_CTRL_Y), module, PsyLFO::KICK_BUTTON));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PL_KICKI_X, PL_CTRL_Y), module, PsyLFO::KICK_INPUT));
-        addParam(createParamCentered<VCVButton>(Vec(PL_RSTB_X, PL_CTRL_Y), module, PsyLFO::RESET_BUTTON));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(PL_RSTI_X, PL_CTRL_Y), module, PsyLFO::RESET_CV_INPUT));
+        // Global controls: SPEED, SPD CV, GRAVITY, DAMPING, KICK, KICK IN, RESET, RESET IN
+        const float y = plCtrlY();
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(plCtrlX(0), y), module, PsyLFO::SPEED_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(1), y), module, PsyLFO::SPEED_CV_INPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(plCtrlX(2), y), module, PsyLFO::GRAVITY_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(plCtrlX(3), y), module, PsyLFO::DAMPING_PARAM));
+        addParam(createParamCentered<VCVButton>(Vec(plCtrlX(4), y), module, PsyLFO::KICK_BUTTON));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(5), y), module, PsyLFO::KICK_INPUT));
+        addParam(createParamCentered<VCVButton>(Vec(plCtrlX(6), y), module, PsyLFO::RESET_BUTTON));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(7), y), module, PsyLFO::RESET_CV_INPUT));
     }
 
     void appendContextMenu(ui::Menu *menu) override
@@ -1266,7 +968,7 @@ struct PsyLFOWidget : ModuleWidget
                                              for (int i = 0; i < PsyLFO::NUM_RANGES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(rangeNames[i],
-                                                                                  (module->voct1Range == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->voct1Range == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->voct1Range = (PsyLFO::VoctRange)i;
@@ -1283,7 +985,7 @@ struct PsyLFOWidget : ModuleWidget
                                              for (int i = 0; i < PsyLFO::NUM_RANGES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(rangeNames[i],
-                                                                                  (module->voct2Range == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->voct2Range == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->voct2Range = (PsyLFO::VoctRange)i;
@@ -1300,7 +1002,7 @@ struct PsyLFOWidget : ModuleWidget
                                              for (int i = 0; i < PsyLFO::NUM_GATE_DURS; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(gateNames[i],
-                                                                                  (module->gate1Duration == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->gate1Duration == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->gate1Duration = (PsyLFO::GateDuration)i;
@@ -1316,7 +1018,7 @@ struct PsyLFOWidget : ModuleWidget
                                              for (int i = 0; i < PsyLFO::NUM_GATE_DURS; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(gateNames[i],
-                                                                                  (module->gate2Duration == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->gate2Duration == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->gate2Duration = (PsyLFO::GateDuration)i;
