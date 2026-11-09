@@ -11,6 +11,15 @@ static const int MX_SCOPE_N = 96;
 
 // ============================================================
 // Stereo 6-channel mixer – per-channel L/R inputs, L/R outputs
+//
+// Per channel: gain = LEVEL knob + (CV * attenuverter), clamped to 0..1 and
+// applied to both L and R. All six channels are summed, then scaled by MASTER
+// GAIN. The channel layout is taller than Mixer3 because CV and ATT sit in
+// separate rows inside a narrower 56 px plate.
+//
+// CV scaling is selectable and saved with the patch:
+//   UNIPOLAR_0_10 (default): 10 V -> +1.0 full level offset.
+//   BIPOLAR_M5_5:            +-5 V -> +-1.0, clamped.
 // ============================================================
 struct Mixer6 : Module
 {
@@ -22,6 +31,9 @@ struct Mixer6 : Module
     CVRange cvRangeMode = UNIPOLAR_0_10; // preserve original (cv/10) behavior
 
     // Display state
+    //
+    // Scope is a min/max envelope per column (96 columns). Written by the audio
+    // thread, read by the UI; a torn read only affects the drawing.
     float scopeMin[MX_SCOPE_N] = {};
     float scopeMax[MX_SCOPE_N] = {};
     int scopeHead = 0;
@@ -31,6 +43,9 @@ struct Mixer6 : Module
 
     enum ParamId
     {
+        // Six levels, then six attenuverters, then the master. Both groups are
+        // contiguous so the DSP loop can use PARAM_CH1_LEVEL + ch and
+        // PARAM_CH1_ATTV + ch.
         PARAM_CH1_LEVEL,
         PARAM_CH2_LEVEL,
         PARAM_CH3_LEVEL,
@@ -49,6 +64,9 @@ struct Mixer6 : Module
     enum InputId
     {
         // Interleaved so INPUT_CH1_L + ch*2 gives (L,R) for channel ch
+        //
+        // Twelve audio jacks first (six L/R pairs), then six CV jacks. The DSP
+        // uses stride 2 for audio and stride 1 for CV.
         INPUT_CH1_L,
         INPUT_CH1_R,
         INPUT_CH2_L,
@@ -84,16 +102,19 @@ struct Mixer6 : Module
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
+        // Levels default to 0: a freshly added mixer stays silent.
         for (int ch = 0; ch < 6; ++ch)
             configParam(PARAM_CH1_LEVEL + ch, 0.f, 1.f, 0.f,
                         "Channel " + std::to_string(ch + 1) + " level", "%", 0.f, 100.f);
 
+        // Attenuverters are bipolar and default to 0 (no CV influence).
         for (int ch = 0; ch < 6; ++ch)
             configParam(PARAM_CH1_ATTV + ch, -1.f, 1.f, 0.f,
                         "Channel " + std::to_string(ch + 1) + " CV attenuverter", "%", 0.f, 100.f);
 
         configParam(PARAM_MASTER_GAIN, 0.f, 2.f, 1.f, "Master gain", "%", 0.f, 100.f);
 
+        // Jack names per channel, using the same interleaved indices as the DSP.
         for (int ch = 0; ch < 6; ++ch)
         {
             std::string n = std::to_string(ch + 1);
@@ -119,6 +140,8 @@ struct Mixer6 : Module
             cvRangeMode = (json_integer_value(mode) == BIPOLAR_M5_5) ? BIPOLAR_M5_5 : UNIPOLAR_0_10;
     }
 
+    // Maps raw CV volts to a +-1 multiplier. Bipolar clamps so a large CV
+    // cannot overshoot; unipolar simply divides by 10 (original behaviour).
     float scaleCV(float v) const
     {
         if (cvRangeMode == BIPOLAR_M5_5)
@@ -139,6 +162,8 @@ struct Mixer6 : Module
             float cv = inputs[INPUT_CH1_CV + ch].getVoltage();
             float cvOffset = scaleCV(cv) * attenuverter;
 
+            // Knob + CV, kept in 0..1: the mixer never inverts phase and never
+            // goes above unity per channel.
             float gain = levelKnob + cvOffset;
             if (gain < 0.f)
                 gain = 0.f;
@@ -160,10 +185,13 @@ struct Mixer6 : Module
         outputs[OUTPUT_R].setVoltage(outR);
 
         // ---- display tracking ----
+        // Peak meters with a ~0.25 s release.
         float decay = 1.f - 4.f * args.sampleTime;
         peakL = std::max(std::fabs(outL), peakL * decay);
         peakR = std::max(std::fabs(outR), peakR * decay);
 
+        // Scope: fold the stereo mix to mono, accumulate min/max, and commit a
+        // column every ~2.5 ms. 96 columns therefore cover ~240 ms.
         float mono = 0.5f * (outL + outR);
         if (scopeCount == 0)
             scopeBMin = scopeBMax = mono;
@@ -220,6 +248,12 @@ static const float MX_OUT_OFFSET = 85.f, MX_OUT_W = 62.f;
 namespace
 {
 
+    // ------------------------------------------------------------
+    // Panel background
+    //
+    // Static artwork only. Each channel plate is drawn by hand because it
+    // stacks four label rows; the master row uses the shared cell helper.
+    // ------------------------------------------------------------
     struct MxPanelBackground : TransparentWidget
     {
         MxPanelBackground() { box.size = Vec(MX_PANEL_W, MX_PANEL_H); }
@@ -239,18 +273,21 @@ namespace
                 const float lx = cx - MX_JACK_OFFSET, rx = cx + MX_JACK_OFFSET;
                 agmm::plate(vg, cx, top, MX_PLATE_W, MX_PLATE_H, false);
 
+                // Channel title, then the L/R pair above their jacks.
                 snprintf(buf, sizeof(buf), "CH %d", ch + 1);
                 agmm::text(vg, cx, top + 9.f, buf, 8.f, agmm::accent(), agmm::ALIGN_C, 0.5f);
 
                 agmm::text(vg, lx, top + 21.f, "L", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
                 agmm::text(vg, rx, top + 21.f, "R", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
 
+                // Level, then CV and ATT each get their own caption row.
                 agmm::text(vg, cx, top + 58.f, "LEVEL", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
                 agmm::text(vg, cx, top + 100.f, "CV", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
                 agmm::text(vg, cx, top + 135.f, "ATT", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
             }
 
             // ---- master: outputs tinted ----
+            // The two outputs sit symmetrically around the centred GAIN cell.
             agmm::sectionHeader(vg, MX_PANEL_W, MX_SEC_MASTER_Y, "MASTER", 14.f);
             agmm::cell(vg, MX_GAIN_CX - MX_OUT_OFFSET, MX_MASTER_TOP, MX_OUT_W, MX_MASTER_H, "L OUT", true, 7.f);
             agmm::cell(vg, MX_GAIN_CX, MX_MASTER_TOP, MX_GAIN_W, MX_MASTER_H, "GAIN", false, 7.f);
@@ -262,6 +299,9 @@ namespace
 
     // ------------------------------------------------------------
     // Scope display + L/R level meters, readouts in their own row
+    //
+    // Layer 0: screen, scope grid, divider.
+    // Layer 1: live trace, meters, PK/GAIN readouts.
     // ------------------------------------------------------------
     struct MxDisplayWidget : TransparentWidget
     {
@@ -278,7 +318,7 @@ namespace
             NVGcontext *vg = args.vg;
             agmm::screen(vg, 0.f, 0.f, MX_DISP_W, MX_DISP_H);
 
-            // Faint grid over the scope area only
+            // Faint grid over the scope area only; the readout row stays clean.
             nvgBeginPath(vg);
             for (float x = 0.f; x <= MX_SCOPE_W; x += 28.f)
             {
@@ -315,6 +355,8 @@ namespace
             const float colW = MX_SCOPE_W / (float)MX_SCOPE_N;
             const float range = 10.f;
 
+            // One min/max rectangle per column: a filled envelope, so fast
+            // transients are never missed between columns.
             nvgSave(vg);
             nvgScissor(vg, 0.f, 0.f, MX_SCOPE_W, MX_SCOPE_H);
             nvgBeginPath(vg);
@@ -329,6 +371,7 @@ namespace
                 }
                 else
                 {
+                    // Demo waveform for the module browser (decaying burst).
                     float t = (float)i / MX_SCOPE_N;
                     float e = 3.5f * std::exp(-3.f * t) * (0.6f + 0.4f * std::sin(t * 90.f));
                     vmax = e;
@@ -349,7 +392,7 @@ namespace
                 agmm::meter(vg, MX_SCOPE_W + 4.f + ch * 7.f, 2.f, 5.f, MX_SCOPE_H - 4.f, peak / range);
             }
 
-            // Readout row
+            // Readout row: hotter peak on the left, master gain on the right.
             char buf[32];
             float gain = module ? module->params[Mixer6::PARAM_MASTER_GAIN].getValue() : 1.f;
             float peak = module ? std::max(module->peakL, module->peakR) : 0.f;
@@ -366,6 +409,9 @@ namespace
 
 // ============================================================
 // Module widget
+//
+// Order: panel background, then display, then controls. Widget indices use the
+// same strides as the DSP (2 for audio, 1 for CV).
 // ============================================================
 struct Mixer6Widget : ModuleWidget
 {
@@ -376,6 +422,7 @@ struct Mixer6Widget : ModuleWidget
 
         addChild(new MxPanelBackground());
 
+        // Four rack screws, one per corner.
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
@@ -403,6 +450,7 @@ struct Mixer6Widget : ModuleWidget
                 (Mixer6::ParamId)(Mixer6::PARAM_CH1_LEVEL + ch)));
 
             // CV input + attenuverter
+            // Narrow plate: CV and ATT are stacked, not side by side.
             addInput(createInputCentered<DarkPJ301MPort>(
                 Vec(cx, top + 114.f), module,
                 (Mixer6::InputId)(Mixer6::INPUT_CH1_CV + ch)));
@@ -412,6 +460,7 @@ struct Mixer6Widget : ModuleWidget
         }
 
         // Master gain + stereo outputs
+        // All three on one row, outputs symmetric around the gain knob.
         addParam(createParamCentered<RoundBlackKnob>(
             Vec(MX_GAIN_CX, MX_MASTER_TOP + 38.f), module, Mixer6::PARAM_MASTER_GAIN));
         addOutput(createOutputCentered<DarkPJ301MPort>(
@@ -429,6 +478,8 @@ struct Mixer6Widget : ModuleWidget
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("CV Range"));
 
+        // Local item: draws the checkmark and writes the mode back (persisted
+        // through dataToJson / dataFromJson).
         struct CVRangeItem : MenuItem
         {
             Mixer6 *module;

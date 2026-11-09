@@ -11,6 +11,16 @@ static const int M3_SCOPE_N = 96;
 
 // ============================================================
 // Stereo 3-channel mixer – per-channel L/R inputs, L/R outputs
+//
+// Each channel: gain = LEVEL knob + (CV * attenuverter), clamped to 0..1.
+// The clamped gain is applied to both L and R of that channel, the three
+// channels are summed, and the sum is scaled by MASTER GAIN.
+//
+// The CV scaling depends on a saved setting:
+//   UNIPOLAR_0_10 (default): 10 V -> +1.0, so CV can add up to full level.
+//   BIPOLAR_M5_5:            +-5 V -> +-1.0, clamped, so CV can boost/cut.
+// The attenuverter then scales that offset, so a negative value can invert
+// the CV action (e.g. ducking a channel).
 // ============================================================
 struct Mixer3 : Module
 {
@@ -22,6 +32,9 @@ struct Mixer3 : Module
     CVRange cvRangeMode = UNIPOLAR_0_10; // default = original cv/10 behaviour
 
     // Display state
+    //
+    // Scope is a min/max envelope per column (96 columns), written by the audio
+    // thread and read by the UI. Torn reads only affect the drawing.
     float scopeMin[M3_SCOPE_N] = {};
     float scopeMax[M3_SCOPE_N] = {};
     int scopeHead = 0;
@@ -43,6 +56,9 @@ struct Mixer3 : Module
     enum InputId
     {
         // Interleaved so INPUT_CH1_L + ch*2 gives (L,R) for channel ch
+        //
+        // Audio jacks come first, then all three CV jacks; the DSP loop relies
+        // on both strides (2 for audio, 1 for CV).
         INPUT_CH1_L,
         INPUT_CH1_R,
         INPUT_CH2_L,
@@ -69,16 +85,20 @@ struct Mixer3 : Module
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
+        // Levels start at 0: a freshly added mixer is silent until the user
+        // raises a channel, which is the expected behaviour for a mixer.
         configParam(PARAM_CH1_LEVEL, 0.f, 1.f, 0.f, "Channel 1 level", "%", 0.f, 100.f);
         configParam(PARAM_CH2_LEVEL, 0.f, 1.f, 0.f, "Channel 2 level", "%", 0.f, 100.f);
         configParam(PARAM_CH3_LEVEL, 0.f, 1.f, 0.f, "Channel 3 level", "%", 0.f, 100.f);
 
+        // Attenuverters are bipolar and default to 0 (no CV influence).
         configParam(PARAM_CH1_ATTV, -1.f, 1.f, 0.f, "Channel 1 CV attenuverter", "%", 0.f, 100.f);
         configParam(PARAM_CH2_ATTV, -1.f, 1.f, 0.f, "Channel 2 CV attenuverter", "%", 0.f, 100.f);
         configParam(PARAM_CH3_ATTV, -1.f, 1.f, 0.f, "Channel 3 CV attenuverter", "%", 0.f, 100.f);
 
         configParam(PARAM_MASTER_GAIN, 0.f, 2.f, 1.f, "Master gain", "%", 0.f, 100.f);
 
+        // Name the jacks per channel; indices follow the interleaved enum.
         for (int ch = 0; ch < 3; ++ch)
         {
             std::string n = std::to_string(ch + 1);
@@ -104,6 +124,10 @@ struct Mixer3 : Module
             cvRangeMode = (json_integer_value(mode) == BIPOLAR_M5_5) ? BIPOLAR_M5_5 : UNIPOLAR_0_10;
     }
 
+    // Maps a raw CV voltage to a +-1 range multiplier.
+    //
+    // Note the asymmetry between the modes: bipolar clamps to [-1, 1] so a
+    // large CV cannot overshoot, while unipolar simply divides by 10.
     float scaleCV(float v) const
     {
         if (cvRangeMode == BIPOLAR_M5_5)
@@ -124,6 +148,8 @@ struct Mixer3 : Module
             float cv = inputs[INPUT_CH1_CV + ch].getVoltage();
             float cvOffset = scaleCV(cv) * attenuverter;
 
+            // Final channel gain: knob + CV offset, kept in 0..1 so a channel
+            // can never phase-invert or amplify above unity.
             float gain = levelKnob + cvOffset;
             if (gain < 0.f)
                 gain = 0.f;
@@ -145,10 +171,13 @@ struct Mixer3 : Module
         outputs[OUTPUT_R].setVoltage(outR);
 
         // ---- display tracking ----
+        // Peak meters with a ~0.25 s release (4/sampleRate is the decay factor).
         float decay = 1.f - 4.f * args.sampleTime;
         peakL = std::max(std::fabs(outL), peakL * decay);
         peakR = std::max(std::fabs(outR), peakR * decay);
 
+        // Scope: fold to mono, track min/max, and commit one column roughly
+        // every 2.5 ms (bucket), so 96 columns cover ~240 ms of audio.
         float mono = 0.5f * (outL + outR);
         if (scopeCount == 0)
             scopeBMin = scopeBMax = mono;
@@ -205,6 +234,13 @@ static const float M3_OUT_W = 62.f;
 namespace
 {
 
+    // ------------------------------------------------------------
+    // Panel background
+    //
+    // Static artwork only. The three channel plates are drawn by hand (rather
+    // than with agmm::cell) because each one holds several rows of labels and
+    // jacks; the master row uses the shared cell helper.
+    // ------------------------------------------------------------
     struct M3PanelBackground : TransparentWidget
     {
         M3PanelBackground() { box.size = Vec(M3_PANEL_W, M3_PANEL_H); }
@@ -224,12 +260,14 @@ namespace
                 const float lx = cx - M3_JACK_OFFSET, rx = cx + M3_JACK_OFFSET;
                 agmm::plate(vg, cx, top, M3_PLATE_W, M3_PLATE_H, false);
 
+                // Channel title in the accent colour, then the L/R pair.
                 snprintf(buf, sizeof(buf), "CH %d", ch + 1);
                 agmm::text(vg, cx, top + 9.f, buf, 8.f, agmm::accent(), agmm::ALIGN_C, 1.f);
 
                 agmm::text(vg, lx, top + 22.f, "L", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
                 agmm::text(vg, rx, top + 22.f, "R", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
 
+                // Level knob sits between its caption and the CV row.
                 agmm::text(vg, cx, top + 62.f, "LEVEL", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
 
                 agmm::text(vg, lx, top + 106.f, "CV", 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
@@ -248,6 +286,9 @@ namespace
 
     // ------------------------------------------------------------
     // Scope display + L/R level meters, readouts in their own row
+    //
+    // Layer 0 draws the screen, the scope grid and the divider.
+    // Layer 1 draws the live trace, the two meters and the readout row.
     // ------------------------------------------------------------
     struct M3DisplayWidget : TransparentWidget
     {
@@ -265,6 +306,8 @@ namespace
             agmm::screen(vg, 0.f, 0.f, M3_DISP_W, M3_DISP_H);
 
             // Faint grid over the scope area only
+            // Vertical lines every 28 px plus a centre line; the readout row
+            // below stays clean.
             nvgBeginPath(vg);
             for (float x = 0.f; x <= M3_SCOPE_W; x += 28.f)
             {
@@ -301,6 +344,8 @@ namespace
             const float colW = M3_SCOPE_W / (float)M3_SCOPE_N;
             const float range = 10.f; // +-10 V display range for a hot mixer
 
+            // Scope trace: one min/max rectangle per column. The left channel
+            // is the bright one; the mix is mono here, so L and R share it.
             nvgSave(vg);
             nvgScissor(vg, 0.f, 0.f, M3_SCOPE_W, M3_SCOPE_H);
             nvgBeginPath(vg);
@@ -315,6 +360,7 @@ namespace
                 }
                 else
                 {
+                    // Demo waveform for the module browser (decaying burst).
                     float t = (float)i / M3_SCOPE_N;
                     float e = 3.5f * std::exp(-3.f * t) * (0.6f + 0.4f * std::sin(t * 90.f));
                     vmax = e;
@@ -336,6 +382,7 @@ namespace
             }
 
             // Readout row
+            // Left: the hotter of the two peak meters. Right: master gain.
             char buf[32];
             float gain = module ? module->params[Mixer3::PARAM_MASTER_GAIN].getValue() : 1.f;
             float peak = module ? std::max(module->peakL, module->peakR) : 0.f;
@@ -352,6 +399,9 @@ namespace
 
 // ============================================================
 // Module widget
+//
+// Order: panel background, then display, then the controls. Indices for the
+// per-channel widgets are derived with the same strides the DSP uses.
 // ============================================================
 struct Mixer3Widget : ModuleWidget
 {
@@ -362,6 +412,7 @@ struct Mixer3Widget : ModuleWidget
 
         addChild(new M3PanelBackground());
 
+        // Four rack screws, one per corner.
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
@@ -376,6 +427,7 @@ struct Mixer3Widget : ModuleWidget
             const float lx = cx - M3_JACK_OFFSET, rx = cx + M3_JACK_OFFSET;
 
             // Stereo input pair
+            // L on the left, R on the right; +38 is the jack row.
             addInput(createInputCentered<DarkPJ301MPort>(
                 Vec(lx, top + 38.f), module, (Mixer3::InputId)(Mixer3::INPUT_CH1_L + ch * 2)));
             addInput(createInputCentered<DarkPJ301MPort>(
@@ -386,6 +438,7 @@ struct Mixer3Widget : ModuleWidget
                 Vec(cx, top + 82.f), module, (Mixer3::ParamId)(Mixer3::PARAM_CH1_LEVEL + ch)));
 
             // CV input jack + attenuverter
+            // Same L/R split as the audio pair, one row lower.
             addInput(createInputCentered<DarkPJ301MPort>(
                 Vec(lx, top + 122.f), module, (Mixer3::InputId)(Mixer3::INPUT_CH1_CV + ch)));
             addParam(createParamCentered<Trimpot>(
@@ -393,6 +446,7 @@ struct Mixer3Widget : ModuleWidget
         }
 
         // Master gain + stereo outputs
+        // All three sit on the same row (+38 inside the master plates).
         addParam(createParamCentered<RoundBlackKnob>(
             Vec(M3_GAIN_CX, M3_MASTER_TOP + 38.f), module, Mixer3::PARAM_MASTER_GAIN));
         addOutput(createOutputCentered<DarkPJ301MPort>(
@@ -410,6 +464,8 @@ struct Mixer3Widget : ModuleWidget
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("CV Range"));
 
+        // Small local menu item that shows a checkmark for the active mode and
+        // writes the mode back into the module (saved via dataToJson).
         struct CVRangeItem : MenuItem
         {
             Mixer3 *module;

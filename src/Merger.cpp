@@ -6,6 +6,17 @@
 #include <algorithm>
 #include <memory>
 
+// =============================================================================
+// MERGER — 16 monophonic inputs -> one polyphonic output
+//
+// Each of the 16 inputs becomes one channel of the poly cable. The output
+// channel count is the highest connected input, so patching input 9 gives a
+// 9-channel cable even if inputs 1..8 are empty; the empty ones simply carry
+// 0 V. That keeps the channel numbering stable (input N always = channel N)
+// instead of compacting the cable, which would silently re-pitch downstream
+// modules whenever a cable is added or removed.
+// =============================================================================
+
 // ------------------------------------------------------------
 // Layout (12 HP = 180 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -41,6 +52,7 @@ struct Merger : Module
     };
     enum InputId
     {
+        // 16 inputs, numbered 1..16 in the 4 x 4 grid.
         ENUMS(MERGE_INPUT, 16),
         INPUTS_LEN
     };
@@ -55,6 +67,7 @@ struct Merger : Module
     };
 
     // Shown on the display
+    // Written by the audio thread, read by the UI: a torn read is cosmetic.
     int channels = 0;
     bool active[16] = {};
 
@@ -79,6 +92,7 @@ struct Merger : Module
         }
         channels = last;
 
+        // Only `last` channels are published; the rest of the cable stays unused.
         outputs[POLY_OUTPUT].setChannels(last);
         for (int i = 0; i < last; ++i)
             outputs[POLY_OUTPUT].setVoltage(inputs[MERGE_INPUT + i].getVoltage(), i);
@@ -91,6 +105,12 @@ struct Merger : Module
 namespace
 {
 
+    // ------------------------------------------------------------
+    // Panel background
+    //
+    // Static artwork only: panel base, display bezel, the INPUTS section with
+    // its 4 x 4 numbered plates, and the OUTPUT section with the poly jack.
+    // ------------------------------------------------------------
     struct MGPanelBackground : TransparentWidget
     {
         MGPanelBackground() { box.size = Vec(MG_PANEL_W, MG_PANEL_H); }
@@ -102,6 +122,8 @@ namespace
             agmm::bezel(vg, MG_DISP_X, MG_DISP_Y, MG_DISP_W, MG_DISP_H);
 
             // ---- inputs ----
+            // Numbers run left-to-right, top-to-bottom (1..16), matching the
+            // order in which the jacks are added in the widget below.
             agmm::sectionHeader(vg, MG_PANEL_W, MG_SECTION_IN_Y, "INPUTS", 12.f);
             for (int r = 0; r < 4; ++r)
             {
@@ -114,6 +136,7 @@ namespace
             }
 
             // ---- output ----
+            // `true` tints the plate: outputs are drawn differently from inputs.
             agmm::sectionHeader(vg, MG_PANEL_W, MG_SECTION_OUT_Y, "OUTPUT", 12.f);
             agmm::cell(vg, MG_OUT_X, MG_OUT_TOP, MG_OUT_W, MG_OUT_H, "POLY OUT", true, 7.f);
 
@@ -123,6 +146,9 @@ namespace
 
     // ------------------------------------------------------------
     // Channel count display
+    //
+    // Layer 0: screen background + divider line.
+    // Layer 1: caption, big channel number and the 16-segment bar.
     // ------------------------------------------------------------
     struct MGDisplayWidget : TransparentWidget
     {
@@ -160,6 +186,8 @@ namespace
             NVGcontext *vg = args.vg;
 
             // State (module is null in the module browser: show a demo)
+            // The demo has 8 channels with channel 4 missing, so all three
+            // segment styles are visible in the browser preview.
             int ch = 8;
             bool act[16];
             for (int i = 0; i < 16; ++i)
@@ -175,6 +203,7 @@ namespace
             agmm::text(vg, MG_DISP_W / 2.f, 8.f, "CHANNELS", 7.f, agmm::dim(), agmm::ALIGN_C, 2.f);
 
             // Big number
+            // Zero channels is drawn dimmer, as a hint that nothing is patched.
             char buf[8];
             snprintf(buf, sizeof(buf), "%d", ch);
             agmm::text(vg, MG_DISP_W / 2.f, 26.f, buf, 24.f,
@@ -183,6 +212,7 @@ namespace
             // 16-segment bar: bright = connected, outlined = inside range but
             // unconnected (carries 0 V), very dim = unused
             const float pitch = 7.5f, segW = 5.5f, segH = 5.f;
+            // Centre the whole 16-segment row inside the display width.
             const float x0 = (MG_DISP_W - (16.f * pitch - (pitch - segW))) / 2.f;
             const float y0 = 46.f;
             for (int i = 0; i < 16; ++i)
@@ -192,11 +222,13 @@ namespace
                 nvgRoundedRect(vg, sx, y0, segW, segH, 1.f);
                 if (act[i])
                 {
+                    // Solid: this input has a cable.
                     nvgFillColor(vg, agmm::accent());
                     nvgFill(vg);
                 }
                 else if (i < ch)
                 {
+                    // Outline: inside the cable's channel range but silent.
                     nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
                     nvgFill(vg);
                     nvgBeginPath(vg);
@@ -207,6 +239,7 @@ namespace
                 }
                 else
                 {
+                    // Dim: beyond the current channel count.
                     nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
                     nvgFill(vg);
                 }
@@ -220,6 +253,9 @@ namespace
 
 // ------------------------------------------------------------
 // Module widget
+//
+// Order matters: panel background first, then the display, then the jacks.
+// Input indices are r * 4 + c so the on-panel numbers match the channel order.
 // ------------------------------------------------------------
 struct MergerWidget : ModuleWidget
 {
@@ -230,6 +266,7 @@ struct MergerWidget : ModuleWidget
 
         addChild(new MGPanelBackground());
 
+        // Four rack screws, one per corner.
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
@@ -238,6 +275,8 @@ struct MergerWidget : ModuleWidget
         addChild(new MGDisplayWidget(module));
 
         // 16 inputs in a 4 x 4 grid (row by row)
+        // Jack centre is 27 px below the plate top, which leaves room for the
+        // number label at +10.
         for (int r = 0; r < 4; ++r)
         {
             for (int c = 0; c < 4; ++c)

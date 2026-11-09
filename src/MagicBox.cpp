@@ -8,6 +8,21 @@
 #include <algorithm>
 #include <memory>
 
+// =============================================================================
+// MAGICBOX — a waveshaper with a live transfer curve, a harmonic bar display
+// and two oscilloscope traces (input / output).
+//
+// Per channel:
+//   in -> auto-level (divide by a slow input peak) -> drive -> soft clip to
+//   [-1, 1] -> shaping function f(x) -> optional DC blocker -> rescale by the
+//   same gain -> wet/dry mix -> output level -> soft limiter -> out
+//
+// The display mirrors exactly that chain: the transfer plot draws f() over the
+// clipped input, the operating-point trail marks where the signal currently
+// sits, the eight harmonic bars come from a DFT of f(sin) at the current drive,
+// and the scopes show the captured input and output waveforms.
+// =============================================================================
+
 // ------------------------------------------------------------
 // Layout (18 HP = 270 x 380)
 // Every control sits in a plate with its label ABOVE it. Display rows:
@@ -39,6 +54,7 @@ static const float MB_HM_X0 = 6.f, MB_HM_W = 70.f;
 static const float MB_HM_TOP = 114.f, MB_HM_BASE = 160.f, MB_HM_LBL_Y = 167.f;
 
 // Scopes (display-local)
+// Two identical frames on the right: IN on top, OUT below.
 static const float MB_SC_X0 = 90.f, MB_SC_X1 = 222.f;
 static const float MB_CAP_IN_Y = 22.f, MB_CAP_OUT_Y = 100.f;
 static const float MB_SCI_Y0 = 28.f, MB_SCI_Y1 = 92.f;   // IN
@@ -59,11 +75,13 @@ static const float MB_IO_X[6] = {30.f, 72.f, 114.f, 156.f, 198.f, 240.f};
 // ------------------------------------------------------------
 // Shaping functions (shared by DSP and display)
 // ------------------------------------------------------------
+// Short names shown in the header and in the context menu.
 static const char *const MB_NAMES[MB_NUM_FUNCS] = {
     "A^2", "A^3", "sin(A)", "cos(A)", "tan(A)", "sqrt(A)", "cbrt(A)", "exp(A)",
     "sinh(A)", "cosh(A)", "tanh(A)", "fold(A)", "T3(A)", "T5(A)", "|A|",
     "half(A)", "asin(A)", "atan(A)", "log(A)", "crush(A)"};
 
+// One-line description of what each function does to the sound.
 static const char *const MB_DESC[MB_NUM_FUNCS] = {
     "Square: rectifies, octave up",
     "Cube: odd harmonics, soft fuzz",
@@ -87,52 +105,76 @@ static const char *const MB_DESC[MB_NUM_FUNCS] = {
     "Bit crusher: 9 levels"};
 
 // Raw function on x in [-1, 1]
+//
+// Notes on the scaled arguments: sin/cos/tan and the inverse trig functions are
+// fed half- or full-angle arguments so that the useful part of each curve fits
+// the input range; the Chebyshev polynomials are the usual T3/T5.
 static inline float mbRaw(float x, int f)
 {
     switch (f)
     {
     case 0:
+        // x^2: always positive -> full-wave rectification, octave up.
         return x * x;
     case 1:
+        // x^3: odd symmetry, adds 3rd-order harmonics (soft fuzz).
         return x * x * x;
     case 2:
+        // sin(pi/2 * x): smooth S-curve, saturates softly at +-1.
         return std::sin(1.5707963f * x);
     case 3:
+        // cos(pi * x): even symmetry, rectifying with octave doubling.
         return std::cos(3.1415927f * x);
     case 4:
+        // tan(1.2 * x): steeper than sin, bright mid emphasis.
         return std::tan(1.2f * x);
     case 5:
+        // signed sqrt: keeps the sign, boosts quiet detail.
         return std::sqrt(std::fabs(x)) * (x < 0.f ? -1.f : 1.f);
     case 6:
+        // cbrt: same idea but gentler.
         return std::cbrt(x);
     case 7:
+        // exp: asymmetric (positive side grows, negative side shrinks).
         return std::exp(x);
     case 8:
+        // sinh(2x): odd, expanding.
         return std::sinh(2.f * x);
     case 9:
+        // cosh(2x): even, rectifying.
         return std::cosh(2.f * x);
     case 10:
+        // tanh(3x): classic soft saturation.
         return std::tanh(3.f * x);
     case 11:
+        // triangle wavefolder: asin(sin(2*pi*x)) folds the signal back on itself.
         return 0.63661977f * std::asin(rack::math::clamp(std::sin(6.2831853f * x), -1.f, 1.f));
     case 12:
+        // Chebyshev T3: exactly the 3rd harmonic for a sine input.
         return 4.f * x * x * x - 3.f * x;
     case 13:
     {
+        // Chebyshev T5: 5th harmonic.
         float x2 = x * x;
         return x * (16.f * x2 * x2 - 20.f * x2 + 5.f);
     }
     case 14:
+        // |x|: full-wave rectifier.
         return std::fabs(x);
     case 15:
+        // max(x, 0): half-wave rectifier.
         return std::max(x, 0.f);
     case 16:
+        // asin: expands the ends, compresses the middle.
         return 0.63661977f * std::asin(rack::math::clamp(x, -1.f, 1.f));
     case 17:
+        // atan(4x): gentle soft clipper.
         return std::atan(4.f * x);
     case 18:
+        // signed log1p: logarithmic compressor.
         return std::log1p(8.f * std::fabs(x)) * (x < 0.f ? -1.f : 1.f);
     case 19:
+        // 9-level quantiser (steps of 0.25): bit crusher.
         return std::round(4.f * x) * 0.25f;
     default:
         return x;
@@ -141,6 +183,11 @@ static inline float mbRaw(float x, int f)
 
 // Every function is shifted so that f(0) = 0 (silence stays silent, no DC
 // at rest) and scaled so that its largest excursion on [-1, 1] is exactly 1.
+//
+// Without the offset, exp() or cosh() would output a constant at rest; without
+// the gain, each function would have a different loudness. Both are measured
+// once on a 512-point grid and stored in a function-local static (thread-safe
+// magic static, built on first use).
 struct MBNorm
 {
     float off[MB_NUM_FUNCS];
@@ -150,6 +197,7 @@ struct MBNorm
         for (int f = 0; f < MB_NUM_FUNCS; ++f)
         {
             off[f] = mbRaw(0.f, f);
+            // Small floor so a theoretically zero range never divides by zero.
             float m = 1e-3f;
             for (int i = 0; i <= 512; ++i)
             {
@@ -161,6 +209,7 @@ struct MBNorm
     }
 };
 
+// Lazily-built shared table (one instance for the whole plugin).
 static const MBNorm &mbNorm()
 {
     static const MBNorm n;
@@ -174,6 +223,9 @@ static inline float mbShape(float x, int f)
 }
 
 // Keeps the function argument inside [-1, 1]; linear up to 0.9, then a smooth knee
+//
+// The knee is what makes DRIVE behave like a drive control: below ~0.9 the
+// signal is untouched, above it the peaks are bent instead of clipped hard.
 static inline float mbSoftClip(float x)
 {
     float a = std::fabs(x);
@@ -193,6 +245,7 @@ static inline float mbLimit(float x)
     return (x < 0.f) ? -y : y;
 }
 
+// Rejects NaN/Inf and clamps to a sane voltage range at the input.
 static inline float mbSanitize(float v)
 {
     if (!std::isfinite(v))
@@ -201,6 +254,9 @@ static inline float mbSanitize(float v)
 }
 
 // Time knob: 0..1 -> 5 ms .. 4 s per screen
+//
+// 800 = 4 s / 5 ms, so the mapping is exponential (constant ratio per unit of
+// knob travel), which feels even across the whole range.
 struct MBTimeQ : rack::engine::ParamQuantity
 {
     std::string getDisplayValueString() override
@@ -251,8 +307,8 @@ struct MagicBox : Module
     };
     enum CapState
     {
-        CAP_RUN,
-        CAP_ARMED
+        CAP_RUN,  // filling columns
+        CAP_ARMED // waiting for the next trigger
     };
 
     // Settings (saved)
@@ -261,11 +317,16 @@ struct MagicBox : Module
 
     // DSP state
     float peak[2] = {0.f, 0.f};
+    // One-pole DC blocker state per channel (x = previous input, y = previous output).
     float dcX[2] = {0.f, 0.f}, dcY[2] = {0.f, 0.f};
     int funcCur = 0, funcPrev = 0;
     float xfade = 0.f;
+    // Current operating point (normalised input, shaped output) for the plot.
 
     // Scope capture: channels 0 = IN L, 1 = IN R, 2 = OUT L, 3 = OUT R
+    //
+    // The capture is a sweep: each column stores the min/max of the samples
+    // that fall into it, so the display is an envelope and never misses a peak.
     float scMin[4][MB_COLS] = {};
     float scMax[4][MB_COLS] = {};
     bool scValid[MB_COLS] = {};
@@ -283,6 +344,7 @@ struct MagicBox : Module
     float peakIn = 0.f, peakOut = 0.f, limitFlash = 0.f;
     bool vRConn = false, vLConn = false;
     float opN = 0.f, opY = 0.f;
+    // Recent operating points, sampled at ~90 Hz, for the dot trail.
     float trN[MB_TRAIL_N] = {}, trY[MB_TRAIL_N] = {};
     int trHead = 0, trCount = 0;
     float trTimer = 0.f;
@@ -291,12 +353,14 @@ struct MagicBox : Module
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
+        // The function list doubles as the switch's display names.
         std::vector<std::string> names;
         for (int i = 0; i < MB_NUM_FUNCS; ++i)
             names.push_back(MB_NAMES[i]);
         configSwitch(FUNC_PARAM, 0.f, (float)(MB_NUM_FUNCS - 1), 2.f, "Function", names);
 
         configParam<MBTimeQ>(TIME_PARAM, 0.f, 1.f, 0.22f, "Time scale");
+        // DRIVE is exponential: -2..+2 maps to 1/4x .. 4x.
         configParam(DRIVE_PARAM, -2.f, 2.f, 0.f, "Drive", "x", 2.f, 1.f);
         configParam(MIX_PARAM, 0.f, 1.f, 1.f, "Dry / wet", "%", 0.f, 100.f);
         configParam(LEVEL_PARAM, 0.f, 1.5f, 1.f, "Output level", "%", 0.f, 100.f);
@@ -324,6 +388,7 @@ struct MagicBox : Module
         std::memset(scMin, 0, sizeof(scMin));
         std::memset(scMax, 0, sizeof(scMax));
         std::memset(scValid, 0, sizeof(scValid));
+        // Back to "waiting for trigger" so the display restarts cleanly.
         capState = CAP_ARMED;
         capCol = 0;
         capCount = 0.f;
@@ -333,6 +398,7 @@ struct MagicBox : Module
     }
 
     // ---------------- scope capture ----------------
+    // Clears the screen and starts filling columns from column 0.
     void startSweep(const float *c)
     {
         capState = CAP_RUN;
@@ -343,6 +409,10 @@ struct MagicBox : Module
     }
 
     // c[0..3] = IN L, IN R, OUT L, OUT R (volts); trigV = trigger source
+    //
+    // A sweep is started either by a rising edge through zero (after going
+    // negative) or by a timeout, so a silent input still produces a trace
+    // instead of a frozen screen.
     void scopeStep(const float *c, float trigV, float dt, float fs, float timeScale)
     {
         // A big change of the time knob restarts the sweep with a clean screen
@@ -359,6 +429,7 @@ struct MagicBox : Module
             if (trigV < -0.05f)
                 trigLow = true;
             bool trig = trigLow && trigV > 0.f;
+            // Time-based fallback: shorter at fast time scales.
             float timeout = 0.03f + 0.1f * timeScale;
             if (trig || holdTimer > timeout)
             {
@@ -372,11 +443,13 @@ struct MagicBox : Module
             }
         }
 
+        // Track min/max for the current column.
         for (int i = 0; i < 4; ++i)
         {
             accMin[i] = std::min(accMin[i], c[i]);
             accMax[i] = std::max(accMax[i], c[i]);
         }
+        // Samples per column; at least 0.05 so very fast sweeps still advance.
         float spc = std::max(timeScale * fs / (float)MB_COLS, 0.05f); // samples per column
         capCount += 1.f;
         while (capCount >= spc && capCol < MB_COLS)
@@ -394,6 +467,7 @@ struct MagicBox : Module
         }
         if (capCol >= MB_COLS)
         {
+            // Screen full: stop and wait for the next trigger.
             capState = CAP_ARMED;
             holdTimer = 0.f;
         }
@@ -406,6 +480,7 @@ struct MagicBox : Module
         const float dt = args.sampleTime;
 
         // ---- parameters + CV ----
+        // Function CV sweeps all 20 functions over 0..10 V.
         float fv = params[FUNC_PARAM].getValue() + inputs[FUNC_CV_INPUT].getVoltage() * 0.1f * (float)(MB_NUM_FUNCS - 1);
         int func = rack::math::clamp((int)std::lround(fv), 0, MB_NUM_FUNCS - 1);
         if (func != funcCur)
@@ -415,10 +490,12 @@ struct MagicBox : Module
             xfade = 1.f; // short crossfade: no click when the function changes
         }
 
+        // Time CV sweeps the full 5 ms .. 4 s range.
         float tp = rack::math::clamp(
             params[TIME_PARAM].getValue() + inputs[TIME_CV_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
         float timeScale = 0.005f * std::pow(800.f, tp);
 
+        // exp2 maps -2..+2 to 0.25x..4x.
         float drive = std::exp2(params[DRIVE_PARAM].getValue());
         float mix = params[MIX_PARAM].getValue();
         float level = params[LEVEL_PARAM].getValue();
@@ -430,6 +507,7 @@ struct MagicBox : Module
         in[0] = mbSanitize(inputs[IN_L_INPUT].getVoltage());
         in[1] = rConn ? mbSanitize(inputs[IN_R_INPUT].getVoltage()) : in[0];
 
+        // Peak follower decay (~0.4 s) and DC-blocker coefficient (8 Hz).
         const float peakDecay = std::exp(-dt / 0.4f);
         const float dcR = rack::math::clamp(1.f - 6.2831853f * 8.f / fs, 0.9f, 0.99999f);
 
@@ -444,6 +522,8 @@ struct MagicBox : Module
             float g = 1.f;
             if (autoLevel)
             {
+                // Slow peak follower; the 0.02 floor prevents amplifying hiss
+                // when the input is silent.
                 peak[ch] = std::max(std::fabs(x), peak[ch] * peakDecay);
                 g = std::max(peak[ch], 0.02f); // noise floor: never amplify hiss
             }
@@ -452,11 +532,13 @@ struct MagicBox : Module
 
             float ys = mbShape(xs, funcCur);
             float w = ys;
+            // Crossfade from the previous function over ~8 ms.
             if (xfade > 0.f)
                 w += (mbShape(xs, funcPrev) - w) * xfade;
 
             if (dcBlock)
             {
+                // Standard one-pole high-pass: y = w - x_prev + R * y_prev.
                 float y = w - dcX[ch] + dcR * dcY[ch];
                 dcX[ch] = w;
                 dcY[ch] = y;
@@ -464,10 +546,12 @@ struct MagicBox : Module
             }
             else
             {
+                // Keep the state coherent in case DC blocking is switched on later.
                 dcX[ch] = w;
                 dcY[ch] = 0.f;
             }
 
+            // Undo the auto-level gain: the output level follows the input.
             float wet = w * g * 5.f;
             float o = (v + (wet - v) * mix) * level;
             if (std::fabs(o) > 8.f)
@@ -483,10 +567,12 @@ struct MagicBox : Module
 
             if (ch == 0)
             {
+                // Operating point used by the transfer plot (left channel).
                 opN = n;
                 opY = ys;
             }
         }
+        // 8 ms crossfade ramp.
         xfade = std::max(0.f, xfade - dt / 0.008f);
 
         outputs[OUT_L_OUTPUT].setVoltage(outv[0]);
@@ -494,6 +580,7 @@ struct MagicBox : Module
 
         // ---- scope ----
         float c[4] = {in[0], in[1], outv[0], outv[1]};
+        // Trigger on the left input when it is patched, otherwise on the right.
         scopeStep(c, lConn ? in[0] : in[1], dt, fs, timeScale);
 
         // ---- display data ----
@@ -503,11 +590,13 @@ struct MagicBox : Module
         vLConn = lConn;
         vRConn = rConn;
 
+        // Slower peak decay (~0.6 s) for the readable PK numbers.
         float pk = std::exp(-dt / 0.6f);
         peakIn = std::max(std::max(std::fabs(in[0]), std::fabs(in[1])), peakIn * pk);
         peakOut = std::max(std::max(std::fabs(outv[0]), std::fabs(outv[1])), peakOut * pk);
         limitFlash = limited ? 1.f : std::max(0.f, limitFlash - dt * 3.f);
 
+        // Transfer-plot trail: ~90 points per second.
         trTimer += dt;
         const float trStep = 1.f / 90.f;
         if (trTimer >= trStep)
@@ -548,6 +637,7 @@ struct MagicBox : Module
 namespace
 {
 
+    // Knob → parameter mapping, in visual order, with the label drawn above.
     struct MBKnob
     {
         int param;
@@ -561,6 +651,8 @@ namespace
         {MagicBox::LEVEL_PARAM, "LEVEL"},
     };
 
+    // Draws a dashed segment. Used for the identity line and for the two
+    // dashed guides that connect the live operating point to the axes.
     void dashedLine(NVGcontext *vg, float x0, float y0, float x1, float y1,
                     float dash, float gap, NVGcolor col)
     {
@@ -583,6 +675,9 @@ namespace
 
     // ------------------------------------------------------------
     // Panel background
+    //
+    // Pure artwork: panel base, the display bezel, the five knob plates and
+    // the six jack plates. No module state is read here.
     // ------------------------------------------------------------
     struct MBPanelBackground : TransparentWidget
     {
@@ -611,12 +706,16 @@ namespace
 
     // ------------------------------------------------------------
     // Display: transfer curve, harmonics, IN / OUT scopes
+    //
+    // Layer 0: screen, frames, grids, captions and static numbers.
+    // Layer 1: transfer curve + trail + live point, harmonic bars, scope traces.
     // ------------------------------------------------------------
     struct MBDisplayWidget : TransparentWidget
     {
         MagicBox *module = nullptr;
 
         // harmonic cache
+        // Recomputed only when the function or the drive changes.
         int hFunc = -1;
         float hDrive = -1.f;
         float hMag[8] = {};
@@ -627,6 +726,7 @@ namespace
             box.size = Vec(MB_DISP_W, MB_DISP_H);
         }
 
+        // Half-height inside a scope frame, with one pixel of inset.
         static float scopeHH(float y0, float y1) { return (y1 - y0) * 0.5f - 1.5f; }
 
         // ---- static scope frame + grid ----
@@ -636,6 +736,7 @@ namespace
 
             agmm::plotFrame(vg, x0, y0, w, y1 - y0);
 
+            // Vertical quarter lines.
             for (int i = 1; i < 4; ++i)
             {
                 float x = x0 + w * (float)i / 4.f;
@@ -646,6 +747,7 @@ namespace
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
             }
+            // Horizontal lines at +5 V, 0 V and -5 V (full scale here is 10 V).
             const float vs[3] = {5.f, 0.f, -5.f};
             for (int i = 0; i < 3; ++i)
             {
@@ -682,10 +784,12 @@ namespace
             nvgStroke(vg);
 
             // Transfer plot frame
+            // x runs -1..1 (normalised input), y runs -1..1 (shaped output).
             {
                 const float X0 = MB_TF_X0, Y0 = MB_TF_Y0, S = MB_TF_S;
                 agmm::plotFrame(vg, X0, Y0, S, S);
 
+                // Quarter grid, with a brighter centre cross.
                 for (int i = 1; i < 4; ++i)
                 {
                     float t = (float)i / 4.f * S;
@@ -705,6 +809,7 @@ namespace
             }
 
             // Harmonic grid and number row
+            // Four horizontal lines = 0, 12, 24, 36 dB below full scale.
             {
                 float hgt = MB_HM_BASE - MB_HM_TOP;
                 for (int i = 0; i <= 4; ++i)
@@ -717,6 +822,7 @@ namespace
                     nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 }
+                // Harmonic numbers 1..8 under the bars.
                 float pitch = MB_HM_W / 8.f;
                 for (int k = 0; k < 8; ++k)
                 {
@@ -738,6 +844,10 @@ namespace
         }
 
         // ---- harmonic analysis of a full-scale sine through the shaper ----
+        //
+        // A 128-point DFT is evaluated only at the first eight harmonics, which
+        // is all the display needs. Cheaper than a full FFT and exact at the
+        // bins we care about.
         void updateHarmonics(int func, float drive)
         {
             if (func == hFunc && std::fabs(drive - hDrive) < 1e-4f)
@@ -761,6 +871,10 @@ namespace
         }
 
         // ---- one scope ----
+        //
+        // Draws channel chL (and chR when showR) as a min/max envelope per
+        // column. `dimOld` + `cursor` split the screen into "already swept"
+        // (bright) and "previous sweep" (dim), which makes the trigger visible.
         void drawScope(NVGcontext *vg, float x0, float y0, float x1, float y1,
                        float (*mn)[MB_COLS], float (*mx)[MB_COLS], const bool *valid,
                        int chL, int chR, bool showR, int cursor, bool dimOld)
@@ -770,6 +884,7 @@ namespace
             nvgSave(vg);
             nvgScissor(vg, x0, y0, w, y1 - y0);
 
+            // Volts -> pixels, clamped slightly beyond the +-10 V full scale.
             auto yMap = [&](float v)
             {
                 v = rack::math::clamp(v, -10.5f, 10.5f);
@@ -786,6 +901,8 @@ namespace
                     return;
 
                 // envelope
+                // Fill the band between max and min: one closed path, max going
+                // left-to-right and min coming back.
                 int n = 0;
                 nvgBeginPath(vg);
                 for (int i = a; i < b; ++i)
@@ -811,6 +928,7 @@ namespace
                 nvgFillColor(vg, agmm::withA(col, 0.16f * alpha));
                 nvgFill(vg);
 
+                // Two crisp outlines: top edge (max) and bottom edge (min).
                 nvgLineCap(vg, NVG_ROUND);
                 nvgLineJoin(vg, NVG_ROUND);
                 for (int pass = 0; pass < 2; ++pass)
@@ -840,6 +958,7 @@ namespace
             int split = dimOld ? cursor : MB_COLS;
             if (showR)
             {
+                // Right channel first (drawn underneath), then the left one.
                 trace(chR, 0, split, agmm::warm(), 0.9f);
                 if (dimOld)
                     trace(chR, std::max(split - 1, 0), MB_COLS, agmm::warm(), 0.30f);
@@ -849,6 +968,7 @@ namespace
                 trace(chL, std::max(split - 1, 0), MB_COLS, agmm::bright(), 0.32f);
 
             // sweep cursor
+            // Vertical line at the write head while the sweep is running.
             if (dimOld && cursor < MB_COLS)
             {
                 float x = x0 + (float)cursor / (float)MB_COLS * w;
@@ -874,6 +994,8 @@ namespace
             NVGcontext *vg = args.vg;
 
             // ----- snapshot of the state -----
+            // Everything is copied once so the drawing code below never touches
+            // module memory in the middle of a frame.
             int func = 2;
             float drive = 1.f, timeScale = 0.022f, peakIn = 4.5f, peakOut = 4.8f, limitF = 0.f;
             float opN = 0.5f, opY = 0.f;
@@ -912,6 +1034,8 @@ namespace
             else
             {
                 // demo values for the module browser
+                // A 3-cycle sine through the selected function, so the preview
+                // looks like a working module without a running engine.
                 for (int i = 0; i < MB_COLS; ++i)
                 {
                     float t = (float)i / (float)(MB_COLS - 1);
@@ -939,6 +1063,9 @@ namespace
             nvgScissor(vg, 0, 0, MB_DISP_W, MB_DISP_H);
 
             // ================= transfer curve =================
+            // f(x) for x in [-1, 1], after the same drive + soft clip the audio
+            // path applies. The identity line behind it shows the unprocessed
+            // response for comparison.
             {
                 const float X0 = MB_TF_X0, Y0 = MB_TF_Y0, S = MB_TF_S;
                 auto px = [&](float x)
@@ -949,6 +1076,7 @@ namespace
                 nvgSave(vg);
                 nvgScissor(vg, X0, Y0, S, S);
 
+                // Sample the curve; 96 points is plenty at 70 px wide.
                 const int N = 96;
                 float cx[N], cy[N];
                 for (int i = 0; i < N; ++i)
@@ -968,6 +1096,7 @@ namespace
                 nvgFillColor(vg, agmm::withA(agmm::accent(), 0.10f));
                 nvgFill(vg);
 
+                // The curve itself.
                 nvgLineCap(vg, NVG_ROUND);
                 nvgLineJoin(vg, NVG_ROUND);
                 nvgBeginPath(vg);
@@ -979,6 +1108,7 @@ namespace
                 nvgStroke(vg);
 
                 // recent operating points (they all lie on the curve)
+                // Older points are smaller/fainter (age^2 fade).
                 for (int i = 0; i < trCount; ++i)
                 {
                     int idx = ((trHead - trCount + i) % MB_TRAIL_N + MB_TRAIL_N) % MB_TRAIL_N;
@@ -990,6 +1120,8 @@ namespace
                 }
 
                 // live point with guides
+                // Dashed guides connect the point to both axes so its input and
+                // output values can be read off the grid.
                 float mxp = px(opN), myp = py(opY);
                 dashedLine(vg, mxp + 0.5f, py(0.f), mxp + 0.5f, myp, 2.f, 2.f, agmm::withA(agmm::warm(), 0.5f));
                 dashedLine(vg, px(0.f), myp + 0.5f, mxp, myp + 0.5f, 2.f, 2.f, agmm::withA(agmm::bright(), 0.5f));
@@ -1002,6 +1134,8 @@ namespace
             }
 
             // ================= harmonic bars (flat) =================
+            // Each bar is one harmonic level in dB, mapped to 0..-48 dB.
+            // Odd harmonics cyan, even harmonics orange.
             {
                 float pitch = MB_HM_W / 8.f, bw = pitch - 2.5f;
                 float hgt = MB_HM_BASE - MB_HM_TOP;
@@ -1024,6 +1158,8 @@ namespace
             }
 
             // ================= scopes =================
+            // Old sweeps are dimmed only at slow time scales, where the trace
+            // would otherwise fill the whole screen between triggers.
             bool dimOld = (timeScale >= 0.1f);
             int cursor = (capState == MagicBox::CAP_RUN) ? capCol : MB_COLS;
             drawScope(vg, MB_SC_X0, MB_SCI_Y0, MB_SC_X1, MB_SCI_Y1, mn, mx, valid, 0, 1, rConn, cursor, dimOld);
@@ -1041,18 +1177,23 @@ namespace
                 agmm::text(vg, MB_SC_X1, MB_CAP_OUT_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_R, 0.5f);
 
                 // limiter chip between the two texts
+                // Lights up when the output stage hit the 8 V knee in the last
+                // ~0.33 s.
                 agmm::chip(vg, 140.f, MB_CAP_OUT_Y - 5.5f, 30.f, 11.f, "LIMIT", limitF > 0.02f, agmm::warm());
             }
 
             // ================= header row =================
             {
                 char buf[48];
+                // Left: active function name.
                 agmm::text(vg, 6.f, MB_HDR_Y, MB_NAMES[func], 8.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
 
+                // Centre: level mode + DC blocker + connection state.
                 snprintf(buf, sizeof(buf), "%s%s%s", autoLvl ? "AUTO" : "FIXED",
                          dcB ? "+DC" : "", lConn || rConn ? "" : " NO IN");
                 agmm::text(vg, 100.f, MB_HDR_Y, buf, 7.f, agmm::dim(), agmm::ALIGN_C, 0.5f);
 
+                // Right: sweep time in ms or s.
                 if (timeScale < 0.1f)
                     snprintf(buf, sizeof(buf), "%.1f ms", timeScale * 1000.f);
                 else if (timeScale < 1.f)
@@ -1076,6 +1217,9 @@ namespace
 
 // ------------------------------------------------------------
 // Module widget
+//
+// Order matters: panel background first, then the display, then controls.
+// All positions come from the layout constants so artwork and widgets align.
 // ------------------------------------------------------------
 struct MagicBoxWidget : ModuleWidget
 {
@@ -1086,6 +1230,7 @@ struct MagicBoxWidget : ModuleWidget
 
         addChild(new MBPanelBackground());
 
+        // Four rack screws, one per corner.
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
@@ -1094,6 +1239,7 @@ struct MagicBoxWidget : ModuleWidget
         addChild(new MBDisplayWidget(module));
 
         // Knobs
+        // One loop for all five: order matches MB_KNOBS / MB_KX.
         for (int k = 0; k < 5; ++k)
         {
             addParam(createParamCentered<RoundSmallBlackKnob>(
@@ -1117,6 +1263,7 @@ struct MagicBoxWidget : ModuleWidget
 
         menu->addChild(new ui::MenuSeparator);
 
+        // Function list with a one-line description next to each name.
         menu->addChild(createSubmenuItem("Function", "",
                                          [=](ui::Menu *submenu)
                                          {
@@ -1130,6 +1277,7 @@ struct MagicBoxWidget : ModuleWidget
                                              }
                                          }));
 
+        // Toggles that change how the shaper is fed / cleaned up.
         menu->addChild(createBoolPtrMenuItem("Auto level (normalise to input envelope)", "", &module->autoLevel));
         menu->addChild(createBoolPtrMenuItem("DC blocker (turn off for CV signals)", "", &module->dcBlock));
     }
