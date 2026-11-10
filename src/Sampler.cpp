@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cstdio>
@@ -10,6 +11,44 @@
 #include <mutex>
 #include <fstream>
 #include <osdialog.h>
+
+// ============================================================================
+// Sampler
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Sampler is a 36 HP mono/stereo sample recorder + player with a rich set of
+// playback features. It can record from the L/R inputs (either a brand-new
+// sample or, in Sound-on-Sound mode, overdub onto the existing one), load and
+// save WAV files, and play back with adjustable speed / V-Oct tuning, start
+// position, loop length, forward/reverse direction, one-shot / loop /
+// ping-pong play modes, anti-click fades, a simple A-D envelope (with optional
+// sustain gate), a loop crossfade and a configurable input/playback mix.
+//
+// Signal flow (per sample):
+//   inputs L/R
+//     -> (record path) temp buffers + waveform overview
+//     -> (playback path) read at speed from the buffer region
+//        [start, start + length] -> envelope -> level
+//     -> mix (input + playback), monitored by LINE/MIX
+//     -> outputs L/R
+//
+// Side outputs: EOC trigger (fires on loop wrap and one-shot end), Play gate,
+// Record gate, envelope CV. A stereo-to-mono normalling rule means a single
+// cable on the left input is duplicated to the right.
+//
+// File structure:
+//   1. Constants and layout (36 HP = 540x380 px).
+//   2. SamplerEnvelope helper struct (simple attack / decay with sustain).
+//   3. spLoadWav / spSaveWav — self-contained 16-bit PCM WAV I/O.
+//   4. Sampler module: state, DSP, recording/overdub, transport, and JSON
+//      persistence.
+//   5. Anonymous-namespace UI: colour helpers, panel background, interactive
+//      waveform display, per-parameter readouts, sample info strip.
+//   6. SamplerWidget: places all controls and the right-click menu.
+//   7. Model registration.
+// ============================================================================
 
 // ------------------------------------------------------------
 // Constants
@@ -29,51 +68,48 @@ static const float SP_PI = 3.14159265358979323846f;
 static const float SP_PANEL_W = RACK_GRID_WIDTH * 36; // 540
 static const float SP_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Waveform display
+// Waveform display (title sits at y = 15, bezel starts at y = 24)
 static const float SP_DISP_X = 130.f;
-static const float SP_DISP_Y = 46.f;
+static const float SP_DISP_Y = 28.f;
 static const float SP_DISP_W = 280.f;
 static const float SP_DISP_H = 104.f;
 static const float SP_WF_X0 = 18.f; // waveform area inside the display
-static const float SP_WF_Y0 = 18.f;
-static const float SP_WF_H = 68.f;
+static const float SP_WF_Y0 = 20.f;
+static const float SP_WF_H = 60.f;
 static const int SP_WF_W = 244;
 
-// Centre control grid: 5 columns x 2 rows of 58 x 78 cells
-static const float SP_CX[5] = {149.f, 210.f, 271.f, 332.f, 393.f};
-static const float SP_R1 = 176.f; // top of row 1
-static const float SP_R2 = 260.f; // top of row 2
-static const float SP_CELL_W = 58.f;
-static const float SP_CELL_H = 78.f;
-static const float SP_KNOB_DY = 18.f; // knob centre below cell top
-static const float SP_LABEL_DY = 39.f;
-static const float SP_JACK_DY = 56.f; // CV jack / trimpot / value readout
-static const float SP_TINY_DY = 73.f;
-static const float SP_SW_DY = 24.f; // switch centre
-static const float SP_SWREAD_DY = 51.f;
-static const float SP_SWLABEL_DY = 66.f;
+// Sample info strip, directly under the display
+static const float SP_INFO_X = 130.f;
+static const float SP_INFO_Y = 141.f;
+static const float SP_INFO_W = 280.f;
+static const float SP_INFO_H = 16.f;
 
-// Side blocks
+// Centre control grid: 5 columns x 2 rows of 58 px wide cells
+static const float SP_CX[5] = {149.f, 210.f, 271.f, 332.f, 393.f};
+static const float SP_CELL_W = 58.f;
+static const float SP_PB_Y = 167.f; // "PLAYBACK" header
+static const float SP_R1 = 174.f;   // top of row 1
+static const float SP_R1_H = 88.f;
+static const float SP_R2 = 267.f; // top of row 2
+static const float SP_R2_H = 78.f;
+// offsets from the top of a cell (label is at +10)
+static const float SP_KNOB_DY = 32.f;  // row 1 knob centre
+static const float SP_JACK_DY = 62.f;  // CV jack / trimpot / value readout
+static const float SP_TINY_DY = 80.f;  // CV / ATT captions
+static const float SP_SW_DY = 36.f;    // row 2 switch centre
+static const float SP_KNOB2_DY = 34.f; // row 2 knob centre
+static const float SP_READ2_DY = 62.f; // row 2 value readout
+
+// Side blocks: two columns of 40 px wide plates
 static const float SP_LCOL[2] = {34.f, 90.f};
 static const float SP_RCOL[2] = {452.f, 508.f};
-
-// Left block rows
-static const float SP_Y_MIX = 148.f;  // MIX knob + CLEAR button
-static const float SP_Y_SOS = 200.f;  // SOS + LINE buttons
-static const float SP_Y_REC = 284.f;  // REC button + trigger jack
-static const float SP_Y_PLAY = 336.f; // PLAY button + trigger jack
-// Right block bottom row
-static const float SP_Y_RKNOB = 336.f; // SMOOTH + SOS FB knobs
-
-// Sample info strip
-static const float SP_INFO_X = 120.f;
-static const float SP_INFO_Y = 344.f;
-static const float SP_INFO_W = 302.f;
-static const float SP_INFO_H = 22.f;
+static const float SP_SIDE_W = 40.f;
 
 // ------------------------------------------------------------
 // Simple Attack-Decay/Release Envelope
 // ------------------------------------------------------------
+// A minimal two-stage envelope (attack then decay) that optionally sustains
+// at full level while a gate is held. Used to shape the sampler's playback.
 struct SamplerEnvelope
 {
     enum Stage
@@ -87,17 +123,22 @@ struct SamplerEnvelope
     float attackTime = 0.0f; // seconds
     float decayTime = 0.5f;  // seconds
 
+    // Restarts the envelope from the beginning (retrigger).
     void trigger()
     {
         stage = ATTACK;
     }
 
+    // Returns the envelope to IDLE with zero output.
     void reset()
     {
         stage = IDLE;
         level = 0.0f;
     }
 
+    // Advances the envelope by dt and returns its current level (0..1).
+    // `sustained` keeps the envelope at full level during decay (gate held or
+    // decay time is essentially infinite).
     float process(float dt, bool sustained)
     {
         if (stage == ATTACK)
@@ -152,6 +193,11 @@ struct SamplerEnvelope
 // ------------------------------------------------------------
 // Self-contained WAV loading and saving
 // ------------------------------------------------------------
+// Loads a WAV file at `path` into `left`/`right` (in raw normalised units
+// -1..+1; the caller scales by SP_WAV_FULLSCALE) and optionally writes the
+// file's sample rate to `fileSampleRate`. Supports PCM 8/16/24/32-bit and
+// IEEE 32-bit float, with WAVE_FORMAT_EXTENSIBLE detection. Mono files are
+// duplicated into both channels. Returns true on success.
 static bool spLoadWav(const std::string &path, std::vector<float> &left, std::vector<float> &right, float *fileSampleRate)
 {
     std::ifstream file(path, std::ios::binary);
@@ -299,6 +345,9 @@ static bool spLoadWav(const std::string &path, std::vector<float> &left, std::ve
     return foundFmt && foundData && !left.empty();
 }
 
+// Saves `left`/`right` (in volts) as a 16-bit PCM stereo WAV at `sampleRate`.
+// Samples are scaled by SP_WAV_FULLSCALE and clipped to ±32767. Returns true
+// on success.
 static bool spSaveWav(const std::string &path, const std::vector<float> &left, const std::vector<float> &right, float sampleRate)
 {
     if (left.empty())
@@ -354,6 +403,8 @@ static bool spSaveWav(const std::string &path, const std::vector<float> &left, c
 // ------------------------------------------------------------
 // Module
 // ------------------------------------------------------------
+// Sampler module: state (buffers, atomics, envelope), DSP, recording /
+// overdub, sample editing helpers, and JSON persistence.
 struct Sampler : Module
 {
     // NOTE: new params are appended at the end so old patches keep their values.
@@ -462,6 +513,8 @@ struct Sampler : Module
     float meterInL = 0.f, meterInR = 0.f, meterOutL = 0.f, meterOutR = 0.f;
     float displaySpeed = 1.f;
 
+    // Constructor: configures every parameter, input, output and light,
+    // reserves the temp/peak buffers, and sets up the defaults.
     Sampler()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -487,6 +540,9 @@ struct Sampler : Module
         configSwitch(SOS_SWITCH, 0.f, 1.f, 0.f, "Sound on sound (record overdubs onto the sample)", {"Off", "On"});
         configParam(DECLICK_PARAM, 0.f, 100.f, 3.f, "Start / end smoothing (anti-click fade)", " ms");
         configParam(SOS_FDBK_PARAM, 0.f, 1.f, 1.f, "Sound on sound: old material level", "%", 0.f, 100.f);
+
+        configBypass(LEFT_INPUT, LEFT_OUTPUT);
+        configBypass(RIGHT_INPUT, RIGHT_OUTPUT);
 
         configInput(LEFT_INPUT, "Left (mono if the right input is empty)");
         configInput(RIGHT_INPUT, "Right");
@@ -517,6 +573,8 @@ struct Sampler : Module
     }
 
     // ---------- helpers (the *Locked ones expect bufferMutex to be held) ----------
+    // Reads `buffer` at fractional position `pos` with linear interpolation,
+    // clamping `pos` into the valid range.
     inline float getInterpolated(const std::vector<float> &buffer, float pos)
     {
         size_t size = buffer.size();
@@ -532,6 +590,8 @@ struct Sampler : Module
         return buffer[idx] * (1.0f - frac) + buffer[nextIdx] * frac;
     }
 
+    // Recomputes the min/max overview used by the waveform display from the
+    // current sample. Caller must hold bufferMutex.
     void rebuildPeaksLocked()
     {
         size_t n = leftSamples.size();
@@ -551,13 +611,15 @@ struct Sampler : Module
                 float l = leftSamples[j];
                 float r = j < rightSamples.size() ? rightSamples[j] : l;
                 mn = std::min(mn, std::min(l, r));
-                mx = std::max(mx, std::max(l, r));
+                mx = std::max(mx, mx);
             }
             peakMin[b] = mn;
             peakMax[b] = mx;
         }
     }
 
+    // Clears the sample, recording state, playhead, envelope and all overview
+    // buffers. Caller must hold bufferMutex.
     void clearLocked()
     {
         isRecording = false;
@@ -578,6 +640,11 @@ struct Sampler : Module
         env.reset();
     }
 
+    // Starts a new recording session. If `sos` is true and a sample already
+    // exists, this becomes a Sound-on-Sound overdub at the current playhead;
+    // otherwise the temp buffers are reset and a fresh recording begins.
+    // `triggerPlay` is set when playback should also (re)start. Caller must
+    // hold bufferMutex.
     void startRecordingLocked(bool &triggerPlay, bool sos)
     {
         if (sos && !leftSamples.empty())
@@ -608,6 +675,10 @@ struct Sampler : Module
         env.reset();
     }
 
+    // Finishes the current recording. Overdubs simply end; a normal
+    // recording is moved from the temp buffers into the live sample, the
+    // waveform overview is rebuilt, and (if autoPlay) playback starts.
+    // Caller must hold bufferMutex.
     void stopRecordingLocked(bool &triggerPlay)
     {
         if (sosOverdub.load())
@@ -641,6 +712,10 @@ struct Sampler : Module
     }
 
     // Sound on sound write: new = old * fb + input, for every buffer index the playhead crossed
+    // Writes input onto the existing sample at index range `[sosLastIdx+1, idx]`
+    // (bounded and clamped) so that a slowing playhead still writes each
+    // sample only once. Also refreshes the affected overview bin. Caller
+    // must hold bufferMutex.
     void overdubLocked(long idx, float inL, float inR, float fb)
     {
         long n = (long)leftSamples.size();
@@ -691,6 +766,8 @@ struct Sampler : Module
     }
 
     // ---------- sample editing (right-click menu) ----------
+    // Loads a WAV file from `path` into the live sample, resets the playhead,
+    // records the path for later saves, and rebuilds the overview.
     bool loadFile(const std::string &path)
     {
         std::vector<float> left, right;
@@ -713,6 +790,7 @@ struct Sampler : Module
         return true;
     }
 
+    // Opens a WAV file picker and loads the chosen file (if any).
     void loadWavDialog()
     {
         osdialog_filters *filters = osdialog_filters_parse("WAV:wav");
@@ -727,6 +805,8 @@ struct Sampler : Module
         }
     }
 
+    // Opens a save-as dialog and writes the current sample to a WAV file
+    // (appending ".wav" if missing). The file is written outside the lock.
     void saveWavDialog()
     {
         osdialog_filters *filters = osdialog_filters_parse("WAV:wav");
@@ -752,12 +832,14 @@ struct Sampler : Module
         }
     }
 
+    // Clears the sample and all associated state (thread-safe wrapper).
     void clearSample()
     {
         std::lock_guard<std::mutex> lock(bufferMutex);
         clearLocked();
     }
 
+    // Scales the whole sample so that its peak sits at SP_WAV_FULLSCALE.
     void normalizeSample()
     {
         std::lock_guard<std::mutex> lock(bufferMutex);
@@ -777,6 +859,8 @@ struct Sampler : Module
         rebuildPeaksLocked();
     }
 
+    // Reverses both channels in place and mirrors the playhead so playback
+    // continues at the equivalent reversed position.
     void reverseSample()
     {
         std::lock_guard<std::mutex> lock(bufferMutex);
@@ -789,6 +873,8 @@ struct Sampler : Module
         rebuildPeaksLocked();
     }
 
+    // Trims the sample to just the current loop region and resets the
+    // start/length parameters to 0..1.
     void trimToLoop()
     {
         {
@@ -814,6 +900,11 @@ struct Sampler : Module
     }
 
     // ---------- DSP ----------
+    // Main audio callback: reads parameters/CVs, handles record/play
+    // transport and triggers, advances the playhead (with playback modes and
+    // crossfades), applies the envelope and level, mixes with the live input
+    // through the MIX knob, writes the outputs, and updates the meters,
+    // pulses and lights.
     void process(const ProcessArgs &args) override
     {
         sampleRate = args.sampleRate;
@@ -1226,6 +1317,8 @@ struct Sampler : Module
 
     // ---------- patch storage ----------
     // Persist the path, or the raw samples when there is no file behind the audio
+    // Serialises either the WAV path (if the audio came from a file) or the
+    // raw sample data, plus the buffer's sample rate and the auto-play flag.
     json_t *dataToJson() override
     {
         std::lock_guard<std::mutex> lock(bufferMutex);
@@ -1251,14 +1344,20 @@ struct Sampler : Module
         return root;
     }
 
+    // Restores the auto-play flag, sample rate, and either the referenced
+    // file or the raw sample data from a saved patch.
     void dataFromJson(json_t *root) override
     {
+        if (!root)
+            return;
         json_t *ap = json_object_get(root, "autoPlay");
         if (ap)
             autoPlay = json_is_true(ap);
 
         json_t *sr = json_object_get(root, "sampleRate");
-        float storedRate = sr ? (float)json_number_value(sr) : 44100.f;
+        float storedRate = (sr && json_is_number(sr)) ? (float)json_number_value(sr) : 44100.f;
+        if (!std::isfinite(storedRate) || storedRate < 1000.f || storedRate > 768000.f)
+            storedRate = 44100.f;
 
         json_t *pathJson = json_object_get(root, "lastPath");
         if (pathJson && json_is_string(pathJson))
@@ -1269,21 +1368,32 @@ struct Sampler : Module
 
         json_t *leftArray = json_object_get(root, "leftSamples");
         json_t *rightArray = json_object_get(root, "rightSamples");
-        if (leftArray && rightArray)
+        if (json_is_array(leftArray) && json_is_array(rightArray))
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
             leftSamples.clear();
             rightSamples.clear();
             size_t len = json_array_size(leftArray);
+            size_t maxLen = (size_t)(SP_MAX_REC_SECONDS * 768000.f);
+            if (len > maxLen)
+                len = maxLen;
+            size_t rlen = json_array_size(rightArray);
             leftSamples.reserve(len);
             rightSamples.reserve(len);
+            // Reads a finite float from a JSON number, or 0 if not finite.
+            auto num = [](json_t *v)
+            {
+                float f = (float)json_number_value(v);
+                return std::isfinite(f) ? f : 0.f;
+            };
             for (size_t i = 0; i < len; i++)
             {
-                leftSamples.push_back((float)json_number_value(json_array_get(leftArray, i)));
-                rightSamples.push_back((float)json_number_value(json_array_get(rightArray, i)));
+                float l = num(json_array_get(leftArray, i));
+                leftSamples.push_back(l);
+                rightSamples.push_back(i < rlen ? num(json_array_get(rightArray, i)) : l);
             }
             mainBufferSize = len;
-            bufferRate = storedRate > 1000.f ? storedRate : 44100.f;
+            bufferRate = storedRate;
             lastPath = "";
             playhead = 0.0f;
             rebuildPeaksLocked();
@@ -1295,91 +1405,14 @@ struct Sampler : Module
 // with the same-named helpers in the other module files.
 namespace
 {
+    namespace ag = agmm;
 
-    // ------------------------------------------------------------
-    // Theme (same palette as the other AGMM modules)
-    // ------------------------------------------------------------
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
+    // Returns the record accent colour (pink).
     NVGcolor colRec() { return nvgRGB(0xff, 0x5a, 0x7a); }
+    // Returns the lighter record accent used for the recording waveform.
+    NVGcolor colRecLight() { return nvgRGB(0xff, 0x9a, 0xb0); }
 
-    NVGcolor withAlpha(NVGcolor c, float a)
-    {
-        c.a = a;
-        return c;
-    }
-
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    // Cyan LED (Rack has no built-in one)
-    template <typename TBase = GrayModuleLightWidget>
-    struct TSPCyanLight : TBase
-    {
-        TSPCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-    };
-    using SPCyanLight = TSPCyanLight<>;
-
-    // ------------------------------------------------------------
-    // AGMM logo
-    // ------------------------------------------------------------
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        // Pill body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        // Tiny cell triangle
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        // Wordmark
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
+    // Formats a duration in seconds as "MM:SS.CC" into `buf`.
     void fmtTime(char *buf, size_t n, float secs)
     {
         if (secs < 0.f)
@@ -1390,194 +1423,100 @@ namespace
         snprintf(buf, n, "%02d:%02d.%02d", m, s, cs);
     }
 
+    // Block title with hairlines that stop a measured distance from the text
+    // Draws a centred block header whose hairlines span from x1 to x2,
+    // stopping a measured distance from the text.
+    void blockHeader(NVGcontext *vg, float x1, float x2, float y, const char *txt, NVGcolor col)
+    {
+        const float cx = (x1 + x2) / 2.f;
+        const float gap = ag::textWidth(vg, txt, 8.f, 2.f) / 2.f + 6.f;
+        ag::text(vg, cx, y, txt, 8.f, col, ag::ALIGN_C, 2.f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, x1, y);
+        nvgLineTo(vg, cx - gap, y);
+        nvgMoveTo(vg, cx + gap, y);
+        nvgLineTo(vg, x2, y);
+        nvgStrokeColor(vg, ag::withA(col, 0.3f));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
+
     // ------------------------------------------------------------
     // Panel background
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, the LEFT input/transport
+    // block, RIGHT output/control block, the sample info strip, and the
+    // centre PLAYBACK grid (5 columns × 2 rows).
     struct SPPanelBackground : TransparentWidget
     {
         SPPanelBackground() { box.size = Vec(SP_PANEL_W, SP_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
+        // plate with a label 10 px below its top edge
+        // Draws a side-block cell with the given label, using a smaller font
+        // for long labels.
+        void cell(NVGcontext *vg, float cx, float top, float h, const char *txt, bool tint = false)
         {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
+            ag::cell(vg, cx, top, SP_SIDE_W, h, txt, tint, txt[0] && strlen(txt) > 6 ? 7.f : 8.f);
         }
 
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Caption with an underline (side blocks)
-        void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float x1, float x2)
-        {
-            drawText(vg, cx, y, txt, 8.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y + 8.f);
-            nvgLineTo(vg, x2, y + 8.f);
-            nvgStrokeColor(vg, withAlpha(col, 0.35f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Divider with a centered caption
-        void section(NVGcontext *vg, float x1, float x2, float y, const char *txt)
-        {
-            float cx = (x1 + x2) / 2.f;
-            float w = 10.f + (float)strlen(txt) * 7.f;
-            drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y);
-            nvgLineTo(vg, cx - w / 2.f, y);
-            nvgMoveTo(vg, cx + w / 2.f, y);
-            nvgLineTo(vg, x2, y);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Jack cell: label on top, jack below
-        void topCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-            label(vg, cx, cy - 19.f, txt);
-        }
-        // Control in the middle, label below
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 17.f, 34.f, 34.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-        void switchCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 20.f, 34.f, 40.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-
+        // Draws all static panel art: base panel, bezel, the two block
+        // headers, the left/right cells, the info strip plate and the centre
+        // playback grid with its CV/ATT captions.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
             const float W = SP_PANEL_W, H = SP_PANEL_H;
 
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
-
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)H; y += 3)
-            {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
-            }
-
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // Logo + title
-            drawLogo(vg, W / 2.f, 13.f);
-            drawText(vg, W / 2.f, 31.f, "SAMPLER", 13.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-
-            // Display bezel
-            float bx = SP_DISP_X - 5.f, by = SP_DISP_Y - 5.f;
-            float bw = SP_DISP_W + 10.f, bh = SP_DISP_H + 10.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
+            ag::panelBase(vg, W, H, "SAMPLER");
+            ag::bezel(vg, SP_DISP_X, SP_DISP_Y, SP_DISP_W, SP_DISP_H);
 
             // ---- left block: input + transport ----
-            caption(vg, 62.f, 54.f, "INPUT", colAccent(), 12.f, 112.f);
-            topCell(vg, SP_LCOL[0], 100.f, "L IN");
-            topCell(vg, SP_LCOL[1], 100.f, "R IN");
-            switchCell(vg, SP_LCOL[0], SP_Y_MIX, "MIX");
-            switchCell(vg, SP_LCOL[1], SP_Y_MIX, "CLEAR");
-            switchCell(vg, SP_LCOL[0], SP_Y_SOS, "SOS");
-            switchCell(vg, SP_LCOL[1], SP_Y_SOS, "LINE");
+            blockHeader(vg, 12.f, 112.f, 34.f, "INPUT", ag::accent());
+            cell(vg, SP_LCOL[0], 44.f, 46.f, "L IN");
+            cell(vg, SP_LCOL[1], 44.f, 46.f, "R IN");
+            cell(vg, SP_LCOL[0], 96.f, 52.f, "MIX");
+            cell(vg, SP_LCOL[1], 96.f, 52.f, "CLEAR");
+            cell(vg, SP_LCOL[0], 154.f, 52.f, "SOS");
+            cell(vg, SP_LCOL[1], 154.f, 52.f, "LINE");
 
-            caption(vg, 62.f, 248.f, "TRANSPORT", colViolet(), 12.f, 112.f);
-            jackCell(vg, SP_LCOL[0], SP_Y_REC, "REC");
-            jackCell(vg, SP_LCOL[1], SP_Y_REC, "REC TRG");
-            jackCell(vg, SP_LCOL[0], SP_Y_PLAY, "PLAY");
-            jackCell(vg, SP_LCOL[1], SP_Y_PLAY, "PLAY TRG");
+            blockHeader(vg, 12.f, 112.f, 219.f, "TRANSPORT", ag::violet());
+            cell(vg, SP_LCOL[0], 228.f, 56.f, "REC");
+            cell(vg, SP_LCOL[1], 228.f, 56.f, "REC TRG");
+            cell(vg, SP_LCOL[0], 290.f, 56.f, "PLAY");
+            cell(vg, SP_LCOL[1], 290.f, 56.f, "PLAY TRG");
 
-            // ---- right block: outputs + control inputs ----
-            caption(vg, 480.f, 54.f, "OUTPUT", colViolet(), 435.f, 525.f);
-            topCell(vg, SP_RCOL[0], 100.f, "L OUT");
-            topCell(vg, SP_RCOL[1], 100.f, "R OUT");
-            topCell(vg, SP_RCOL[0], 150.f, "EOC");
-            topCell(vg, SP_RCOL[1], 150.f, "PLAY GT");
-            topCell(vg, SP_RCOL[0], 200.f, "ENV");
-            topCell(vg, SP_RCOL[1], 200.f, "REC GT");
+            // ---- right block: outputs + control ----
+            blockHeader(vg, 432.f, 528.f, 34.f, "OUTPUT", ag::violet());
+            cell(vg, SP_RCOL[0], 44.f, 46.f, "L OUT", true);
+            cell(vg, SP_RCOL[1], 44.f, 46.f, "R OUT", true);
+            cell(vg, SP_RCOL[0], 96.f, 46.f, "EOC", true);
+            cell(vg, SP_RCOL[1], 96.f, 46.f, "PLAY GT", true);
+            cell(vg, SP_RCOL[0], 148.f, 46.f, "ENV", true);
+            cell(vg, SP_RCOL[1], 148.f, 46.f, "REC GT", true);
 
-            caption(vg, 480.f, 238.f, "CONTROL", colAccent(), 435.f, 525.f);
-            topCell(vg, SP_RCOL[0], 284.f, "GATE IN");
-            topCell(vg, SP_RCOL[1], 284.f, "V/OCT");
-            switchCell(vg, SP_RCOL[0], SP_Y_RKNOB, "SMOOTH");
-            switchCell(vg, SP_RCOL[1], SP_Y_RKNOB, "SOS FB");
-
-            // ---- centre grid ----
-            section(vg, 120.f, 422.f, 167.f, "PLAYBACK");
-            for (int r = 0; r < 2; ++r)
-                for (int c = 0; c < 5; ++c)
-                    plate(vg, SP_CX[c] - SP_CELL_W / 2.f, r == 0 ? SP_R1 : SP_R2, SP_CELL_W, SP_CELL_H);
-
-            // Row 1: SPEED, START, LENGTH (knob + CV jack + amount), ATTACK, DECAY
-            const char *r1[5] = {"SPEED", "START", "LENGTH", "ATTACK", "DECAY"};
-            for (int c = 0; c < 5; ++c)
-            {
-                ring(vg, SP_CX[c], SP_R1 + SP_KNOB_DY, 17.f);
-                label(vg, SP_CX[c], SP_R1 + SP_LABEL_DY, r1[c]);
-            }
-            for (int c = 0; c < 3; ++c)
-            {
-                label(vg, SP_CX[c] - 15.f, SP_R1 + SP_TINY_DY, "CV");
-                label(vg, SP_CX[c] + 15.f, SP_R1 + SP_TINY_DY, "AMT");
-            }
-
-            // Row 2: three switches, XFADE, LEVEL
-            const char *sw[3] = {"TUNING", "MODE", "DIRECTION"};
-            for (int c = 0; c < 3; ++c)
-                label(vg, SP_CX[c], SP_R2 + SP_SWLABEL_DY, sw[c]);
-            for (int c = 3; c < 5; ++c)
-            {
-                ring(vg, SP_CX[c], SP_R2 + SP_KNOB_DY, 17.f);
-                label(vg, SP_CX[c], SP_R2 + SP_LABEL_DY, c == 3 ? "XFADE" : "LEVEL");
-            }
+            blockHeader(vg, 432.f, 528.f, 210.f, "CONTROL", ag::accent());
+            cell(vg, SP_RCOL[0], 220.f, 46.f, "GATE IN");
+            cell(vg, SP_RCOL[1], 220.f, 46.f, "V/OCT");
+            cell(vg, SP_RCOL[0], 272.f, 68.f, "SMOOTH");
+            cell(vg, SP_RCOL[1], 272.f, 68.f, "SOS FB");
 
             // ---- sample info strip ----
-            plate(vg, SP_INFO_X, SP_INFO_Y, SP_INFO_W, SP_INFO_H);
+            ag::plate(vg, SP_INFO_X + SP_INFO_W / 2.f, SP_INFO_Y, SP_INFO_W, SP_INFO_H);
+
+            // ---- centre grid ----
+            blockHeader(vg, 120.f, 422.f, SP_PB_Y, "PLAYBACK", ag::accent());
+            const char *r1[5] = {"SPEED", "START", "LENGTH", "ATTACK", "DECAY"};
+            for (int c = 0; c < 5; ++c)
+                ag::cell(vg, SP_CX[c], SP_R1, SP_CELL_W, SP_R1_H, r1[c]);
+            for (int c = 0; c < 3; ++c)
+            {
+                ag::text(vg, SP_CX[c] - 14.f, SP_R1 + SP_TINY_DY, "CV", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+                ag::text(vg, SP_CX[c] + 15.f, SP_R1 + SP_TINY_DY, "ATT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+            }
+
+            const char *r2[5] = {"TUNING", "MODE", "DIRECTION", "XFADE", "LEVEL"};
+            for (int c = 0; c < 5; ++c)
+                ag::cell(vg, SP_CX[c], SP_R2, SP_CELL_W, SP_R2_H, r2[c]);
 
             Widget::draw(args);
         }
@@ -1586,6 +1525,10 @@ namespace
     // ------------------------------------------------------------
     // Waveform display (also interactive: drag to select the loop region)
     // ------------------------------------------------------------
+    // Live waveform display + loop-region editor. Drag on the waveform to set
+    // the start/end of the loop region, double-click to reset to the full
+    // sample. Draws the overview, the loop markers, the playhead, level
+    // meters, header state chip and footer time readouts.
     struct SPDisplayWidget : TransparentWidget
     {
         Sampler *module = nullptr;
@@ -1599,8 +1542,12 @@ namespace
         }
 
         // ---- mouse: press = set start (end is kept), drag = select a region, double click = reset ----
+        // Converts an x coordinate (widget-local) to a normalised 0..1
+        // position inside the waveform area.
         float toNorm(float x) { return clamp((x - SP_WF_X0) / (float)SP_WF_W, 0.f, 1.f); }
 
+        // Writes the [a, b] region (normalised) into the START and LENGTH
+        // parameters, converting to start + relative length.
         void setRegion(float a, float b)
         {
             if (!module)
@@ -1614,6 +1561,8 @@ namespace
             module->paramQuantities[Sampler::LENGTH_PARAM]->setValue(clamp(len, 0.001f, 1.f));
         }
 
+        // Left press starts a new selection from the click position while
+        // keeping the existing end (or extending to the end of the sample).
         void onButton(const ButtonEvent &e) override
         {
             if (module && e.action == GLFW_PRESS && e.button == GLFW_MOUSE_BUTTON_LEFT)
@@ -1630,6 +1579,7 @@ namespace
             }
         }
 
+        // Drag updates the end of the selection.
         void onDragMove(const DragMoveEvent &e) override
         {
             if (!module)
@@ -1642,6 +1592,7 @@ namespace
                 setRegion(dragAnchor, dragCur);
         }
 
+        // Double-click resets the loop region to the full sample.
         void onDoubleClick(const DoubleClickEvent &e) override
         {
             if (!module)
@@ -1650,25 +1601,25 @@ namespace
             module->paramQuantities[Sampler::LENGTH_PARAM]->setValue(1.f);
         }
 
-        // Static background: screen, waveform field, grid
+        // Static background: screen, waveform frame, grid, ruler
+        // Draws the display screen, waveform frame, header/footer hairlines,
+        // time/voltage grid, zero line and the time-ruler ticks.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            const float W = SP_DISP_W, H = SP_DISP_H;
+            const float W = SP_DISP_W;
             const float X0 = SP_WF_X0, Y0 = SP_WF_Y0, WH = SP_WF_H, WW = (float)SP_WF_W;
 
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H);
-            nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 30.f, W * 0.7f,
-                                               nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-            nvgFill(vg);
+            ag::screen(vg, 0.f, 0.f, W, SP_DISP_H);
+            ag::plotFrame(vg, X0 - 1.f, Y0 - 1.f, WW + 2.f, WH + 2.f);
 
-            // Waveform field
+            // hairlines that separate the header row and the footer row
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, X0 - 1.f, Y0 - 1.f, WW + 2.f, WH + 2.f, 2.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgMoveTo(vg, 0.f, 16.5f);
+            nvgLineTo(vg, W, 16.5f);
+            nvgMoveTo(vg, 0.f, 93.5f);
+            nvgLineTo(vg, W, 93.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
@@ -1709,6 +1660,12 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the waveform overview (bright inside the
+        // loop region, dim outside), the loop start/end markers with flags,
+        // the playhead (pink while overdubbing), the empty-state text, the
+        // four level meters (in L/R and out L/R), the header state chip and
+        // mode/speed text, and the footer time readouts. Uses a demo scene
+        // in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1806,6 +1763,8 @@ namespace
             }
 
             float eN = std::min(sN + lN * (1.f - sN), 1.f);
+            // Returns true if the given column falls inside the loop region
+            // (all columns count while a brand-new recording is in progress).
             auto inLoop = [&](int c)
             {
                 if (recNew)
@@ -1814,34 +1773,28 @@ namespace
                 return t >= sN && t <= eN;
             };
 
-            // ---- waveform ----
+            // ---- waveform: bright inside the loop region, dim outside ----
             if (has)
             {
-                for (int pass = 0; pass < 3; ++pass)
-                { // 0: glow, 1: crisp inside loop, 2: outside loop
+                for (int pass = 1; pass < 3; ++pass)
+                {
                     nvgBeginPath(vg);
                     for (int c = 0; c < N; ++c)
                     {
                         bool in = inLoop(c);
-                        if (pass < 2 && !in)
+                        if (pass == 1 && !in)
                             continue;
                         if (pass == 2 && in)
                             continue;
                         float y0 = mid - std::min(std::max(colMax[c] / 5.f, -1.f), 1.f) * amp;
                         float y1 = mid - std::min(std::max(colMin[c] / 5.f, -1.f), 1.f) * amp;
                         float h = std::max(y1 - y0, 1.f);
-                        float x = X0 + c;
-                        if (pass == 0)
-                            nvgRect(vg, x - 0.5f, y0 - 1.5f, 2.f, h + 3.f);
-                        else
-                            nvgRect(vg, x, y0, 1.f, h);
+                        nvgRect(vg, X0 + c, y0, 1.f, h);
                     }
                     if (recNew)
-                        nvgFillColor(vg, pass == 0 ? withAlpha(colRec(), 0.14f) : nvgRGB(0xff, 0x9a, 0xb0));
-                    else if (pass == 0)
-                        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 32));
+                        nvgFillColor(vg, colRecLight());
                     else if (pass == 1)
-                        nvgFillColor(vg, nvgRGB(0x8a, 0xee, 0xff));
+                        nvgFillColor(vg, ag::bright());
                     else
                         nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 70));
                     nvgFill(vg);
@@ -1862,14 +1815,14 @@ namespace
                 nvgMoveTo(vg, xs + 0.5f, Y0);
                 nvgLineTo(vg, xs + 0.5f, Y0 + WH);
                 nvgStrokeColor(vg, nvgRGBA(0x8a, 0xee, 0xff, 220));
-                nvgStrokeWidth(vg, 1.2f);
+                nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, xs, Y0);
                 nvgLineTo(vg, xs + 6.f, Y0);
                 nvgLineTo(vg, xs, Y0 + 6.f);
                 nvgClosePath(vg);
-                nvgFillColor(vg, nvgRGB(0x8a, 0xee, 0xff));
+                nvgFillColor(vg, ag::bright());
                 nvgFill(vg);
 
                 nvgBeginPath(vg);
@@ -1882,7 +1835,7 @@ namespace
                 nvgLineTo(vg, xe - 6.f, Y0);
                 nvgLineTo(vg, xe, Y0 + 6.f);
                 nvgClosePath(vg);
-                nvgFillColor(vg, colViolet());
+                nvgFillColor(vg, ag::violet());
                 nvgFill(vg);
             }
 
@@ -1890,106 +1843,48 @@ namespace
             if (has && play && !recNew)
             {
                 float x = X0 + clamp(ph, 0.f, 1.f) * WW;
-                NVGcolor pc = sos ? nvgRGB(0xff, 0x9a, 0xb0) : nvgRGB(255, 255, 255);
+                NVGcolor pc = sos ? colRecLight() : nvgRGB(255, 255, 255);
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, x, Y0);
                 nvgLineTo(vg, x, Y0 + WH);
-                nvgStrokeColor(vg, withAlpha(pc, 0.16f));
-                nvgStrokeWidth(vg, 4.f);
+                nvgStrokeColor(vg, ag::withA(pc, 0.94f));
+                nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, x, Y0);
-                nvgLineTo(vg, x, Y0 + WH);
-                nvgStrokeColor(vg, withAlpha(pc, 0.94f));
-                nvgStrokeWidth(vg, 1.4f);
-                nvgStroke(vg);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, x - 3.5f, Y0 - 3.f);
-                nvgLineTo(vg, x + 3.5f, Y0 - 3.f);
-                nvgLineTo(vg, x, Y0 + 2.f);
-                nvgClosePath(vg);
-                nvgFillColor(vg, pc);
-                nvgFill(vg);
             }
 
             // ---- empty state ----
             if (!has && !rec)
             {
-                drawText(vg, X0 + WW / 2.f, mid - 5.f, "NO SAMPLE", 10.f, colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-                drawText(vg, X0 + WW / 2.f, mid + 8.f, "REC  OR  RIGHT-CLICK > LOAD WAV", 6.5f,
-                         withAlpha(colDim(), 0.8f), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, X0 + WW / 2.f, mid - 6.f, "NO SAMPLE", 10.f, ag::dim(), ag::ALIGN_C, 3.f);
+                ag::text(vg, X0 + WW / 2.f, mid + 8.f, "REC OR RIGHT-CLICK > LOAD WAV", 7.f,
+                         ag::dim(), ag::ALIGN_C, 0.5f);
             }
 
             // ---- level meters (left: input, right: output) ----
-            auto meter = [&](float x, float v)
-            {
-                float lvl = std::min(v / 5.f, 1.f);
-                nvgBeginPath(vg);
-                nvgRect(vg, x, Y0, 4.f, WH);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-                nvgFill(vg);
-                if (lvl > 0.01f)
-                {
-                    float h = lvl * WH;
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x, Y0 + WH - h, 4.f, h);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, Y0 + WH, 0, Y0,
-                                                       nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-                    nvgFill(vg);
-                }
-            };
-            meter(3.f, mIL);
-            meter(9.f, mIR);
-            meter(W - 13.f, mOL);
-            meter(W - 7.f, mOR);
-            drawText(vg, 8.f, Y0 + WH + 8.f, "IN", 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-            drawText(vg, W - 10.f, Y0 + WH + 8.f, "OUT", 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
+            ag::meter(vg, 3.f, Y0, 4.f, WH, mIL / 5.f);
+            ag::meter(vg, 9.f, Y0, 4.f, WH, mIR / 5.f);
+            ag::meter(vg, W - 13.f, Y0, 4.f, WH, mOL / 5.f);
+            ag::meter(vg, W - 7.f, Y0, 4.f, WH, mOR / 5.f);
+            ag::text(vg, 8.f, Y0 + WH + 8.f, "IN", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, W - 10.f, Y0 + WH + 8.f, "OUT", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
 
-            // ---- scanlines ----
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)H; y += 3)
-                nvgRect(vg, 0, y + 1, W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
-
-            // ---- glass reflection ----
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H * 0.3f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
-
-            // ---- top line: state chip, mode, speed ----
+            // ---- header row: state chip, mode, speed ----
             {
                 const char *st = rec ? (sos ? "SOS" : "REC") : (play ? "PLAY" : "STOP");
-                NVGcolor sc = rec ? colRec() : (play ? colAccent() : colDim());
-                float pulse = rec ? 0.55f + 0.45f * (float)std::sin(system::getTime() * 8.0) : 1.f;
-                float cw = 30.f;
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, 6.f, 3.f, cw, 11.f, 3.f);
-                if (play || rec)
-                {
-                    nvgFillColor(vg, withAlpha(sc, 0.25f * pulse));
-                    nvgFill(vg);
-                }
-                nvgStrokeColor(vg, withAlpha(sc, (play || rec) ? 0.9f * pulse : 0.3f));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-                drawText(vg, 6.f + cw / 2.f, 8.5f, st, 6.f, sc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+                NVGcolor sc = rec ? colRec() : (play ? ag::accent() : ag::dim());
+                const float cw = 30.f;
+                ag::chip(vg, 6.f, 2.f, cw, 12.f, st, play || rec, sc);
 
                 static const char *modeNames[3] = {"ONE-SHOT", "LOOP", "PING-PONG"};
                 char buf[64];
                 snprintf(buf, sizeof(buf), "%s | %s", modeNames[playMode], (rev ? "REV" : "FWD"));
-                drawText(vg, W / 2.f, 8.5f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 200),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, W / 2.f, 8.5f, buf, 7.f, ag::withA(ag::accent(), 0.8f), ag::ALIGN_C, 0.5f);
 
                 snprintf(buf, sizeof(buf), pitchMode ? "TUNE %.2fX" : "SPD %+.2fX", speed);
-                drawText(vg, W - 6.f, 8.5f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 200),
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, W - 6.f, 8.5f, buf, 7.f, ag::withA(ag::accent(), 0.8f), ag::ALIGN_R, 0.5f);
             }
 
-            // ---- bottom line: time and loop region ----
+            // ---- footer row: time and loop region ----
             {
                 char buf[64], a[16], b[16];
                 float secsTotal = rate > 0.f ? (float)total / rate : 0.f;
@@ -2013,16 +1908,14 @@ namespace
                 {
                     snprintf(buf, sizeof(buf), "--:--.--");
                 }
-                drawText(vg, 6.f, H - 8.f, buf, 7.f, nvgRGBA(0xff, 0xe6, 0x80, 220),
-                         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, 6.f, H - 6.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), ag::ALIGN_L, 0.5f);
 
                 if (has && !recNew)
                 {
                     fmtTime(a, sizeof(a), sN * secsTotal);
                     fmtTime(b, sizeof(b), eN * secsTotal);
                     snprintf(buf, sizeof(buf), "%s - %s", a, b);
-                    drawText(vg, W - 6.f, H - 8.f, buf, 7.f, colDim(),
-                             NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                    ag::text(vg, W - 6.f, H - 6.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
                 }
             }
 
@@ -2033,6 +1926,9 @@ namespace
     // ------------------------------------------------------------
     // Value readout under a knob / switch
     // ------------------------------------------------------------
+    // A small text widget that reads a given parameter and prints it in the
+    // requested format (seconds, ms, %, pitch mode, play mode or direction).
+    // Uses a fixed demo value in the module browser.
     struct SPReadout : TransparentWidget
     {
         enum Fmt
@@ -2050,12 +1946,15 @@ namespace
         Fmt fmt = SECONDS;
         float demo = 0.f;
 
+        // Constructor: positions the readout centred on (cx, cy).
         SPReadout(Sampler *m, int p, Fmt f, float demoVal, float cx, float cy) : module(m), paramId(p), fmt(f), demo(demoVal)
         {
             box.pos = Vec(cx - 28.f, cy - 6.f);
             box.size = Vec(56.f, 12.f);
         }
 
+        // Layer-1 overlay: reads the parameter (or demo value) and prints it
+        // according to the chosen format.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -2096,8 +1995,7 @@ namespace
                 snprintf(buf, sizeof(buf), "%s", v > 0.5f ? "REVERSE" : "FORWARD");
                 break;
             }
-            drawText(vg, box.size.x / 2.f, box.size.y / 2.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+            ag::text(vg, box.size.x / 2.f, box.size.y / 2.f, buf, 7.f, ag::accent(), ag::ALIGN_C, 0.5f);
             Widget::drawLayer(args, layer);
         }
     };
@@ -2105,6 +2003,9 @@ namespace
     // ------------------------------------------------------------
     // Sample info strip (file name, length, sample rate)
     // ------------------------------------------------------------
+    // Live info strip: shows the loaded file name (or "RECORDED SAMPLE" /
+    // "NO SAMPLE LOADED") on the left and the total length + sample rate on
+    // the right.
     struct SPInfoWidget : TransparentWidget
     {
         Sampler *module = nullptr;
@@ -2115,6 +2016,8 @@ namespace
             box.size = Vec(SP_INFO_W, SP_INFO_H);
         }
 
+        // Layer-1 overlay: reads the buffer state under the mutex and prints
+        // the file name (trimmed to 24 chars) plus duration/rate.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -2123,7 +2026,7 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float cy = box.size.y / 2.f;
+            const float cy = box.size.y / 2.f + 0.5f;
 
             std::string name;
             size_t total = 0;
@@ -2152,19 +2055,17 @@ namespace
             }
             if (name.empty())
                 name = "NO SAMPLE LOADED";
-            if (name.size() > 30)
-                name = name.substr(0, 27) + "...";
+            if (name.size() > 24)
+                name = name.substr(0, 21) + "...";
 
-            drawText(vg, 10.f, cy, name.c_str(), 7.5f,
-                     total > 0 ? colText() : colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 8.f, cy, name.c_str(), 7.f, total > 0 ? ag::textCol() : ag::dim(), ag::ALIGN_L, 0.5f);
 
-            if (total > 0)
+            if (total > 0 && rate > 0.f)
             {
                 char t[16], buf[48];
                 fmtTime(t, sizeof(t), (float)total / rate);
                 snprintf(buf, sizeof(buf), "%s  %.1fKHZ", t, rate / 1000.f);
-                drawText(vg, box.size.x - 10.f, cy, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 200),
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, box.size.x - 8.f, cy, buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
             }
             Widget::drawLayer(args, layer);
         }
@@ -2175,8 +2076,13 @@ namespace
 // ------------------------------------------------------------
 // Module widget
 // ------------------------------------------------------------
+// Places the static panel, screws, waveform display, info strip, all controls
+// and jacks on the left/right blocks and the centre playback grid, and builds
+// the right-click menu (load/save WAV, editing tools, auto-play toggle).
 struct SamplerWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, display, info strip,
+    // all left/right block controls and jacks, and the centre playback grid.
     SamplerWidget(Sampler *module)
     {
         setModule(module);
@@ -2193,61 +2099,63 @@ struct SamplerWidget : ModuleWidget
         addChild(new SPInfoWidget(module));
 
         // ---- left block: input ----
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[0], 100.f), module, Sampler::LEFT_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], 100.f), module, Sampler::RIGHT_INPUT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_LCOL[0], SP_Y_MIX), module, Sampler::MIX_PARAM));
-        addParam(createParamCentered<VCVButton>(Vec(SP_LCOL[1], SP_Y_MIX), module, Sampler::CLEAR_BUTTON));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[0], 75.f), module, Sampler::LEFT_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], 75.f), module, Sampler::RIGHT_INPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_LCOL[0], 127.f), module, Sampler::MIX_PARAM));
+        addParam(createParamCentered<VCVButton>(Vec(SP_LCOL[1], 127.f), module, Sampler::CLEAR_BUTTON));
 
-        // ---- left block: SOS / LINE (latching buttons with yellow LEDs) ----
-        auto sosButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], SP_Y_SOS + 3.f), module, Sampler::SOS_SWITCH);
+        // ---- left block: SOS / LINE (latching buttons with yellow LEDs above) ----
+        auto sosButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], 192.f), module, Sampler::SOS_SWITCH);
         sosButton->momentary = false;
         addParam(sosButton);
-        addChild(createLightCentered<SmallLight<YellowLight>>(Vec(SP_LCOL[0], SP_Y_SOS - 12.f), module, Sampler::SOS_LIGHT));
+        addChild(createLightCentered<SmallLight<YellowLight>>(Vec(SP_LCOL[0], 177.f), module, Sampler::SOS_LIGHT));
 
-        auto lineButton = createParamCentered<VCVButton>(Vec(SP_LCOL[1], SP_Y_SOS + 3.f), module, Sampler::LINE_SWITCH);
+        auto lineButton = createParamCentered<VCVButton>(Vec(SP_LCOL[1], 192.f), module, Sampler::LINE_SWITCH);
         lineButton->momentary = false;
         addParam(lineButton);
-        addChild(createLightCentered<SmallLight<YellowLight>>(Vec(SP_LCOL[1], SP_Y_SOS - 12.f), module, Sampler::LINE_LIGHT));
+        addChild(createLightCentered<SmallLight<YellowLight>>(Vec(SP_LCOL[1], 177.f), module, Sampler::LINE_LIGHT));
 
-        // ---- left block: transport ----
-        auto recButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], SP_Y_REC), module, Sampler::REC_BUTTON);
+        // ---- left block: transport (cells at 228 and 290, controls at +38, LEDs at +21) ----
+        auto recButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], 266.f), module, Sampler::REC_BUTTON);
         recButton->momentary = false;
         addParam(recButton);
-        addChild(createLightCentered<SmallLight<RedLight>>(Vec(62.f, SP_Y_REC), module, Sampler::REC_LIGHT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], SP_Y_REC), module, Sampler::RECORD_TRIGGER));
+        addChild(createLightCentered<SmallLight<RedLight>>(Vec(SP_LCOL[0], 249.f), module, Sampler::REC_LIGHT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], 266.f), module, Sampler::RECORD_TRIGGER));
 
-        auto playButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], SP_Y_PLAY), module, Sampler::PLAY_BUTTON);
+        auto playButton = createParamCentered<VCVButton>(Vec(SP_LCOL[0], 328.f), module, Sampler::PLAY_BUTTON);
         playButton->momentary = false;
         addParam(playButton);
-        addChild(createLightCentered<SmallLight<SPCyanLight>>(Vec(62.f, SP_Y_PLAY), module, Sampler::PLAY_LIGHT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], SP_Y_PLAY), module, Sampler::PLAY_TRIGGER));
+        addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(SP_LCOL[0], 311.f), module, Sampler::PLAY_LIGHT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_LCOL[1], 328.f), module, Sampler::PLAY_TRIGGER));
 
-        // ---- right block ----
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 100.f), module, Sampler::LEFT_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 100.f), module, Sampler::RIGHT_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 150.f), module, Sampler::EOC_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 150.f), module, Sampler::PLAY_GATE_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 200.f), module, Sampler::ENV_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 200.f), module, Sampler::REC_GATE_OUTPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 284.f), module, Sampler::GATE_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 284.f), module, Sampler::PITCH_CV_INPUT));
+        // ---- right block: outputs (cells at 44 / 96 / 148, jack at +31) ----
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 75.f), module, Sampler::LEFT_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 75.f), module, Sampler::RIGHT_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 127.f), module, Sampler::EOC_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 127.f), module, Sampler::PLAY_GATE_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 179.f), module, Sampler::ENV_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 179.f), module, Sampler::REC_GATE_OUTPUT));
 
-        // new knobs: start/end smoothing and sound-on-sound old-material level
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_RCOL[0], SP_Y_RKNOB), module, Sampler::DECLICK_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_RCOL[1], SP_Y_RKNOB), module, Sampler::SOS_FDBK_PARAM));
+        // ---- right block: control inputs and the two small knobs ----
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_RCOL[0], 251.f), module, Sampler::GATE_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_RCOL[1], 251.f), module, Sampler::PITCH_CV_INPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_RCOL[0], 302.f), module, Sampler::DECLICK_PARAM));
+        addChild(new SPReadout(module, Sampler::DECLICK_PARAM, SPReadout::MILLIS, 3.f, SP_RCOL[0], 328.f));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_RCOL[1], 302.f), module, Sampler::SOS_FDBK_PARAM));
+        addChild(new SPReadout(module, Sampler::SOS_FDBK_PARAM, SPReadout::PERCENT, 1.f, SP_RCOL[1], 328.f));
 
         // ---- centre row 1: SPEED, START, LENGTH (knob + CV jack + amount), ATTACK, DECAY ----
         const float k1 = SP_R1 + SP_KNOB_DY, j1 = SP_R1 + SP_JACK_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[0], k1), module, Sampler::SPEED_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[0] - 15.f, j1), module, Sampler::SPEED_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[0] - 14.f, j1), module, Sampler::SPEED_CV_INPUT));
         addParam(createParamCentered<Trimpot>(Vec(SP_CX[0] + 15.f, j1), module, Sampler::SPEED_CV_ATTEN));
 
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[1], k1), module, Sampler::START_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[1] - 15.f, j1), module, Sampler::START_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[1] - 14.f, j1), module, Sampler::START_CV_INPUT));
         addParam(createParamCentered<Trimpot>(Vec(SP_CX[1] + 15.f, j1), module, Sampler::START_CV_ATTEN));
 
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[2], k1), module, Sampler::LENGTH_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[2] - 15.f, j1), module, Sampler::LENGTH_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(SP_CX[2] - 14.f, j1), module, Sampler::LENGTH_CV_INPUT));
         addParam(createParamCentered<Trimpot>(Vec(SP_CX[2] + 15.f, j1), module, Sampler::LENGTH_CV_ATTEN));
 
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[3], k1), module, Sampler::ATTACK_PARAM));
@@ -2256,7 +2164,7 @@ struct SamplerWidget : ModuleWidget
         addChild(new SPReadout(module, Sampler::DECAY_PARAM, SPReadout::DECAY_SECONDS, 10.f, SP_CX[4], j1));
 
         // ---- centre row 2: switches, XFADE, LEVEL ----
-        const float s2 = SP_R2 + SP_SW_DY, r2 = SP_R2 + SP_SWREAD_DY;
+        const float s2 = SP_R2 + SP_SW_DY, r2 = SP_R2 + SP_READ2_DY;
         addParam(createParamCentered<CKSS>(Vec(SP_CX[0], s2), module, Sampler::PITCH_MODE_PARAM));
         addChild(new SPReadout(module, Sampler::PITCH_MODE_PARAM, SPReadout::PITCH_MODE, 0.f, SP_CX[0], r2));
         addParam(createParamCentered<CKSSThree>(Vec(SP_CX[1], s2), module, Sampler::PLAY_MODE_PARAM));
@@ -2264,13 +2172,15 @@ struct SamplerWidget : ModuleWidget
         addParam(createParamCentered<CKSS>(Vec(SP_CX[2], s2), module, Sampler::DIRECTION_PARAM));
         addChild(new SPReadout(module, Sampler::DIRECTION_PARAM, SPReadout::DIRECTION, 0.f, SP_CX[2], r2));
 
-        const float k2 = SP_R2 + SP_KNOB_DY, v2 = SP_R2 + SP_JACK_DY;
+        const float k2 = SP_R2 + SP_KNOB2_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[3], k2), module, Sampler::XFADE_PARAM));
-        addChild(new SPReadout(module, Sampler::XFADE_PARAM, SPReadout::MILLIS, 15.f, SP_CX[3], v2));
+        addChild(new SPReadout(module, Sampler::XFADE_PARAM, SPReadout::MILLIS, 15.f, SP_CX[3], r2));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[4], k2), module, Sampler::LEVEL_PARAM));
-        addChild(new SPReadout(module, Sampler::LEVEL_PARAM, SPReadout::PERCENT, 1.f, SP_CX[4], v2));
+        addChild(new SPReadout(module, Sampler::LEVEL_PARAM, SPReadout::PERCENT, 1.f, SP_CX[4], r2));
     }
 
+    // Adds the right-click menu: load/save WAV dialogs, editing actions
+    // (normalize, reverse, trim to loop, clear) and the auto-play toggle.
     void appendContextMenu(Menu *menu) override
     {
         ModuleWidget::appendContextMenu(menu);
@@ -2297,9 +2207,8 @@ struct SamplerWidget : ModuleWidget
                                       { module->clearSample(); }));
 
         menu->addChild(new MenuSeparator);
-        menu->addChild(createCheckMenuItem("Auto-play after recording", "", [=]()
-                                           { return module->autoPlay; }, [=]()
-                                           { module->autoPlay = !module->autoPlay; }));
+        menu->addChild(createMenuItem("Auto-play after recording", CHECKMARK(module->autoPlay), [=]()
+                                      { module->autoPlay = !module->autoPlay; }));
     }
 };
 

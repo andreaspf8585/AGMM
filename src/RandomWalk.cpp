@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -6,6 +7,46 @@
 #include <random>
 #include <limits>
 #include <array>
+
+// ============================================================================
+// RandomWalk
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// RandomWalk is a 28 HP polyphonic random-voltage generator built from up to
+// 16 independently wandering "walkers" confined to a ±10 V square arena. Each
+// walker takes Gaussian-distributed random steps; the STEP knob sets the step
+// magnitude and the SPEED knob scales how often those steps happen. A
+// SMOOTHNESS control adds AR(1) momentum so that consecutive steps correlate,
+// turning the pure white-noise walk into a meandering or drifting path.
+//
+// For every walker, the module exposes:
+//   X, Y               its current position (bipolar, ±10 V)
+//   GATE X, GATE Y     a short pulse whenever the walker crosses an axis
+//   V/OCT X, V/OCT Y   a latched random voltage, regenerated on every axis
+//                      crossing (range selectable in the context menu)
+//
+// Visual feedback:
+//   - A 200×200 arena display shows each walker's fading trail, its current
+//     position, wall-hit and axis-crossing flashes, and (when smoothness > 0)
+//     a small tick showing its momentum direction.
+//   - A row of 16 X/Y bar pairs shows each walker's current X and Y voltage.
+//
+// All outputs are polyphonic; the channel count equals the current number of
+// walkers. X, Y, GATE X/Y and V/OCT X/Y are updated every sample; the trails
+// are refreshed at a lower rate so they stay visible at any walk speed.
+//
+// File structure:
+//   1. Layout constants (28 HP = 420×380 px).
+//   2. RandomWalk module: parameter/CV handling, per-walker physics, gate
+//      and V/Oct generation, JSON persistence.
+//   3. Anonymous-namespace UI: colour/trail/header helpers, the static
+//      panel, the arena display and the position-bars widget.
+//   4. RandomWalkWidget: places all controls, jacks and displays, and
+//      builds the context menu.
+//   5. Model registration.
+// ============================================================================
 
 // ------------------------------------------------------------
 // Layout constants
@@ -18,30 +59,41 @@ static const float RW_TRAIL_HZ = 240.f;   // max trail sample rate
 static const float RW_PANEL_W = RACK_GRID_WIDTH * 28; // 420
 static const float RW_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Arena display: 10 px per volt, 6 px rail around the playfield
+// Display (220 x 232): header row, 200 x 200 arena at (10,16), footer row.
+// The arena is 9.5 px per volt with a 5 px rail, so +-10 V fills the playfield.
 static const float RW_DISP_W = 220.f;
-static const float RW_DISP_H = 220.f;
+static const float RW_DISP_H = 232.f;
 static const float RW_DISP_X = 100.f;
-static const float RW_DISP_Y = 46.f;
-static const float RW_SCALE = 10.f;
-static const float RW_MARGIN = 6.f;
+static const float RW_DISP_Y = 34.f;
+static const float RW_ARENA_X = 10.f;
+static const float RW_ARENA_Y = 16.f;
+static const float RW_ARENA = 200.f;
+static const float RW_SCALE = 9.5f;
+static const float RW_MARGIN = 5.f;
 
-// Left control block (2 columns x 4 rows) and right output block (2 x 4)
-static const float RW_LCOL[2] = {28.f, 68.f};
-static const float RW_LROW[4] = {90.f, 138.f, 186.f, 234.f};
-static const float RW_RCOL[2] = {352.f, 392.f};
-static const float RW_ROUT[4] = {100.f, 150.f, 200.f, 250.f};
+// Left control block and right output block: 2 columns x 4 rows of 40 x 50 cells
+static const float RW_LCOL[2] = {28.f, 72.f};
+static const float RW_RCOL[2] = {348.f, 392.f};
+static const float RW_ROW_TOP[4] = {56.f, 112.f, 168.f, 224.f};
+static const float RW_CELL_W = 40.f, RW_CELL_H = 50.f;
+// Returns the knob / jack centre y for a control row whose top edge is `top`
+// (30 px below the top edge).
+static float rwCtlY(float top) { return top + 30.f; } // knob / jack centre inside a cell
 
-// Position bars (bottom strip)
+// Position strip: plate, header row, 16 bar pairs, number row
+static const float RW_STRIP_TOP = 276.f;
+static const float RW_STRIP_H = 80.f;
 static const float RW_BARS_X = 40.f;
-static const float RW_BARS_Y = 298.f;
+static const float RW_BARS_Y = 292.f;
 static const float RW_BARS_W = 340.f;
-static const float RW_BARS_H = 64.f;
-static const float RW_BAR_H = 46.f; // bar area height inside the widget
+static const float RW_BARS_H = 54.f;
+static const float RW_BAR_H = 40.f; // bar area height inside the widget
 
 // ------------------------------------------------------------
 // Module
 // ------------------------------------------------------------
+// Polyphonic random-walk generator: up to 16 walkers moving independently in
+// a ±10 V arena, each producing position, gate and V/Oct outputs.
 struct RandomWalk : Module
 {
     enum ParamId
@@ -77,6 +129,7 @@ struct RandomWalk : Module
         LIGHTS_LEN
     };
 
+    // Selectable ranges for the random V/Oct outputs, exposed via the menu.
     enum VoctRange
     {
         RANGE_0_1,
@@ -86,6 +139,7 @@ struct RandomWalk : Module
         RANGE_0_5,
         NUM_RANGES
     };
+    // Selectable gate durations, exposed via the menu.
     enum GateDuration
     {
         GATE_TRIGGER,
@@ -142,6 +196,10 @@ struct RandomWalk : Module
     float xcPos[MAX_BALLS] = {};     // Y value where X crossed zero
     float ycPos[MAX_BALLS] = {};     // X value where Y crossed zero
 
+    // Constructor: configures all five parameters (with snapping where
+    // useful), the five CV inputs, and the six polyphonic outputs. Seeds the
+    // RNG, resets the walkers, and initialises each walker's random V/Oct
+    // value plus a tiny momentum offset (so smoothness = 1 still moves).
     RandomWalk()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -168,7 +226,7 @@ struct RandomWalk : Module
 
         std::random_device rd;
         rng.seed(rd());
-        onReset();
+        resetWalkers();
         for (int i = 0; i < MAX_BALLS; ++i)
         {
             generateRandomVoctForBall(i, true);
@@ -180,7 +238,9 @@ struct RandomWalk : Module
         }
     }
 
-    void onReset() override
+    // Clears every walker's position, trails, and flash data. Intentionally
+    // keeps prevDeltaX/Y so momentum survives a reset if the user wants it to.
+    void resetWalkers()
     {
         for (int i = 0; i < MAX_BALLS; ++i)
         {
@@ -197,6 +257,15 @@ struct RandomWalk : Module
         trailTimer = 0.f;
     }
 
+    // Rack reset hook: resets the walkers, leaving their momentum intact.
+    void onReset(const ResetEvent &e) override
+    {
+        Module::onReset(e);
+        resetWalkers();
+    }
+
+    // Generates a new random V/Oct value for walker `ball` on the X or Y
+    // axis, scaled according to that axis's selected VoctRange.
     void generateRandomVoctForBall(int ball, bool forX)
     {
         std::uniform_real_distribution<double> randRaw(-1.0, 1.0);
@@ -226,6 +295,7 @@ struct RandomWalk : Module
         }
     }
 
+    // Returns the length in seconds of the given gate duration setting.
     double getGateDurationSeconds(GateDuration dur)
     {
         switch (dur)
@@ -249,6 +319,9 @@ struct RandomWalk : Module
         }
     }
 
+    // Reads the four main controls plus their CV inputs, computes the
+    // effective speed / step / smoothness / ball-count values, and updates
+    // the walker count (restarting the trails of any newly active walkers).
     void updateParameters()
     {
         float spd = params[SPEED_PARAM].getValue();
@@ -282,6 +355,11 @@ struct RandomWalk : Module
         }
     }
 
+    // Main audio callback: reads parameters and CVs, handles the reset
+    // button/gate, advances every walker with AR(1)-momentum Gaussian steps,
+    // reflects them off the walls, detects axis zero crossings (firing gates
+    // and re-rolling that axis's V/Oct), writes the six polyphonic outputs,
+    // and samples the trail buffer at a fixed rate.
     void process(const ProcessArgs &args) override
     {
         updateParameters();
@@ -290,7 +368,7 @@ struct RandomWalk : Module
                         (inputs[RESET_CV_INPUT].getVoltage() > 1.0f);
         if (resetNow && !lastResetState)
         {
-            onReset();
+            resetWalkers();
             // re-seed random initial deltas so smoothness=1 moves after reset
             std::uniform_real_distribution<double> tiny(-1e-4, 1e-4);
             for (int i = 0; i < MAX_BALLS; ++i)
@@ -435,6 +513,8 @@ struct RandomWalk : Module
         }
     }
 
+    // Serialises the V/Oct ranges, gate durations, ball count and smoothness
+    // so a patch reopens with the same walker behaviour.
     json_t *dataToJson() override
     {
         json_t *root = json_object();
@@ -448,21 +528,23 @@ struct RandomWalk : Module
         return root;
     }
 
+    // Restores the V/Oct ranges, gate durations, ball count and smoothness
+    // from a saved patch, clamping each to its valid range.
     void dataFromJson(json_t *root) override
     {
         json_t *j;
         j = json_object_get(root, "voctXRange");
         if (j)
-            voctXRange = (VoctRange)json_integer_value(j);
+            voctXRange = (VoctRange)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_RANGES - 1);
         j = json_object_get(root, "voctYRange");
         if (j)
-            voctYRange = (VoctRange)json_integer_value(j);
+            voctYRange = (VoctRange)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_RANGES - 1);
         j = json_object_get(root, "gateXDuration");
         if (j)
-            gateXDuration = (GateDuration)json_integer_value(j);
+            gateXDuration = (GateDuration)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_GATE_DURS - 1);
         j = json_object_get(root, "gateYDuration");
         if (j)
-            gateYDuration = (GateDuration)json_integer_value(j);
+            gateYDuration = (GateDuration)rack::math::clamp((int)json_integer_value(j), 0, (int)NUM_GATE_DURS - 1);
         j = json_object_get(root, "numBalls");
         if (j)
         {
@@ -473,7 +555,7 @@ struct RandomWalk : Module
         j = json_object_get(root, "smoothness");
         if (j)
         {
-            smoothness = json_real_value(j);
+            smoothness = (double)rack::math::clamp((float)json_number_value(j), 0.f, 1.f);
             params[SMOOTHNESS_PARAM].setValue((float)smoothness);
         }
     }
@@ -483,75 +565,7 @@ struct RandomWalk : Module
 // with the same-named helpers in the other module files.
 namespace
 {
-
-    // ------------------------------------------------------------
-    // Theme (same palette as the other AGMM modules)
-    // ------------------------------------------------------------
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    // ------------------------------------------------------------
-    // AGMM logo
-    // ------------------------------------------------------------
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-
-        // Pill body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                             nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-
-        // Tiny cell triangle
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-
-        // Wordmark
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
+    namespace ag = agmm;
 
     // ------------------------------------------------------------
     // Walker helpers
@@ -559,46 +573,17 @@ namespace
 
     // Colours run from cyan through violet to magenta, so all 16 stay distinct
     // and fit the theme. The colour depends on the walker index, not on the count.
+    // Returns the HSL colour for walker `i` at the requested saturation and
+    // lightness; the hue sweeps from 0.5 (cyan) toward 0.95 (magenta).
     NVGcolor ballColor(int i, float sat, float light)
     {
         float h = 0.5f + 0.45f * (float)i / 15.f;
         return nvgHSL(h, sat, light);
     }
 
-    NVGcolor withAlpha(NVGcolor c, float a)
-    {
-        c.a = a;
-        return c;
-    }
-
-    // Shaded sphere with specular highlight and rim
-    void drawBall(NVGcontext *vg, float cx, float cy, float r, NVGcolor hi, NVGcolor base, NVGcolor edge)
-    {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx - r * 0.35f, cy - r * 0.4f, r * 0.1f, r * 1.25f, hi, base));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r - 0.4f);
-        nvgStrokeColor(vg, edge);
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Bounce light on the lower right
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx + r * 0.38f, cy + r * 0.42f, r * 0.3f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 22));
-        nvgFill(vg);
-
-        // Specular
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx - r * 0.38f, cy - r * 0.42f, r * 0.22f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 215));
-        nvgFill(vg);
-    }
-
     // Fading path (older = thinner and fainter). K points per stroked segment.
+    // Draws a polyline through the given points, splitting it into K-point
+    // segments so the stroke width and alpha can taper toward older points.
     void drawTrail(NVGcontext *vg, const float *xs, const float *ys, int n, NVGcolor col,
                    float width, float alpha, int K)
     {
@@ -620,149 +605,64 @@ namespace
         }
     }
 
+    // Block title with hairlines that stop short of the text
+    // Draws a centred block header whose hairlines span from cx-halfW to
+    // cx+halfW, stopping a measured distance from the text.
+    void blockHeader(NVGcontext *vg, float cx, float y, const char *txt, float halfW, NVGcolor col)
+    {
+        float gap = ag::textWidth(vg, txt, 8.f, 2.f) / 2.f + 6.f;
+        ag::text(vg, cx, y, txt, 8.f, col, ag::ALIGN_C, 2.f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, cx - halfW, y);
+        nvgLineTo(vg, cx - gap, y);
+        nvgMoveTo(vg, cx + gap, y);
+        nvgLineTo(vg, cx + halfW, y);
+        nvgStrokeColor(vg, ag::withA(col, 0.35f));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
+
     // ------------------------------------------------------------
-    // Panel background
+    // Panel background: title, display frame, labelled plates, strip plate
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, CONTROL/OUTPUT headers, the
+    // 4x2 left control cells, the 4x2 right output cells, and the position
+    // strip plate with its captions.
     struct RWPanelBackground : TransparentWidget
     {
         RWPanelBackground() { box.size = Vec(RW_PANEL_W, RW_PANEL_H); }
 
-        void label(NVGcontext *vg, float x, float y, const char *txt)
-        {
-            drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-        }
-
-        void plate(NVGcontext *vg, float x, float y, float w, float h)
-        {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, x, y, w, h, 6.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        void ring(NVGcontext *vg, float cx, float cy, float r)
-        {
-            nvgBeginPath(vg);
-            nvgCircle(vg, cx, cy, r);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Caption with an underline (side blocks)
-        void caption(NVGcontext *vg, float cx, float y, const char *txt, NVGcolor col, float x1, float x2)
-        {
-            drawText(vg, cx, y, txt, 8.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, x1, y + 8.f);
-            nvgLineTo(vg, x2, y + 8.f);
-            nvgStrokeColor(vg, withAlpha(col, 0.35f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-        }
-
-        // Output cell: label on top, jack below
-        void outCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-            label(vg, cx, cy - 19.f, txt);
-        }
-
-        // Left block cells: control in the middle, label below
-        void jackCell(NVGcontext *vg, float cx, float cy, const char *txt)
-        {
-            plate(vg, cx - 17.f, cy - 17.f, 34.f, 34.f);
-            label(vg, cx, cy + 25.f, txt);
-        }
-        void knobCell(NVGcontext *vg, float cx, float cy, float r, const char *txt)
-        {
-            ring(vg, cx, cy, r);
-            label(vg, cx, cy + 25.f, txt);
-        }
-
+        // Draws all static panel art: base panel, bezel, the two block
+        // headers, the eight control/jack cells (left) and eight output/reset
+        // cells (right, outputs tinted), and the walker-position strip plate.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
 
-            // Base gradient
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, RW_PANEL_W, RW_PANEL_H);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, RW_PANEL_H, colBgTop(), colBgBottom()));
-            nvgFill(vg);
+            ag::panelBase(vg, RW_PANEL_W, RW_PANEL_H, "RANDOMWALK");
+            ag::bezel(vg, RW_DISP_X, RW_DISP_Y, RW_DISP_W, RW_DISP_H);
 
-            // Brushed texture
-            nvgStrokeWidth(vg, 1.f);
-            for (int y = 0; y < (int)RW_PANEL_H; y += 3)
+            blockHeader(vg, 50.f, 44.f, "CONTROL", 42.f, ag::accent());
+            blockHeader(vg, 370.f, 44.f, "OUTPUT", 42.f, ag::violet());
+
+            // ---- left block: knob cell + its CV jack cell on each row ----
+            const char *knobL[4] = {"SPEED", "STEP", "SMOOTH", "BALLS"};
+            const char *cvL[4] = {"SPD CV", "STEP CV", "SMTH CV", "BALL CV"};
+            for (int r = 0; r < 4; ++r)
             {
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, 0, y + 0.5f);
-                nvgLineTo(vg, RW_PANEL_W, y + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-                nvgStroke(vg);
+                ag::cell(vg, RW_LCOL[0], RW_ROW_TOP[r], RW_CELL_W, RW_CELL_H, knobL[r], false, 7.f);
+                ag::cell(vg, RW_LCOL[1], RW_ROW_TOP[r], RW_CELL_W, RW_CELL_H, cvL[r], false, 7.f);
             }
 
-            // Edge highlight
-            nvgBeginPath(vg);
-            nvgRect(vg, 0.5f, 0.5f, RW_PANEL_W - 1.f, RW_PANEL_H - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            // ---- right block (outputs tinted, reset cells plain) ----
+            const char *outL[8] = {"X", "Y", "GATE X", "GATE Y", "V/OCT X", "V/OCT Y", "RESET", "RESET IN"};
+            for (int i = 0; i < 8; ++i)
+                ag::cell(vg, RW_RCOL[i % 2], RW_ROW_TOP[i / 2], RW_CELL_W, RW_CELL_H, outL[i], i < 6, 7.f);
 
-            // Logo + title
-            drawLogo(vg, RW_PANEL_W / 2.f, 13.f);
-            drawText(vg, RW_PANEL_W / 2.f, 31.f, "RANDOMWALK", 13.f, colText(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-
-            // Display bezel
-            float bx = RW_DISP_X - 5.f, by = RW_DISP_Y - 5.f;
-            float bw = RW_DISP_W + 10.f, bh = RW_DISP_H + 10.f;
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                               nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-            nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-            nvgFill(vg);
-
-            // Block captions
-            caption(vg, 48.f, 54.f, "CONTROL", colAccent(), 12.f, 84.f);
-            caption(vg, 372.f, 54.f, "OUTPUT", colViolet(), 335.f, 409.f);
-
-            // ---- left block ----
-            const float l0 = RW_LCOL[0], l1 = RW_LCOL[1];
-            knobCell(vg, l0, RW_LROW[0], 18.f, "SPEED");
-            jackCell(vg, l1, RW_LROW[0], "SPD CV");
-            knobCell(vg, l0, RW_LROW[1], 18.f, "STEP");
-            jackCell(vg, l1, RW_LROW[1], "STEP CV");
-            knobCell(vg, l0, RW_LROW[2], 18.f, "SMOOTH");
-            jackCell(vg, l1, RW_LROW[2], "SMTH CV");
-            knobCell(vg, l0, RW_LROW[3], 18.f, "BALLS");
-            jackCell(vg, l1, RW_LROW[3], "BALLS CV");
-
-            // ---- right block ----
-            const float r0 = RW_RCOL[0], r1 = RW_RCOL[1];
-            outCell(vg, r0, RW_ROUT[0], "X");
-            outCell(vg, r1, RW_ROUT[0], "Y");
-            outCell(vg, r0, RW_ROUT[1], "GATE X");
-            outCell(vg, r1, RW_ROUT[1], "GATE Y");
-            outCell(vg, r0, RW_ROUT[2], "V/OCT X");
-            outCell(vg, r1, RW_ROUT[2], "V/OCT Y");
-            outCell(vg, r0, RW_ROUT[3], "RESET");
-            outCell(vg, r1, RW_ROUT[3], "RESET IN");
-
-            // ---- position bars plate ----
-            plate(vg, 34.f, 284.f, 352.f, 80.f);
-            drawText(vg, 44.f, 292.f, "WALKER POSITION", 6.f, colAccent(),
-                     NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.5f);
-            drawText(vg, 376.f, 292.f, "X | Y", 6.f, colDim(),
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.5f);
+            // ---- position strip ----
+            ag::plate(vg, RW_PANEL_W / 2.f, RW_STRIP_TOP, 352.f, RW_STRIP_H);
+            ag::text(vg, 46.f, RW_STRIP_TOP + 9.f, "WALKER POSITION", 7.f, ag::accent(), ag::ALIGN_L, 1.f);
+            ag::text(vg, 374.f, RW_STRIP_TOP + 9.f, "X | Y", 7.f, ag::dim(), ag::ALIGN_R, 1.f);
 
             Widget::draw(args);
         }
@@ -771,6 +671,10 @@ namespace
     // ------------------------------------------------------------
     // Arena display
     // ------------------------------------------------------------
+    // Live arena widget: draws the playfield, grid, axes and origin ring on
+    // layer 0, and the walkers' trails, position markers, momentum ticks and
+    // wall/crossing flashes on layer 1, along with header/footer readouts.
+    // Uses a demo scene in the module browser.
     struct RWDisplayWidget : TransparentWidget
     {
         RandomWalk *module = nullptr;
@@ -781,77 +685,76 @@ namespace
             box.size = Vec(RW_DISP_W, RW_DISP_H);
         }
 
-        // Static background: metal rail, glass playfield, grid, rail ticks
+        // Static background: screen, header/footer hairlines, rail, playfield, grid
+        // Draws the display screen, header/footer dividers, the raised rail,
+        // dark playfield, 2 V rail ticks, grid lines, axes and origin ring.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            const float W = RW_DISP_W, H = RW_DISP_H, cx = W / 2.f, cy = H / 2.f, m = RW_MARGIN;
+            ag::screen(vg, 0.f, 0.f, RW_DISP_W, RW_DISP_H);
+
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 6.f, 14.5f);
+            nvgLineTo(vg, RW_DISP_W - 6.f, 14.5f);
+            nvgMoveTo(vg, 6.f, 217.5f);
+            nvgLineTo(vg, RW_DISP_W - 6.f, 217.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            nvgSave(vg);
+            nvgTranslate(vg, RW_ARENA_X, RW_ARENA_Y);
+            const float A = RW_ARENA, cx = A / 2.f, cy = A / 2.f, m = RW_MARGIN;
+            const float step = 2.f * RW_SCALE; // 2 V
 
             // Rail
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0, 0, W, H, 4.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H,
-                                               nvgRGB(0x3a, 0x41, 0x4c), nvgRGB(0x14, 0x17, 0x1c)));
+            nvgRect(vg, 0, 0, A, A);
+            nvgFillColor(vg, nvgRGB(0x1a, 0x1e, 0x24));
             nvgFill(vg);
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f, 4.f);
+            nvgRect(vg, 0.5f, 0.5f, A - 1.f, A - 1.f);
             nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 40));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
             // Playfield
             nvgBeginPath(vg);
-            nvgRect(vg, m, m, W - 2.f * m, H - 2.f * m);
-            nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, 20.f, 150.f,
-                                               nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x0a)));
+            nvgRect(vg, m, m, A - 2.f * m, A - 2.f * m);
+            nvgFillColor(vg, nvgRGB(0x05, 0x09, 0x0e));
             nvgFill(vg);
 
-            // Inner shadow where the rail meets the glass
-            nvgBeginPath(vg);
-            nvgRect(vg, m + 0.5f, m + 0.5f, W - 2.f * m - 1.f, H - 2.f * m - 1.f);
-            nvgStrokeColor(vg, nvgRGBA(0, 0, 0, 200));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            // Rail ticks every 2 V and corner rivets
+            // Rail ticks every 2 V
             nvgBeginPath(vg);
             for (int k = -5; k <= 5; ++k)
             {
-                float p = cx + k * 20.f + 0.5f;
-                nvgMoveTo(vg, p, 1.5f);
-                nvgLineTo(vg, p, 4.f);
-                nvgMoveTo(vg, p, H - 4.f);
-                nvgLineTo(vg, p, H - 1.5f);
-                float q = cy + k * 20.f + 0.5f;
-                nvgMoveTo(vg, 1.5f, q);
-                nvgLineTo(vg, 4.f, q);
-                nvgMoveTo(vg, W - 4.f, q);
-                nvgLineTo(vg, W - 1.5f, q);
+                float p = cx + k * step + 0.5f;
+                nvgMoveTo(vg, p, 1.f);
+                nvgLineTo(vg, p, 3.5f);
+                nvgMoveTo(vg, p, A - 3.5f);
+                nvgLineTo(vg, p, A - 1.f);
+                float q = cy + k * step + 0.5f;
+                nvgMoveTo(vg, 1.f, q);
+                nvgLineTo(vg, 3.5f, q);
+                nvgMoveTo(vg, A - 3.5f, q);
+                nvgLineTo(vg, A - 1.f, q);
             }
             nvgStrokeColor(vg, nvgRGBA(0xc9, 0xd1, 0xdc, 90));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            nvgBeginPath(vg);
-            nvgCircle(vg, 3.f, 3.f, 1.2f);
-            nvgCircle(vg, W - 3.f, 3.f, 1.2f);
-            nvgCircle(vg, 3.f, H - 3.f, 1.2f);
-            nvgCircle(vg, W - 3.f, H - 3.f, 1.2f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 90));
-            nvgFill(vg);
-
             // Grid every 2 V
             nvgBeginPath(vg);
-            for (int k = -5; k <= 5; ++k)
+            for (int k = -4; k <= 4; ++k)
             {
                 if (k == 0)
                     continue;
-                float p = cx + k * 20.f + 0.5f;
+                float p = cx + k * step + 0.5f;
                 nvgMoveTo(vg, p, m);
-                nvgLineTo(vg, p, H - m);
-                float q = cy + k * 20.f + 0.5f;
+                nvgLineTo(vg, p, A - m);
+                float q = cy + k * step + 0.5f;
                 nvgMoveTo(vg, m, q);
-                nvgLineTo(vg, W - m, q);
+                nvgLineTo(vg, A - m, q);
             }
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 12));
             nvgStrokeWidth(vg, 1.f);
@@ -860,9 +763,9 @@ namespace
             // Axes (a gate fires whenever a walker crosses one)
             nvgBeginPath(vg);
             nvgMoveTo(vg, cx + 0.5f, m);
-            nvgLineTo(vg, cx + 0.5f, H - m);
+            nvgLineTo(vg, cx + 0.5f, A - m);
             nvgMoveTo(vg, m, cy + 0.5f);
-            nvgLineTo(vg, W - m, cy + 0.5f);
+            nvgLineTo(vg, A - m, cy + 0.5f);
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 38));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
@@ -874,9 +777,14 @@ namespace
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
+            nvgRestore(vg);
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: draws the walkers' wall flashes, axis-crossing
+        // rings, trails, momentum ticks and flat balls, plus the header
+        // (WALKERS/SPD) and footer (STEP/SMOOTH) readouts. Uses a demo scene
+        // with six synthetic walkers when there is no module.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -885,7 +793,7 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
-            const float W = RW_DISP_W, H = RW_DISP_H, cx = W / 2.f, cy = H / 2.f;
+            const float A = RW_ARENA, cx = A / 2.f, cy = A / 2.f;
             const float S = RW_SCALE, m = RW_MARGIN;
             const float R = 4.4f; // ball radius in pixels
 
@@ -910,7 +818,7 @@ namespace
 
             if (module)
             {
-                n = module->numBalls;
+                n = rack::math::clamp(module->numBalls, 1, RW_N);
                 for (int i = 0; i < n; ++i)
                 {
                     px[i] = (float)module->x[i];
@@ -920,7 +828,7 @@ namespace
                     fw[i] = module->flashWall[i];
                     fxc[i] = module->flashXc[i];
                     fyc[i] = module->flashYc[i];
-                    ws[i] = module->wallSide[i];
+                    ws[i] = rack::math::clamp(module->wallSide[i], 0, 3);
                     wp[i] = module->wallPos[i];
                     xp[i] = module->xcPos[i];
                     yp[i] = module->ycPos[i];
@@ -976,15 +884,20 @@ namespace
                 smooth = 0.5f;
             }
 
-            // ---- wall reflection flashes on the rail ----
+            // ---- arena content, clipped to the arena ----
+            nvgSave(vg);
+            nvgTranslate(vg, RW_ARENA_X, RW_ARENA_Y);
+            nvgScissor(vg, 0, 0, A, A);
             nvgLineCap(vg, NVG_ROUND);
+
+            // wall reflection flashes on the rail
             for (int i = 0; i < n; ++i)
             {
                 if (fw[i] < 0.02f)
                     continue;
                 float f = fw[i];
                 float a = (ws[i] <= 1) ? (cy - wp[i] * S) : (cx + wp[i] * S);
-                float lo = std::max(m, a - 16.f), hi = std::min(H - m, a + 16.f);
+                float lo = std::max(m, a - 16.f), hi = std::min(A - m, a + 16.f);
                 float x0, y0, x1, y1;
                 if (ws[i] == 0)
                 {
@@ -994,7 +907,7 @@ namespace
                 }
                 else if (ws[i] == 1)
                 {
-                    x0 = x1 = W - m - 0.5f;
+                    x0 = x1 = A - m - 0.5f;
                     y0 = lo;
                     y1 = hi;
                 }
@@ -1006,30 +919,19 @@ namespace
                 }
                 else
                 {
-                    y0 = y1 = H - m - 0.5f;
+                    y0 = y1 = A - m - 0.5f;
                     x0 = lo;
                     x1 = hi;
                 }
-                for (int pass = 0; pass < 2; ++pass)
-                {
-                    nvgBeginPath(vg);
-                    nvgMoveTo(vg, x0, y0);
-                    nvgLineTo(vg, x1, y1);
-                    if (pass == 0)
-                    {
-                        nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.6f), 0.28f * f));
-                        nvgStrokeWidth(vg, 7.f);
-                    }
-                    else
-                    {
-                        nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.85f), f));
-                        nvgStrokeWidth(vg, 1.8f);
-                    }
-                    nvgStroke(vg);
-                }
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, x0, y0);
+                nvgLineTo(vg, x1, y1);
+                nvgStrokeColor(vg, ag::withA(ballColor(i, 0.9f, 0.85f), f));
+                nvgStrokeWidth(vg, 2.f);
+                nvgStroke(vg);
             }
 
-            // ---- axis crossing flashes (gate triggers) ----
+            // axis crossing flashes (gate triggers)
             for (int i = 0; i < n; ++i)
             {
                 for (int a = 0; a < 2; ++a)
@@ -1042,45 +944,35 @@ namespace
                     NVGcolor c = ballColor(i, 0.9f, 0.75f);
                     nvgBeginPath(vg);
                     nvgCircle(vg, ax, ay, 2.f + (1.f - f) * 9.f);
-                    nvgStrokeColor(vg, withAlpha(c, 0.9f * f));
-                    nvgStrokeWidth(vg, 1.2f);
+                    nvgStrokeColor(vg, ag::withA(c, 0.9f * f));
+                    nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                     nvgBeginPath(vg);
                     nvgCircle(vg, ax, ay, 1.8f);
-                    nvgFillColor(vg, withAlpha(c, f));
+                    nvgFillColor(vg, ag::withA(c, f));
                     nvgFill(vg);
                 }
             }
 
-            // ---- paths ----
+            // paths (hairline-width, fading with age)
             for (int i = 0; i < n; ++i)
-            {
-                NVGcolor c = ballColor(i, 0.85f, 0.6f);
-                drawTrail(vg, tx[i], ty[i], tn[i], c, 4.f, 0.12f, 14);
-                drawTrail(vg, tx[i], ty[i], tn[i], c, 1.2f, 0.60f, 5);
-            }
+                drawTrail(vg, tx[i], ty[i], tn[i], ballColor(i, 0.85f, 0.6f), 1.2f, 0.65f, 5);
 
-            // ---- shadows ----
-            nvgBeginPath(vg);
-            for (int i = 0; i < n; ++i)
-                nvgCircle(vg, cx + px[i] * S + 1.8f, cy - py[i] * S + 2.6f, R);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-            nvgFill(vg);
-
-            // ---- momentum ticks, halos and balls ----
+            // momentum ticks and flat balls
             for (int i = 0; i < n; ++i)
             {
                 float bx = cx + px[i] * S, by = cy - py[i] * S;
                 float flash = std::max(fxc[i], fyc[i]);
-                NVGcolor c = ballColor(i, 0.85f, 0.6f);
 
-                // Halo
-                float ha = 0.12f + 0.32f * flash;
-                nvgBeginPath(vg);
-                nvgCircle(vg, bx, by, R * 3.f);
-                nvgFillPaint(vg, nvgRadialGradient(vg, bx, by, R * 0.6f, R * 3.f,
-                                                   withAlpha(c, ha), withAlpha(c, 0.f)));
-                nvgFill(vg);
+                // flash ring when a gate fires
+                if (flash > 0.02f)
+                {
+                    nvgBeginPath(vg);
+                    nvgCircle(vg, bx, by, R + 3.f);
+                    nvgStrokeColor(vg, ag::withA(ballColor(i, 0.9f, 0.8f), flash));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                }
 
                 // Momentum tick: the direction the walker is carrying, visible with smoothness
                 float mag = std::sqrt(hx[i] * hx[i] + hy[i] * hy[i]);
@@ -1091,44 +983,33 @@ namespace
                     nvgBeginPath(vg);
                     nvgMoveTo(vg, bx + dx * (R + 1.5f), by + dy * (R + 1.5f));
                     nvgLineTo(vg, bx + dx * (R + 1.5f + len), by + dy * (R + 1.5f + len));
-                    nvgStrokeColor(vg, withAlpha(ballColor(i, 0.9f, 0.85f), 0.2f + 0.5f * smooth));
+                    nvgStrokeColor(vg, ag::withA(ballColor(i, 0.9f, 0.85f), 0.2f + 0.5f * smooth));
                     nvgStrokeWidth(vg, 1.2f);
-                    nvgLineCap(vg, NVG_ROUND);
                     nvgStroke(vg);
                 }
 
-                drawBall(vg, bx, by, R,
-                         ballColor(i, 0.9f, 0.86f),
-                         ballColor(i, 0.8f, 0.42f),
-                         ballColor(i, 0.8f, 0.16f));
+                nvgBeginPath(vg);
+                nvgCircle(vg, bx, by, R);
+                nvgFillColor(vg, ballColor(i, 0.85f, 0.58f));
+                nvgFill(vg);
+                nvgStrokeColor(vg, ballColor(i, 0.9f, 0.85f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
             }
+            nvgRestore(vg);
 
-            // ---- scanlines ----
-            nvgBeginPath(vg);
-            for (int y = 0; y < (int)H; y += 3)
-                nvgRect(vg, 0, y + 1, W, 1);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-            nvgFill(vg);
-
-            // ---- glass reflection ----
-            nvgBeginPath(vg);
-            nvgRect(vg, 0, 0, W, H * 0.35f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.35f,
-                                               nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-            nvgFill(vg);
-
-            // ---- readouts ----
+            // ---- readouts: header and footer rows, outside the arena ----
             char buf[32];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 200);
-            NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 220);
+            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
+            NVGcolor cd = ag::dim();
             snprintf(buf, sizeof(buf), "WALKERS %02d", n);
-            drawText(vg, 11.f, 15.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 8.f, 7.f, buf, 7.f, c1, ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "SPD %.1fX", spdFactor);
-            drawText(vg, W - 11.f, 15.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, RW_DISP_W - 8.f, 7.f, buf, 7.f, c1, ag::ALIGN_R, 0.5f);
             snprintf(buf, sizeof(buf), "STEP %.2fV", stepV);
-            drawText(vg, 11.f, H - 15.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 8.f, 225.f, buf, 7.f, cd, ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "SMOOTH %3.0f%%", smooth * 100.f);
-            drawText(vg, W - 11.f, H - 15.f, buf, 7.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, RW_DISP_W - 8.f, 225.f, buf, 7.f, cd, ag::ALIGN_R, 0.5f);
 
             Widget::drawLayer(args, layer);
         }
@@ -1137,6 +1018,10 @@ namespace
     // ------------------------------------------------------------
     // Per-walker position bars (X and Y voltage, bipolar)
     // ------------------------------------------------------------
+    // Live strip of 16 X/Y bar pairs: the static layer draws the empty tracks
+    // and their walker numbers, the layer-1 overlay fills each pair with the
+    // walker's current X (left) and Y (right) voltage, plus gate flashes on
+    // the zero line. Uses sample data in the module browser.
     struct RWBarsWidget : TransparentWidget
     {
         RandomWalk *module = nullptr;
@@ -1147,8 +1032,11 @@ namespace
             box.size = Vec(RW_BARS_W, RW_BARS_H);
         }
 
+        // Returns the width of one slot (the strip is split evenly across 16).
         static float slot() { return RW_BARS_W / (float)RW_N; }
 
+        // Static layer: draws the 16 empty X/Y bar tracks, their zero lines,
+        // and the walker-number row underneath.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -1158,8 +1046,8 @@ namespace
                 float cx = slot() * (i + 0.5f);
 
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, cx - 9.f, 0.f, 8.f, RW_BAR_H, 2.f);
-                nvgRoundedRect(vg, cx + 1.f, 0.f, 8.f, RW_BAR_H, 2.f);
+                nvgRect(vg, cx - 9.f, 0.f, 8.f, RW_BAR_H);
+                nvgRect(vg, cx + 1.f, 0.f, 8.f, RW_BAR_H);
                 nvgFillColor(vg, nvgRGBA(255, 255, 255, 10));
                 nvgFill(vg);
 
@@ -1169,14 +1057,17 @@ namespace
                 nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
                 nvgFill(vg);
 
+                // walker number in its own row under the bars
                 char buf[8];
                 snprintf(buf, sizeof(buf), "%d", i + 1);
-                drawText(vg, cx, RW_BAR_H + 8.f, buf, 6.f, colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
+                ag::text(vg, cx, RW_BAR_H + 8.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.f);
             }
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: fills each active walker's X and Y bars from the
+        // zero line toward their current voltage, with white tip caps and
+        // white flashes when an axis gate fires.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -1188,8 +1079,10 @@ namespace
             const float mid = RW_BAR_H / 2.f;
             const float amp = mid - 2.f;
 
-            int n = module ? module->numBalls : 6;
+            int n = module ? rack::math::clamp(module->numBalls, 1, RW_N) : 6;
 
+            // Draws one bar (left or right of the zero line) given a signed
+            // voltage and the bar's colour.
             auto bar = [&](float xl, float v, NVGcolor col)
             {
                 float h = std::min(std::fabs(v) / 10.f, 1.f) * amp;
@@ -1234,8 +1127,8 @@ namespace
                     vy = 7.f * std::cos(1.9f * i + 0.8f);
                 }
 
-                bar(cx - 9.f, vx, withAlpha(ballColor(i, 0.9f, 0.62f), 0.95f));
-                bar(cx + 1.f, vy, withAlpha(ballColor(i, 0.9f, 0.80f), 0.85f));
+                bar(cx - 9.f, vx, ag::withA(ballColor(i, 0.9f, 0.62f), 0.95f));
+                bar(cx + 1.f, vy, ag::withA(ballColor(i, 0.9f, 0.80f), 0.85f));
 
                 // Gate flashes on the zero line
                 if (fx > 0.02f)
@@ -1263,8 +1156,15 @@ namespace
 // ------------------------------------------------------------
 // Module widget
 // ------------------------------------------------------------
+// Places the static panel, screws, the live arena display, the position-bar
+// strip, the four knob/jack pairs on the left, and the six outputs plus
+// Reset button/input on the right. Also builds the right-click menu for the
+// V/Oct ranges and gate durations.
 struct RandomWalkWidget : ModuleWidget
 {
+    // Builds the widget tree: static background, screws, arena display,
+    // position bars, four left-hand knob/jack pairs, six polyphonic outputs
+    // and the Reset button/jack.
     RandomWalkWidget(RandomWalk *module)
     {
         setModule(module);
@@ -1280,33 +1180,37 @@ struct RandomWalkWidget : ModuleWidget
         addChild(new RWDisplayWidget(module));
         addChild(new RWBarsWidget(module));
 
-        // ---- left block: knob + its CV jack ----
+        // ---- left block: knob + its CV jack on each row ----
         const float l0 = RW_LCOL[0], l1 = RW_LCOL[1];
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, RW_LROW[0]), module, RandomWalk::SPEED_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, RW_LROW[0]), module, RandomWalk::SPEED_CV_INPUT));
-
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, RW_LROW[1]), module, RandomWalk::STEP_SIZE_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, RW_LROW[1]), module, RandomWalk::STEP_CV_INPUT));
-
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, RW_LROW[2]), module, RandomWalk::SMOOTHNESS_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, RW_LROW[2]), module, RandomWalk::SMOOTH_CV_INPUT));
-
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, RW_LROW[3]), module, RandomWalk::NUM_BALLS_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, RW_LROW[3]), module, RandomWalk::BALLS_CV_INPUT));
+        const int knobs[4] = {RandomWalk::SPEED_PARAM, RandomWalk::STEP_SIZE_PARAM,
+                              RandomWalk::SMOOTHNESS_PARAM, RandomWalk::NUM_BALLS_PARAM};
+        const int cvs[4] = {RandomWalk::SPEED_CV_INPUT, RandomWalk::STEP_CV_INPUT,
+                            RandomWalk::SMOOTH_CV_INPUT, RandomWalk::BALLS_CV_INPUT};
+        for (int r = 0; r < 4; ++r)
+        {
+            float y = rwCtlY(RW_ROW_TOP[r]);
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, y), module, knobs[r]));
+            addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, y), module, cvs[r]));
+        }
 
         // ---- right block (all outputs are polyphonic) ----
         const float r0 = RW_RCOL[0], r1 = RW_RCOL[1];
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, RW_ROUT[0]), module, RandomWalk::X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, RW_ROUT[0]), module, RandomWalk::Y_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, RW_ROUT[1]), module, RandomWalk::GATE_X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, RW_ROUT[1]), module, RandomWalk::GATE_Y_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, RW_ROUT[2]), module, RandomWalk::VOCT_X_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, RW_ROUT[2]), module, RandomWalk::VOCT_Y_OUTPUT));
+        const float y0 = rwCtlY(RW_ROW_TOP[0]), y1 = rwCtlY(RW_ROW_TOP[1]);
+        const float y2 = rwCtlY(RW_ROW_TOP[2]), y3 = rwCtlY(RW_ROW_TOP[3]);
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, y0), module, RandomWalk::X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, y0), module, RandomWalk::Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, y1), module, RandomWalk::GATE_X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, y1), module, RandomWalk::GATE_Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, y2), module, RandomWalk::VOCT_X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, y2), module, RandomWalk::VOCT_Y_OUTPUT));
 
-        addParam(createParamCentered<VCVButton>(Vec(r0, RW_ROUT[3]), module, RandomWalk::RESET_BUTTON));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(r1, RW_ROUT[3]), module, RandomWalk::RESET_CV_INPUT));
+        addParam(createParamCentered<VCVButton>(Vec(r0, y3), module, RandomWalk::RESET_BUTTON));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(r1, y3), module, RandomWalk::RESET_CV_INPUT));
     }
 
+    // Adds the right-click menu: "Voct X range" and "Voct Y range" submenus
+    // (each with a checkmark on the active range, and a re-roll on selection)
+    // and "Gate X duration" / "Gate Y duration" submenus.
     void appendContextMenu(ui::Menu *menu) override
     {
         RandomWalk *module = dynamic_cast<RandomWalk *>(this->module);
@@ -1322,7 +1226,7 @@ struct RandomWalkWidget : ModuleWidget
                                              for (int i = 0; i < RandomWalk::NUM_RANGES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(rangeNames[i],
-                                                                                  (module->voctXRange == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->voctXRange == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->voctXRange = (RandomWalk::VoctRange)i;
@@ -1338,7 +1242,7 @@ struct RandomWalkWidget : ModuleWidget
                                              for (int i = 0; i < RandomWalk::NUM_RANGES; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(rangeNames[i],
-                                                                                  (module->voctYRange == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->voctYRange == i),
                                                                                   [=]()
                                                                                   {
                                                                                       module->voctYRange = (RandomWalk::VoctRange)i;
@@ -1354,7 +1258,7 @@ struct RandomWalkWidget : ModuleWidget
                                              for (int i = 0; i < RandomWalk::NUM_GATE_DURS; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(gateNames[i],
-                                                                                  (module->gateXDuration == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->gateXDuration == i),
                                                                                   [=]()
                                                                                   { module->gateXDuration = (RandomWalk::GateDuration)i; }));
                                              }
@@ -1366,7 +1270,7 @@ struct RandomWalkWidget : ModuleWidget
                                              for (int i = 0; i < RandomWalk::NUM_GATE_DURS; ++i)
                                              {
                                                  submenu->addChild(createMenuItem(gateNames[i],
-                                                                                  (module->gateYDuration == i) ? "✔" : "",
+                                                                                  CHECKMARK(module->gateYDuration == i),
                                                                                   [=]()
                                                                                   { module->gateYDuration = (RandomWalk::GateDuration)i; }));
                                              }

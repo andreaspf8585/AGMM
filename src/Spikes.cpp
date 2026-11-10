@@ -1,4 +1,6 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -6,14 +8,25 @@
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
-static const int SP_TRAIL = 400;				// points kept in the 3D trail
+static const int SP_TRAIL = 400;                // points kept in the 3D trail
 static const float SP_W = RACK_GRID_WIDTH * 16; // 240
-static const float SP_H = RACK_GRID_HEIGHT;		// 380
-static const float SP_DX = 20.f, SP_DY = 46.f, SP_DW = 200.f, SP_DH = 118.f;
+static const float SP_H = RACK_GRID_HEIGHT;     // 380
+
+// 3D display (200 x 126): header row, framed view, footer row
+static const float SP_DX = 20.f, SP_DY = 30.f, SP_DW = 200.f, SP_DH = 126.f;
+static const float SP_VX = 4.f, SP_VY = 17.f, SP_VW = 192.f, SP_VH = 92.f; // view frame
+
+// Knob grid: 3 columns of 66 px wide cells (label at +10, knob at +32)
 static const float SP_KCOL[3] = {40.f, 120.f, 200.f};
-static const float SP_KROW[2] = {208.f, 274.f};
-static const float SP_JY = 346.f;
-static float spJx(int i) { return 30.f + 30.f * i; } // 7 jacks, 30 px apart
+static const float SP_CELL_W = 66.f;
+static const float SP_KTOP[2] = {170.f, 230.f};
+static const float SP_KCELL_H = 54.f;
+
+// Jack row: three CV inputs, a gap, four outputs (cells 30 x 50, jack at +30)
+static const float SP_IOHDR = 296.f;
+static const float SP_IOTOP = 306.f;
+static const float SP_IOCELL_W = 30.f, SP_IOCELL_H = 50.f;
+static float spJx(int i) { return i < 3 ? 20.f + 31.f * i : 128.f + 31.f * (i - 3); }
 
 struct Spikes : Module
 {
@@ -102,7 +115,7 @@ struct Spikes : Module
 	{
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-		configParam(SPEED_PARAM, 0.01f, 10.f, 1.f, "Speed");
+		configParam(SPEED_PARAM, 0.01f, 10.f, 1.f, "Speed", "x");
 		configParam(BLEND_PARAM, 0.f, 1.f, 0.5f, "Lorenz / Rössler Blend", "%", 0.f, 100.f);
 		configParam(FRACTAL_PARAM, 0.f, 1.f, 0.2f, "Fractal Amount", "%", 0.f, 100.f);
 		configParam(FRACTAL_SPEED_PARAM, 0.01f, 50.f, 1.f, "Fractal Speed", " Hz");
@@ -119,8 +132,9 @@ struct Spikes : Module
 		configOutput(MIX_OUTPUT, "Mix");
 	}
 
-	void onReset() override
+	void onReset(const ResetEvent &e) override
 	{
+		Module::onReset(e);
 		lorenzX = 0.1;
 		lorenzY = 0.0;
 		lorenzZ = 0.0;
@@ -337,519 +351,374 @@ struct Spikes : Module
 
 namespace
 {
+    namespace ag = agmm;
 
-	NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-	NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-	NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-	NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-	NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-	NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-	NVGcolor withAlpha(NVGcolor c, float a)
-	{
-		c.a = a;
-		return c;
-	}
+    // Block title with hairlines that stop a measured distance from the text
+    void blockHeader(NVGcontext *vg, float x1, float x2, float y, const char *txt, NVGcolor col)
+    {
+        const float cx = (x1 + x2) / 2.f;
+        const float gap = ag::textWidth(vg, txt, 8.f, 2.f) / 2.f + 6.f;
+        ag::text(vg, cx, y, txt, 8.f, col, ag::ALIGN_C, 2.f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, x1, y);
+        nvgLineTo(vg, cx - gap, y);
+        nvgMoveTo(vg, cx + gap, y);
+        nvgLineTo(vg, x2, y);
+        nvgStrokeColor(vg, ag::withA(col, 0.3f));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
 
-	void setFont(NVGcontext *vg)
-	{
-		std::shared_ptr<window::Font> font =
-			APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-		if (font)
-			nvgFontFaceId(vg, font->handle);
-	}
+    // ------------------------------------------------------------
+    // Panel background: title, display frame, one labelled plate per control
+    // ------------------------------------------------------------
+    struct SPPanel : TransparentWidget
+    {
+        SPPanel() { box.size = Vec(SP_W, SP_H); }
 
-	void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-				  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-	{
-		setFont(vg);
-		nvgFontSize(vg, size);
-		nvgTextLetterSpacing(vg, spacing);
-		nvgTextAlign(vg, align);
-		nvgFillColor(vg, col);
-		nvgText(vg, x, y, s, NULL);
-	}
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            ag::panelBase(vg, SP_W, SP_H, "SPIKES");
+            ag::bezel(vg, SP_DX, SP_DY, SP_DW, SP_DH);
 
-	void drawLogo(NVGcontext *vg, float cx, float cy)
-	{
-		const float w = 64.f, h = 18.f;
-		float x = cx - w / 2.f, y = cy - h / 2.f;
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-		nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-		nvgFill(vg);
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x, y, w, h, 7.f);
-		nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-		nvgFill(vg);
-		nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-		nvgStrokeWidth(vg, 1.2f);
-		nvgStroke(vg);
-		const float s = 2.2f;
-		float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-		nvgBeginPath(vg);
-		nvgRect(vg, tx + s, ty, s, s);
-		nvgRect(vg, tx, ty + s * 1.4f, s, s);
-		nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-		nvgFillColor(vg, colAccent());
-		nvgFill(vg);
-		drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-	}
+            const char *names[6] = {"SPEED", "BLEND", "FRACTAL", "FRC SPEED", "SCALE", "ROTATE"};
+            for (int i = 0; i < 6; ++i)
+                ag::cell(vg, SP_KCOL[i % 3], SP_KTOP[i / 3], SP_CELL_W, SP_KCELL_H, names[i]);
 
-	void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
-	{
-		nvgBeginPath(vg);
-		nvgRect(vg, 0, 0, W, H);
-		nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-		nvgFill(vg);
-		nvgStrokeWidth(vg, 1.f);
-		for (int y = 0; y < (int)H; y += 3)
-		{
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, 0, y + 0.5f);
-			nvgLineTo(vg, W, y + 0.5f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-			nvgStroke(vg);
-		}
-		nvgBeginPath(vg);
-		nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-		nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-		nvgStroke(vg);
-		drawLogo(vg, W / 2.f, 13.f);
-		drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-	}
+            // jack row: 3 CV inputs | 4 outputs
+            blockHeader(vg, 6.f, 98.f, SP_IOHDR, "CV IN", ag::accent());
+            blockHeader(vg, 112.f, 236.f, SP_IOHDR, "OUTPUT", ag::violet());
+            const char *io[7] = {"SPEED", "BLEND", "FRACT", "X", "Y", "Z", "MIX"};
+            for (int i = 0; i < 7; ++i)
+                ag::cell(vg, spJx(i), SP_IOTOP, SP_IOCELL_W, SP_IOCELL_H, io[i], i >= 3, 7.f);
 
-	void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
-	{
-		float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-		nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-		nvgFill(vg);
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-		nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-		nvgFill(vg);
-	}
+            Widget::draw(args);
+        }
+    };
 
-	void plate(NVGcontext *vg, float x, float y, float w, float h)
-	{
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x, y, w, h, 6.f);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-		nvgFill(vg);
-		nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
-	}
+    // Display: rotating 3D view of the attractor trail.
+    // Drag to rotate by hand, double-click to reset the view.
+    struct SPDisplay : TransparentWidget
+    {
+        Spikes *module = nullptr;
 
-	void ring(NVGcontext *vg, float cx, float cy, float r)
-	{
-		nvgBeginPath(vg);
-		nvgCircle(vg, cx, cy, r);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-		nvgFill(vg);
-		nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-		nvgStrokeWidth(vg, 1.f);
-		nvgStroke(vg);
-	}
+        float yaw = 0.6f, pitch = 0.5f;
+        double lastT = 0.0;
 
-	void label(NVGcontext *vg, float x, float y, const char *t, float size = 7.f)
-	{
-		drawText(vg, x, y, t, size, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-	}
+        // demo trail for the module browser
+        float demoX[SP_TRAIL], demoY[SP_TRAIL], demoZ[SP_TRAIL];
 
-	void topCell(NVGcontext *vg, float cx, float cy, const char *t, NVGcolor col)
-	{
-		plate(vg, cx - 14.f, cy - 27.f, 28.f, 44.f);
-		drawText(vg, cx, cy - 19.f, t, 6.f, col, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-	}
+        SPDisplay(Spikes *m) : module(m)
+        {
+            box.pos = Vec(SP_DX, SP_DY);
+            box.size = Vec(SP_DW, SP_DH);
 
-	void screenBase(NVGcontext *vg, float W, float H)
-	{
-		nvgBeginPath(vg);
-		nvgRect(vg, 0, 0, W, H);
-		nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-		nvgFill(vg);
-	}
+            for (int i = 0; i < SP_TRAIL; ++i)
+                demoX[i] = demoY[i] = demoZ[i] = 0.f;
+            if (!module)
+            {
+                double s[3] = {0.1, 0.0, 0.0};
+                for (int i = 0; i < 2000; ++i)
+                    Spikes::rk4(s, 0.005, Spikes::lorenzDeriv);
+                for (int i = 0; i < SP_TRAIL; ++i)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        Spikes::rk4(s, 0.005, Spikes::lorenzDeriv);
+                    demoX[i] = (float)(s[0] / 20.0);
+                    demoY[i] = (float)(s[1] / 25.0);
+                    demoZ[i] = (float)((s[2] - 25.0) / 25.0);
+                }
+            }
+        }
 
-	void screenFinish(NVGcontext *vg, float W, float H)
-	{
-		nvgBeginPath(vg);
-		for (int y = 0; y < (int)H; y += 3)
-			nvgRect(vg, 0, y + 1, W, 1);
-		nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-		nvgFill(vg);
-		nvgBeginPath(vg);
-		nvgRect(vg, 0, 0, W, H * 0.3f);
-		nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-		nvgFill(vg);
-	}
+        void onButton(const ButtonEvent &e) override
+        {
+            if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
+                e.consume(this);
+        }
+        void onDragMove(const DragMoveEvent &e) override
+        {
+            yaw += e.mouseDelta.x * 0.012f;
+            pitch = clamp(pitch + e.mouseDelta.y * 0.012f, -1.45f, 1.45f);
+        }
+        void onDoubleClick(const DoubleClickEvent &e) override
+        {
+            yaw = 0.6f;
+            pitch = 0.5f;
+        }
 
-	struct SPPanel : TransparentWidget
-	{
-		SPPanel() { box.size = Vec(SP_W, SP_H); }
-		void draw(const DrawArgs &args) override
-		{
-			NVGcontext *vg = args.vg;
-			drawPanelBase(vg, SP_W, SP_H, "SPIKES");
-			drawBezel(vg, SP_DX, SP_DY, SP_DW, SP_DH);
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            ag::screen(vg, 0.f, 0.f, SP_DW, SP_DH);
 
-			const char *names[6] = {"SPEED", "BLEND", "FRACTAL", "FRC SPEED", "SCALE", "ROTATE"};
-			for (int i = 0; i < 6; ++i)
-			{
-				float cx = SP_KCOL[i % 3], cy = SP_KROW[i / 3];
-				ring(vg, cx, cy, 18.f);
-				label(vg, cx, cy + 25.f, names[i]);
-			}
+            // hairlines under the header row and above the footer row
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 6.f, 13.5f);
+            nvgLineTo(vg, SP_DW - 6.f, 13.5f);
+            nvgMoveTo(vg, 6.f, SP_DH - 13.5f);
+            nvgLineTo(vg, SP_DW - 6.f, SP_DH - 13.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
 
-			// jack row: 3 CV inputs | 4 outputs
-			const char *io[7] = {"SPEED", "BLEND", "FRACT", "X", "Y", "Z", "MIX"};
-			for (int i = 0; i < 7; ++i)
-				topCell(vg, spJx(i), SP_JY, io[i], i < 3 ? colDim() : withAlpha(colAccent(), 0.9f));
+            ag::plotFrame(vg, SP_VX, SP_VY, SP_VW, SP_VH);
+            Widget::draw(args);
+        }
 
-			// divider between inputs and outputs + small captions
-			float dx = 0.5f * (spJx(2) + spJx(3));
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, dx + 0.5f, SP_JY - 27.f);
-			nvgLineTo(vg, dx + 0.5f, SP_JY + 17.f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 40));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-			drawText(vg, spJx(1), SP_JY + 27.f, "CV IN", 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
-			drawText(vg, 0.5f * (spJx(3) + spJx(6)), SP_JY + 27.f, "OUT", 6.f, withAlpha(colAccent(), 0.7f),
-					 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
-			Widget::draw(args);
-		}
-	};
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
+                return;
+            }
+            NVGcontext *vg = args.vg;
+            const float W = SP_DW, H = SP_DH;
 
-	// Display: rotating 3D view of the attractor trail.
-	// Drag to rotate by hand, double-click to reset the view.
-	struct SPDisplay : TransparentWidget
-	{
-		Spikes *module = nullptr;
+            // ---- gather data ----
+            static float ox[SP_TRAIL], oy[SP_TRAIL], oz[SP_TRAIL]; // ordered oldest -> newest
+            int count = SP_TRAIL;
+            float rot = 0.25f;
+            float spd = 1.f, bld = 0.5f, frc = 0.2f;
+            float vx = 0.f, vy = 0.f, vz = 0.f, vm = 0.f;
 
-		float yaw = 0.6f, pitch = 0.5f;
-		double lastT = 0.0;
+            if (module)
+            {
+                int head = rack::math::clamp(module->trailHead, 0, SP_TRAIL - 1);
+                count = rack::math::clamp(module->trailCount, 0, SP_TRAIL);
+                for (int i = 0; i < count; ++i)
+                {
+                    int idx = ((head - (count - 1) + i) % SP_TRAIL + SP_TRAIL) % SP_TRAIL;
+                    ox[i] = module->trailX[idx];
+                    oy[i] = module->trailY[idx];
+                    oz[i] = module->trailZ[idx];
+                }
+                rot = module->params[Spikes::ROTATE_PARAM].getValue();
+                spd = module->dispSpeed;
+                bld = module->dispBlend;
+                frc = module->dispFractal;
+                vx = module->outX;
+                vy = module->outY;
+                vz = module->outZ;
+                vm = module->outMix;
+            }
+            else
+            {
+                for (int i = 0; i < SP_TRAIL; ++i)
+                {
+                    ox[i] = demoX[i];
+                    oy[i] = demoY[i];
+                    oz[i] = demoZ[i];
+                }
+                vx = 3.1f;
+                vy = -1.4f;
+                vz = 0.6f;
+                vm = 0.8f;
+            }
 
-		// demo trail for the module browser
-		float demoX[SP_TRAIL], demoY[SP_TRAIL], demoZ[SP_TRAIL];
+            // ---- advance the view rotation ----
+            double now = system::getTime();
+            float dt = (lastT > 0.0) ? clamp((float)(now - lastT), 0.f, 0.1f) : 0.f;
+            lastT = now;
+            yaw += dt * rot * 1.6f;
+            if (yaw > 2.f * M_PI)
+                yaw -= 2.f * M_PI;
+            if (yaw < -2.f * M_PI)
+                yaw += 2.f * M_PI;
 
-		SPDisplay(Spikes *m) : module(m)
-		{
-			box.pos = Vec(SP_DX, SP_DY);
-			box.size = Vec(SP_DW, SP_DH);
+            // ---- projection (view frame is 192 x 92, centred) ----
+            const float cx = SP_VX + SP_VW / 2.f, cy = SP_VY + SP_VH / 2.f, S = 30.f;
+            const float cyw = std::cos(yaw), syw = std::sin(yaw);
+            const float cp = std::cos(pitch), sp = std::sin(pitch);
 
-			if (!module)
-			{
-				double s[3] = {0.1, 0.0, 0.0};
-				for (int i = 0; i < 2000; ++i)
-					Spikes::rk4(s, 0.005, Spikes::lorenzDeriv);
-				for (int i = 0; i < SP_TRAIL; ++i)
-				{
-					for (int k = 0; k < 3; ++k)
-						Spikes::rk4(s, 0.005, Spikes::lorenzDeriv);
-					demoX[i] = (float)(s[0] / 20.0);
-					demoY[i] = (float)(s[1] / 25.0);
-					demoZ[i] = (float)((s[2] - 25.0) / 25.0);
-				}
-			}
-		}
+            // attractor (x, y, z) -> world (x, -z up, y depth), yaw about the vertical axis, then pitch
+            auto proj = [&](float x, float y, float z, float &px, float &py, float &k)
+            {
+                float wx = x, wy = -z, wz = y;
+                float x1 = wx * cyw + wz * syw;
+                float z1 = -wx * syw + wz * cyw;
+                float y2 = wy * cp - z1 * sp;
+                float z2 = wy * sp + z1 * cp;
+                k = 1.f / (1.f + z2 * 0.22f);
+                px = cx + x1 * S * k;
+                py = cy + y2 * S * k;
+            };
 
-		void onButton(const ButtonEvent &e) override
-		{
-			if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
-				e.consume(this);
-		}
-		void onDragMove(const DragMoveEvent &e) override
-		{
-			yaw += e.mouseDelta.x * 0.012f;
-			pitch = clamp(pitch + e.mouseDelta.y * 0.012f, -1.45f, 1.45f);
-		}
-		void onDoubleClick(const DoubleClickEvent &e) override
-		{
-			yaw = 0.6f;
-			pitch = 0.5f;
-		}
+            nvgSave(vg);
+            nvgScissor(vg, SP_VX + 1.f, SP_VY + 1.f, SP_VW - 2.f, SP_VH - 2.f);
+            nvgLineCap(vg, NVG_ROUND);
+            nvgLineJoin(vg, NVG_ROUND);
 
-		void draw(const DrawArgs &args) override
-		{
-			NVGcontext *vg = args.vg;
-			screenBase(vg, SP_DW, SP_DH);
+            // ---- reference cube ----
+            {
+                float cxs[8], cys[8], ck;
+                for (int i = 0; i < 8; ++i)
+                {
+                    float x = (i & 1) ? 1.f : -1.f;
+                    float y = (i & 2) ? 1.f : -1.f;
+                    float z = (i & 4) ? 1.f : -1.f;
+                    proj(x, y, z, cxs[i], cys[i], ck);
+                }
+                nvgBeginPath(vg);
+                for (int i = 0; i < 8; ++i)
+                {
+                    for (int bit = 1; bit <= 4; bit <<= 1)
+                    {
+                        int j = i ^ bit;
+                        if (j > i)
+                        {
+                            nvgMoveTo(vg, cxs[i], cys[i]);
+                            nvgLineTo(vg, cxs[j], cys[j]);
+                        }
+                    }
+                }
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 26));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
 
-			// inner frame
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, 3.5f, 13.5f, SP_DW - 7.f, SP_DH - 27.f, 2.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 36));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-			Widget::draw(args);
-		}
+                // floor grid (z = -1 plane, the bottom of the cube)
+                nvgBeginPath(vg);
+                for (int g = -1; g <= 1; ++g)
+                {
+                    float ax, ay, bx, by, k;
+                    proj((float)g, -1.f, -1.f, ax, ay, k);
+                    proj((float)g, 1.f, -1.f, bx, by, k);
+                    nvgMoveTo(vg, ax, ay);
+                    nvgLineTo(vg, bx, by);
+                    proj(-1.f, (float)g, -1.f, ax, ay, k);
+                    proj(1.f, (float)g, -1.f, bx, by, k);
+                    nvgMoveTo(vg, ax, ay);
+                    nvgLineTo(vg, bx, by);
+                }
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+            }
 
-		void drawLayer(const DrawArgs &args, int layer) override
-		{
-			if (layer != 1)
-			{
-				Widget::drawLayer(args, layer);
-				return;
-			}
-			NVGcontext *vg = args.vg;
-			const float W = SP_DW, H = SP_DH;
+            // ---- axes (labels are kept inside the view frame) ----
+            {
+                const float ax[3][3] = {{1.3f, 0.f, 0.f}, {0.f, 1.3f, 0.f}, {0.f, 0.f, 1.3f}};
+                const char *an[3] = {"X", "Y", "Z"};
+                NVGcolor ac[3] = {ag::accent(), ag::violet(), nvgRGB(0xe6, 0xe9, 0xef)};
+                float ox0, oy0, k0;
+                proj(0.f, 0.f, 0.f, ox0, oy0, k0);
+                for (int a = 0; a < 3; ++a)
+                {
+                    float px, py, k;
+                    proj(ax[a][0], ax[a][1], ax[a][2], px, py, k);
+                    nvgBeginPath(vg);
+                    nvgMoveTo(vg, ox0, oy0);
+                    nvgLineTo(vg, px, py);
+                    nvgStrokeColor(vg, ag::withA(ac[a], 0.35f));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                    float lx = clamp(px, SP_VX + 6.f, SP_VX + SP_VW - 6.f);
+                    float ly = clamp(py, SP_VY + 6.f, SP_VY + SP_VH - 6.f);
+                    ag::text(vg, lx, ly, an[a], 7.f, ag::withA(ac[a], 0.9f), ag::ALIGN_C, 0.f);
+                }
+            }
 
-			// ---- gather data ----
-			static float ox[SP_TRAIL], oy[SP_TRAIL], oz[SP_TRAIL]; // ordered oldest -> newest
-			int count = SP_TRAIL;
-			float rot = 0.25f;
-			float spd = 1.f, bld = 0.5f, frc = 0.2f;
-			float vx = 0.f, vy = 0.f, vz = 0.f, vm = 0.f;
+            // ---- trail (flat segments, fading with age) ----
+            if (count >= 2)
+            {
+                float px0, py0, k0;
+                proj(ox[0], oy[0], oz[0], px0, py0, k0);
+                NVGcolor cOld = nvgRGBA(0xb0, 0x5a, 0xff, 255);
+                NVGcolor cNew = nvgRGBA(0x8a, 0xee, 0xff, 255);
+                for (int i = 1; i < count; ++i)
+                {
+                    float px1, py1, k1;
+                    proj(ox[i], oy[i], oz[i], px1, py1, k1);
+                    float t = (float)i / (float)(count - 1); // 0 old .. 1 new
+                    float a = std::pow(t, 1.6f);
+                    NVGcolor c = nvgLerpRGBA(cOld, cNew, t);
 
-			if (module)
-			{
-				int head = module->trailHead;
-				count = std::min(module->trailCount, SP_TRAIL);
-				for (int i = 0; i < count; ++i)
-				{
-					int idx = ((head - (count - 1) + i) % SP_TRAIL + SP_TRAIL) % SP_TRAIL;
-					ox[i] = module->trailX[idx];
-					oy[i] = module->trailY[idx];
-					oz[i] = module->trailZ[idx];
-				}
-				rot = module->params[Spikes::ROTATE_PARAM].getValue();
-				spd = module->dispSpeed;
-				bld = module->dispBlend;
-				frc = module->dispFractal;
-				vx = module->outX;
-				vy = module->outY;
-				vz = module->outZ;
-				vm = module->outMix;
-			}
-			else
-			{
-				for (int i = 0; i < SP_TRAIL; ++i)
-				{
-					ox[i] = demoX[i];
-					oy[i] = demoY[i];
-					oz[i] = demoZ[i];
-				}
-				vx = 3.1f;
-				vy = -1.4f;
-				vz = 0.6f;
-				vm = 0.8f;
-			}
+                    nvgBeginPath(vg);
+                    nvgMoveTo(vg, px0, py0);
+                    nvgLineTo(vg, px1, py1);
+                    nvgStrokeColor(vg, ag::withA(c, 0.08f + a * 0.92f));
+                    nvgStrokeWidth(vg, (0.5f + 1.1f * t) * k1);
+                    nvgStroke(vg);
 
-			// ---- advance the view rotation ----
-			double now = system::getTime();
-			float dt = (lastT > 0.0) ? clamp((float)(now - lastT), 0.f, 0.1f) : 0.f;
-			lastT = now;
-			yaw += dt * rot * 1.6f;
-			if (yaw > 2.f * M_PI)
-				yaw -= 2.f * M_PI;
-			if (yaw < -2.f * M_PI)
-				yaw += 2.f * M_PI;
+                    px0 = px1;
+                    py0 = py1;
+                }
 
-			// ---- projection ----
-			const float cx = W / 2.f, cy = H / 2.f + 1.f, S = 33.f;
-			const float cyw = std::cos(yaw), syw = std::sin(yaw);
-			const float cp = std::cos(pitch), sp = std::sin(pitch);
+                // head marker: ring and dot
+                nvgBeginPath(vg);
+                nvgCircle(vg, px0, py0, 4.f);
+                nvgStrokeColor(vg, nvgRGBA(0x8a, 0xee, 0xff, 160));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+                nvgBeginPath(vg);
+                nvgCircle(vg, px0, py0, 1.8f);
+                nvgFillColor(vg, nvgRGB(255, 255, 255));
+                nvgFill(vg);
+            }
 
-			// attractor (x, y, z) -> world (x, -z up, y depth), yaw about the vertical axis, then pitch
-			auto proj = [&](float x, float y, float z, float &px, float &py, float &k)
-			{
-				float wx = x, wy = -z, wz = y;
-				float x1 = wx * cyw + wz * syw;
-				float z1 = -wx * syw + wz * cyw;
-				float y2 = wy * cp - z1 * sp;
-				float z2 = wy * sp + z1 * cp;
-				k = 1.f / (1.f + z2 * 0.22f);
-				px = cx + x1 * S * k;
-				py = cy + y2 * S * k;
-			};
+            nvgRestore(vg);
 
-			nvgSave(vg);
-			nvgScissor(vg, 4.f, 14.f, W - 8.f, H - 28.f);
-			nvgLineCap(vg, NVG_ROUND);
-			nvgLineJoin(vg, NVG_ROUND);
+            // ---- readouts: header and footer rows, outside the view frame ----
+            char buf[64];
+            NVGcolor c1 = ag::withA(ag::accent(), 0.85f);
+            NVGcolor cd = ag::dim();
 
-			// ---- reference cube ----
-			{
-				float cxs[8], cys[8], ck;
-				for (int i = 0; i < 8; ++i)
-				{
-					float x = (i & 1) ? 1.f : -1.f;
-					float y = (i & 2) ? 1.f : -1.f;
-					float z = (i & 4) ? 1.f : -1.f;
-					proj(x, y, z, cxs[i], cys[i], ck);
-				}
-				nvgBeginPath(vg);
-				for (int i = 0; i < 8; ++i)
-				{
-					for (int bit = 1; bit <= 4; bit <<= 1)
-					{
-						int j = i ^ bit;
-						if (j > i)
-						{
-							nvgMoveTo(vg, cxs[i], cys[i]);
-							nvgLineTo(vg, cxs[j], cys[j]);
-						}
-					}
-				}
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 26));
-				nvgStrokeWidth(vg, 0.8f);
-				nvgStroke(vg);
+            snprintf(buf, sizeof(buf), "SPD %.2fX", spd);
+            ag::text(vg, 6.f, 7.f, buf, 7.f, c1, ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "L/R %3.0f%%", bld * 100.f);
+            ag::text(vg, W / 2.f, 7.f, buf, 7.f, c1, ag::ALIGN_C, 0.5f);
+            snprintf(buf, sizeof(buf), "FRC %3.0f%%", frc * 100.f);
+            ag::text(vg, W - 6.f, 7.f, buf, 7.f, c1, ag::ALIGN_R, 0.5f);
 
-				// floor grid (z = -1 plane, the bottom of the cube)
-				nvgBeginPath(vg);
-				for (int g = -1; g <= 1; ++g)
-				{
-					float ax, ay, bx, by, k;
-					proj((float)g, -1.f, -1.f, ax, ay, k);
-					proj((float)g, 1.f, -1.f, bx, by, k);
-					nvgMoveTo(vg, ax, ay);
-					nvgLineTo(vg, bx, by);
-					proj(-1.f, (float)g, -1.f, ax, ay, k);
-					proj(1.f, (float)g, -1.f, bx, by, k);
-					nvgMoveTo(vg, ax, ay);
-					nvgLineTo(vg, bx, by);
-				}
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
-				nvgStrokeWidth(vg, 0.6f);
-				nvgStroke(vg);
-			}
+            snprintf(buf, sizeof(buf), "X%+.1f", vx);
+            ag::text(vg, 6.f, H - 6.f, buf, 7.f, cd, ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "Y%+.1f", vy);
+            ag::text(vg, 50.f, H - 6.f, buf, 7.f, cd, ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "Z%+.1f", vz);
+            ag::text(vg, 94.f, H - 6.f, buf, 7.f, cd, ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "MIX %+.1fV", vm);
+            ag::text(vg, W - 6.f, H - 6.f, buf, 7.f, ag::withA(ag::violet(), 0.95f), ag::ALIGN_R, 0.5f);
 
-			// ---- axes ----
-			{
-				const float ax[3][3] = {{1.3f, 0.f, 0.f}, {0.f, 1.3f, 0.f}, {0.f, 0.f, 1.3f}};
-				const char *an[3] = {"X", "Y", "Z"};
-				NVGcolor ac[3] = {colAccent(), colViolet(), nvgRGB(0xe6, 0xe9, 0xef)};
-				float ox0, oy0, k0;
-				proj(0.f, 0.f, 0.f, ox0, oy0, k0);
-				for (int a = 0; a < 3; ++a)
-				{
-					float px, py, k;
-					proj(ax[a][0], ax[a][1], ax[a][2], px, py, k);
-					nvgBeginPath(vg);
-					nvgMoveTo(vg, ox0, oy0);
-					nvgLineTo(vg, px, py);
-					nvgStrokeColor(vg, withAlpha(ac[a], 0.35f));
-					nvgStrokeWidth(vg, 0.9f);
-					nvgStroke(vg);
-					drawText(vg, px, py, an[a], 6.5f, withAlpha(ac[a], 0.85f),
-							 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-				}
-			}
-
-			// ---- trail ----
-			if (count >= 2)
-			{
-				float px0, py0, k0;
-				proj(ox[0], oy[0], oz[0], px0, py0, k0);
-				NVGcolor cOld = nvgRGBA(0xb0, 0x5a, 0xff, 255);
-				NVGcolor cNew = nvgRGBA(0x8a, 0xee, 0xff, 255);
-				for (int i = 1; i < count; ++i)
-				{
-					float px1, py1, k1;
-					proj(ox[i], oy[i], oz[i], px1, py1, k1);
-					float t = (float)i / (float)(count - 1); // 0 old .. 1 new
-					float a = std::pow(t, 1.6f);
-					NVGcolor c = nvgLerpRGBA(cOld, cNew, t);
-
-					// soft glow on the freshest part of the trail
-					if (i > count - 70)
-					{
-						nvgBeginPath(vg);
-						nvgMoveTo(vg, px0, py0);
-						nvgLineTo(vg, px1, py1);
-						nvgStrokeColor(vg, withAlpha(c, a * 0.18f));
-						nvgStrokeWidth(vg, 3.6f * k1);
-						nvgStroke(vg);
-					}
-					nvgBeginPath(vg);
-					nvgMoveTo(vg, px0, py0);
-					nvgLineTo(vg, px1, py1);
-					nvgStrokeColor(vg, withAlpha(c, 0.08f + a * 0.92f));
-					nvgStrokeWidth(vg, (0.5f + 1.1f * t) * k1);
-					nvgStroke(vg);
-
-					px0 = px1;
-					py0 = py1;
-				}
-
-				// head marker
-				nvgBeginPath(vg);
-				nvgCircle(vg, px0, py0, 5.5f);
-				nvgFillPaint(vg, nvgRadialGradient(vg, px0, py0, 0.f, 5.5f, nvgRGBA(0x8a, 0xee, 0xff, 130), nvgRGBA(0x8a, 0xee, 0xff, 0)));
-				nvgFill(vg);
-				nvgBeginPath(vg);
-				nvgCircle(vg, px0, py0, 1.8f);
-				nvgFillColor(vg, nvgRGB(255, 255, 255));
-				nvgFill(vg);
-			}
-
-			nvgResetScissor(vg);
-			nvgRestore(vg);
-
-			screenFinish(vg, W, H);
-
-			// ---- readouts ----
-			char buf[64];
-			NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-			NVGcolor cd = nvgRGBA(0x7a, 0x85, 0x94, 230);
-
-			snprintf(buf, sizeof(buf), "SPD %.2fX", spd);
-			drawText(vg, 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-			snprintf(buf, sizeof(buf), "L/R %3.0f%%", bld * 100.f);
-			drawText(vg, W / 2.f, 7.f, buf, 7.f, c1, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-			snprintf(buf, sizeof(buf), "FRC %3.0f%%", frc * 100.f);
-			drawText(vg, W - 6.f, 7.f, buf, 7.f, c1, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-			snprintf(buf, sizeof(buf), "X%+.1f", vx);
-			drawText(vg, 6.f, H - 6.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-			snprintf(buf, sizeof(buf), "Y%+.1f", vy);
-			drawText(vg, 50.f, H - 6.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-			snprintf(buf, sizeof(buf), "Z%+.1f", vz);
-			drawText(vg, 94.f, H - 6.f, buf, 7.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-			snprintf(buf, sizeof(buf), "MIX %+.1fV", vm);
-			drawText(vg, W - 6.f, H - 6.f, buf, 7.f, withAlpha(colViolet(), 0.9f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-			Widget::drawLayer(args, layer);
-		}
-	};
+            Widget::drawLayer(args, layer);
+        }
+    };
 
 } // namespace
 
 struct SpikesWidget : ModuleWidget
 {
-	SpikesWidget(Spikes *module)
-	{
-		setModule(module);
-		box.size = Vec(SP_W, SP_H);
+    SpikesWidget(Spikes *module)
+    {
+        setModule(module);
+        box.size = Vec(SP_W, SP_H);
 
-		addChild(new SPPanel());
-		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
-		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
-		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(new SPPanel());
+        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
-		addChild(new SPDisplay(module));
+        addChild(new SPDisplay(module));
 
-		// ---------------- Param knobs (3 x 2 grid) ----------------
-		const int ids[6] = {Spikes::SPEED_PARAM, Spikes::BLEND_PARAM, Spikes::FRACTAL_PARAM,
-							Spikes::FRACTAL_SPEED_PARAM, Spikes::SCALE_PARAM, Spikes::ROTATE_PARAM};
-		for (int i = 0; i < 6; ++i)
-			addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_KCOL[i % 3], SP_KROW[i / 3]), module, ids[i]));
+        // ---------------- Param knobs (3 x 2 grid, knob at +32 inside its cell) ----------------
+        const int ids[6] = {Spikes::SPEED_PARAM, Spikes::BLEND_PARAM, Spikes::FRACTAL_PARAM,
+                            Spikes::FRACTAL_SPEED_PARAM, Spikes::SCALE_PARAM, Spikes::ROTATE_PARAM};
+        for (int i = 0; i < 6; ++i)
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_KCOL[i % 3], SP_KTOP[i / 3] + 32.f), module, ids[i]));
 
-		// ---------------- CV inputs ----------------
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(0), SP_JY), module, Spikes::SPEED_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(1), SP_JY), module, Spikes::BLEND_INPUT));
-		addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(2), SP_JY), module, Spikes::FRACTAL_INPUT));
+        // ---------------- jack row (jack at +30 inside its cell) ----------------
+        const float jy = SP_IOTOP + 30.f;
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(0), jy), module, Spikes::SPEED_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(1), jy), module, Spikes::BLEND_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(2), jy), module, Spikes::FRACTAL_INPUT));
 
-		// ---------------- Outputs ----------------
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(3), SP_JY), module, Spikes::X_OUTPUT));
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(4), SP_JY), module, Spikes::Y_OUTPUT));
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(5), SP_JY), module, Spikes::Z_OUTPUT));
-		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(6), SP_JY), module, Spikes::MIX_OUTPUT));
-	}
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(3), jy), module, Spikes::X_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(4), jy), module, Spikes::Y_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(5), jy), module, Spikes::Z_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(6), jy), module, Spikes::MIX_OUTPUT));
+    }
 };
 
 Model *modelSpikes = createModel<Spikes, SpikesWidget>("Spikes");
