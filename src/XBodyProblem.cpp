@@ -19,6 +19,7 @@
 //     trails, wall style, centre of mass (bounce mode), and readouts.
 // ============================================================================
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -34,20 +35,25 @@ static const int XB_TN = 120; // trail points
 static const float XB_TRAIL_HZ = 60.f;
 
 static const float XB_PANEL_W = RACK_GRID_WIDTH * 28; // 420
-static const float XB_PANEL_H = RACK_GRID_HEIGHT;	  // 380
+static const float XB_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Square display
+// Square display (220 x 220) plus a 32 px readout strip underneath; the bezel adds 4 px.
 static const float XB_S = 220.f;
+static const float XB_RO_H = 32.f;
 static const float XB_DX = (XB_PANEL_W - XB_S) / 2.f; // 100
-static const float XB_DY = 46.f;
+static const float XB_DY = 26.f;
 
-// Side knobs: three on each side of the square
+// Side knob cells: three on each side of the square. 50 x 52, label at +10, knob at +32
+static const float XB_SIDE_W = 50.f, XB_SIDE_H = 52.f;
 static const float XB_LKX = 48.f, XB_RKX = 372.f;
-static const float XB_KY[3] = {86.f, 156.f, 226.f};
+static const float XB_SIDE_TOP[3] = {40.f, 110.f, 180.f};
+static const float XB_KY[3] = {72.f, 142.f, 212.f}; // SIDE_TOP + 32
 
-// I/O row
-static const float XB_IO_SEC_Y = 294.f;
-static const float XB_IO_Y = 340.f;
+// I/O row: nine 38 x 50 cells, label at +10, control at +32 (ends at y = 348)
+static const float XB_IO_HDR = 290.f;
+static const float XB_IO_TOP = 298.f;
+static const float XB_IO_W = 38.f, XB_IO_H = 50.f;
+static const float XB_IO_Y = XB_IO_TOP + 32.f;
 static inline float xbIoX(int i) { return 40.f + 42.5f * (float)i; }
 
 // ------------------------------------------------------------
@@ -233,8 +239,9 @@ struct XBodyProblem : Module
 	}
 
 	// Rack reset: unpause and start a new random system.
-	void onReset() override
+	void onReset(const ResetEvent &e) override
 	{
+		Module::onReset(e);
 		paused = false;
 		zeroMomentum = true;
 		doReset();
@@ -554,40 +561,33 @@ struct XBodyProblem : Module
 };
 
 // ------------------------------------------------------------
-// Knob table (positions + tick counts + bipolar flag).
+// Knob table: position, bipolar flag, label, cell top.
 // ------------------------------------------------------------
 struct XBKnob
 {
 	int param;
 	float x, y;
-	int ticks;
 	bool bipolar;
 	const char *label;
+	float top;
 };
 static const XBKnob XB_KNOBS[6] = {
-	{XBodyProblem::MASSES_PARAM, XB_LKX, XB_KY[0], 9, false, "MASSES"},
-	{XBodyProblem::SPEED_PARAM, XB_LKX, XB_KY[1], 9, true, "SPEED"},
-	{XBodyProblem::GRAVITY_PARAM, XB_LKX, XB_KY[2], 9, true, "GRAVITY"},
-	{XBodyProblem::RANGE_PARAM, XB_RKX, XB_KY[0], 5, false, "RANGE"},
-	{XBodyProblem::SOFT_PARAM, XB_RKX, XB_KY[1], 11, false, "SOFTEN"},
-	{XBodyProblem::TRAIL_PARAM, XB_RKX, XB_KY[2], 11, false, "TRAIL"},
+	{XBodyProblem::MASSES_PARAM, XB_LKX, XB_KY[0], false, "MASSES", XB_SIDE_TOP[0]},
+	{XBodyProblem::SPEED_PARAM, XB_LKX, XB_KY[1], true, "SPEED", XB_SIDE_TOP[1]},
+	{XBodyProblem::GRAVITY_PARAM, XB_LKX, XB_KY[2], true, "GRAVITY", XB_SIDE_TOP[2]},
+	{XBodyProblem::RANGE_PARAM, XB_RKX, XB_KY[0], false, "RANGE", XB_SIDE_TOP[0]},
+	{XBodyProblem::SOFT_PARAM, XB_RKX, XB_KY[1], false, "SOFTEN", XB_SIDE_TOP[1]},
+	{XBodyProblem::TRAIL_PARAM, XB_RKX, XB_KY[2], false, "TRAIL", XB_SIDE_TOP[2]},
 };
 
 // ------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace — UI-only)
+// Drawing helpers (anonymous namespace — UI-only)
+// Shared flat panel kit (agmm_ui.hpp): flat fills and hairline strokes only.
 // ------------------------------------------------------------
 namespace
 {
 
-	NVGcolor colBgTop() { return nvgRGB(0x25, 0x28, 0x30); }
-	NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-	NVGcolor colText() { return nvgRGB(0xd6, 0xdc, 0xe6); }
-	NVGcolor colDim() { return nvgRGB(0x8a, 0x95, 0xa5); }
-	NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-	// NVGcolor colBright()   { return nvgRGB(0x7a, 0xec, 0xff); }
-	NVGcolor colWarm() { return nvgRGB(0xff, 0x9c, 0x6a); }
-
-	NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
+	namespace ag = agmm;
 
 	// Per-body display colours (cycled for N > 10).
 	NVGcolor bodyCol(int i)
@@ -597,283 +597,42 @@ namespace
 		return nvgRGB(c[i % XB_MAXN][0], c[i % XB_MAXN][1], c[i % XB_MAXN][2]);
 	}
 
-	// Cyan LED light template.
-	template <typename TBase = GrayModuleLightWidget>
-	struct TXBCyanLight : TBase
-	{
-		TXBCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-	};
-	using XBCyanLight = TXBCyanLight<>;
-
-	// Load the shared ShareTechMono font.
-	void setFont(NVGcontext *vg)
-	{
-		std::shared_ptr<window::Font> font =
-			APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-		if (font)
-			nvgFontFaceId(vg, font->handle);
-	}
-
-	// Single-line text renderer.
-	void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-				  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-	{
-		setFont(vg);
-		nvgFontSize(vg, size);
-		nvgTextLetterSpacing(vg, spacing);
-		nvgTextAlign(vg, align);
-		nvgFillColor(vg, col);
-		nvgText(vg, x, y, s, NULL);
-	}
-
-	// AGMM logo badge.
-	void drawLogo(NVGcontext *vg, float cx, float cy)
-	{
-		const float w = 64.f, h = 18.f;
-		float x = cx - w / 2.f, y = cy - h / 2.f;
-
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-		nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-		nvgFill(vg);
-
-		nvgBeginPath(vg);
-		nvgRoundedRect(vg, x, y, w, h, 7.f);
-		nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-										   nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-		nvgFill(vg);
-		nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-											 nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-		nvgStrokeWidth(vg, 1.2f);
-		nvgStroke(vg);
-
-		const float s = 2.2f;
-		float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-		nvgBeginPath(vg);
-		nvgRect(vg, tx + s, ty, s, s);
-		nvgRect(vg, tx, ty + s * 1.4f, s, s);
-		nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-		nvgFillColor(vg, colAccent());
-		nvgFill(vg);
-
-		drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-				 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-	}
-
-	// Draw the arc of tick marks around a knob (major ticks on the ends
-	// and on the centre for odd counts).
-	void drawKnobTicks(NVGcontext *vg, float cx, float cy, float r0, float r1, int n = 11)
-	{
-		nvgLineCap(vg, NVG_ROUND);
-		for (int i = 0; i < n; ++i)
-		{
-			float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-			bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-			float ra = major ? r0 - 1.5f : r0;
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-			nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-			nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-			nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
-			nvgStroke(vg);
-		}
-	}
-
 	// ------------------------------------------------------------
 	// XBPanelBackground — static panel chrome:
-	//   * panel base, gradient, scanlines, radial vignette
-	//   * top cyan-violet accent strip
-	//   * AGMM logo + title
-	//   * display bezel
-	//   * 6 knob cells with rings + tick marks
-	//   * CONTROL / I/O section header + 9 labelled cells
-	//   * footer strapline
+	//   * flat panel, title, display frame
+	//   * 6 labelled knob cells (three on each side of the square)
+	//   * CONTROL / I/O header + 9 labelled cells (outputs tinted)
 	// ------------------------------------------------------------
 	struct XBPanelBackground : TransparentWidget
 	{
 		XBPanelBackground() { box.size = Vec(XB_PANEL_W, XB_PANEL_H); }
 
-		// Centred dim label (used under knobs and inside cells).
-		void label(NVGcontext *vg, float x, float y, const char *txt)
-		{
-			drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-		}
-
-		// Rounded control plate (single-colour, with a subtle gradient).
-		void plate(NVGcontext *vg, float x, float y, float w, float h)
-		{
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x, y, w, h, 6.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-											   nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		// Dark radial ring behind a knob.
-		void ring(NVGcontext *vg, float cx, float cy, float r)
-		{
-			nvgBeginPath(vg);
-			nvgCircle(vg, cx, cy, r);
-			nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-											   nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-			nvgFill(vg);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		// Section header: centred cyan label flanked by fading rules.
-		void section(NVGcontext *vg, float y, const char *txt)
-		{
-			float x1 = 12.f, x2 = XB_PANEL_W - 12.f, cx = XB_PANEL_W / 2.f;
-			float w = 14.f + (float)strlen(txt) * 7.f;
-			drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, x1, y);
-			nvgLineTo(vg, cx - w / 2.f, y);
-			nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-												 nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			nvgBeginPath(vg);
-			nvgMoveTo(vg, cx + w / 2.f, y);
-			nvgLineTo(vg, x2, y);
-			nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-												 nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-		}
-
-		// I/O cell: plate + tinted top bar + centred label.
-		// kind: 0 = input (orange), 1 = output (cyan), 2 = control (purple)
-		void cell(NVGcontext *vg, float cx, float cy, const char *txt, int kind)
-		{
-			const float w = 36.f, top = -27.f, h = 44.f;
-			float x = cx - w / 2.f, y = cy + top;
-			plate(vg, x, y, w, h);
-
-			NVGcolor c = (kind == 0)   ? nvgRGBA(0xff, 0x9c, 0x6a, 170)
-						 : (kind == 1) ? nvgRGBA(0x3d, 0xe0, 0xff, 170)
-									   : nvgRGBA(0xb0, 0x5a, 0xff, 170);
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
-			nvgFillColor(vg, c);
-			nvgFill(vg);
-
-			label(vg, cx, cy - 19.f, txt);
-		}
-
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
+			ag::panelBase(vg, XB_PANEL_W, XB_PANEL_H, "XBODYPROBLEM");
+			ag::bezel(vg, XB_DX, XB_DY, XB_S, XB_S + XB_RO_H);
 
-			// Background gradient.
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, XB_PANEL_W, XB_PANEL_H);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, XB_PANEL_H, colBgTop(), colBgBottom()));
-			nvgFill(vg);
-
-			// Scanlines.
-			nvgStrokeWidth(vg, 1.f);
-			for (int y = 0; y < (int)XB_PANEL_H; y += 3)
-			{
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, 0, y + 0.5f);
-				nvgLineTo(vg, XB_PANEL_W, y + 0.5f);
-				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-				nvgStroke(vg);
-			}
-
-			// Radial vignette.
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, XB_PANEL_W, XB_PANEL_H);
-			nvgFillPaint(vg, nvgRadialGradient(vg, XB_PANEL_W / 2.f, XB_PANEL_H * 0.4f,
-											   XB_PANEL_H * 0.35f, XB_PANEL_H * 0.95f,
-											   nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-			nvgFill(vg);
-
-			// Border.
-			nvgBeginPath(vg);
-			nvgRect(vg, 0.5f, 0.5f, XB_PANEL_W - 1.f, XB_PANEL_H - 1.f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			// Top accent strip (cyan -> violet).
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, XB_PANEL_W, 2.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, XB_PANEL_W, 0,
-											   nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-			nvgFill(vg);
-
-			// Logo + title.
-			drawLogo(vg, XB_PANEL_W / 2.f, 15.f);
-			drawText(vg, XB_PANEL_W / 2.f, 32.f, "XBODYPROBLEM", 12.f, colText(),
-					 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-			// ---- Display bezel ----
-			float bx = XB_DX - 5.f, by = XB_DY - 5.f;
-			float bw = XB_S + 10.f, bh = XB_S + 10.f;
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-											   nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-			nvgStrokeWidth(vg, 1.f);
-			nvgStroke(vg);
-
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-			nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-			nvgFill(vg);
-
-			// ---- Knobs: ring + ticks + label ----
+			// ---- Knob cells ----
 			for (int k = 0; k < 6; ++k)
 			{
 				const XBKnob &kn = XB_KNOBS[k];
-				ring(vg, kn.x, kn.y, 17.f);
-				drawKnobTicks(vg, kn.x, kn.y, 21.f, 24.f, kn.ticks);
-				label(vg, kn.x, kn.y + 29.f, kn.label);
+				ag::cell(vg, kn.x, kn.top, XB_SIDE_W, XB_SIDE_H, kn.label);
 			}
 
-			// ---- I/O row ----
-			section(vg, XB_IO_SEC_Y, "CONTROL  /  I / O");
+			// ---- I/O row: switches, buttons, input, then tinted outputs ----
+			ag::sectionHeader(vg, XB_PANEL_W, XB_IO_HDR, "CONTROL / I/O");
 			const char *names[9] = {"WALLS", "MASSES", "RESET", "RST IN", "KICK", "X", "Y", "SPEED", "EVENT"};
-			const int kinds[9] = {2, 2, 2, 0, 2, 1, 1, 1, 1};
 			for (int i = 0; i < 9; ++i)
-				cell(vg, xbIoX(i), XB_IO_Y, names[i], kinds[i]);
-
-			drawText(vg, XB_PANEL_W / 2.f, 368.f, "N-BODY GRAVITY LFO  -  POLYPHONIC X / Y", 6.f,
-					 nvgRGBA(0x8a, 0x95, 0xa5, 120), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.5f);
+				ag::cell(vg, xbIoX(i), XB_IO_TOP, XB_IO_W, XB_IO_H, names[i], i >= 5);
 
 			Widget::draw(args);
 		}
 	};
 
 	// ------------------------------------------------------------
-	// XBKnobArcs — live value arcs around the 6 knobs.
-	//   * bipolar knobs draw from centre (0) outwards
-	//     (cyan above 0, warm below)
+	// XBKnobArcs — live value arcs around the 6 knobs (track + one arc).
+	//   * bipolar knobs draw from the centre outwards (cyan above, warm below)
 	//   * unipolar knobs draw from the leftmost position.
 	// ------------------------------------------------------------
 	struct XBKnobArcs : TransparentWidget
@@ -885,8 +644,7 @@ namespace
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
-			const float R = 17.2f;
-			// Arc from ~225° to ~315° (CCW around the knob face).
+			const float R = 16.f;
 			const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
 			const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
 
@@ -894,7 +652,6 @@ namespace
 			{
 				const XBKnob &kn = XB_KNOBS[k];
 
-				// Track.
 				nvgBeginPath(vg);
 				nvgArc(vg, kn.x, kn.y, R, a0, a1, NVG_CW);
 				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
@@ -902,7 +659,6 @@ namespace
 				nvgLineCap(vg, NVG_ROUND);
 				nvgStroke(vg);
 
-				// Value arc (from centre for bipolar, from left otherwise).
 				if (!module)
 					continue;
 				float v = module->paramQuantities[kn.param]->getScaledValue();
@@ -913,19 +669,11 @@ namespace
 
 				float s = a0 + (a1 - a0) * lo;
 				float e = a0 + (a1 - a0) * hi;
-				NVGcolor col = (kn.bipolar && v < 0.5f) ? colWarm() : colAccent();
+				NVGcolor col = (kn.bipolar && v < 0.5f) ? ag::warm() : ag::accent();
 
-				// Soft underglow.
 				nvgBeginPath(vg);
 				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-				nvgStrokeColor(vg, withA(col, 0.18f));
-				nvgStrokeWidth(vg, 5.f);
-				nvgStroke(vg);
-
-				// Main stroke.
-				nvgBeginPath(vg);
-				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
-				nvgStrokeColor(vg, withA(col, 0.95f));
+				nvgStrokeColor(vg, col);
 				nvgStrokeWidth(vg, 2.f);
 				nvgStroke(vg);
 			}
@@ -933,36 +681,37 @@ namespace
 	};
 
 	// ------------------------------------------------------------
-	// XBDisplayWidget — the live 220x220 square simulation display.
+	// XBDisplayWidget — the live 220x220 square simulation display plus a
+	// 32 px readout strip underneath (readouts sit outside the plot so they
+	// never cover the bodies).
 	//   draw()       : static background (screen fill + grid + edge ticks).
 	//   drawLayer(1) : bodies, gravity links, trails, wall style,
-	//                  centre of mass (bounce mode), readouts,
-	//                  scanlines / vignette / glass.
-	// If module == nullptr (browser preview) a static 4-body demo
-	// is drawn.
+	//                  centre of mass (bounce mode), readouts.
+	// If module == nullptr (browser preview) a static 4-body demo is drawn.
 	// ------------------------------------------------------------
 	struct XBDisplayWidget : TransparentWidget
 	{
 		XBodyProblem *module = nullptr;
 
+		// Per-draw copy of the trail history (avoids racing the audio thread).
+		float dTrX[XB_MAXN][XB_TN];
+		float dTrY[XB_MAXN][XB_TN];
+
 		XBDisplayWidget(XBodyProblem *m) : module(m)
 		{
 			box.pos = Vec(XB_DX, XB_DY);
-			box.size = Vec(XB_S, XB_S);
+			box.size = Vec(XB_S, XB_S + XB_RO_H);
+			std::memset(dTrX, 0, sizeof(dTrX));
+			std::memset(dTrY, 0, sizeof(dTrY));
 		}
 
-		// ---- static background: screen + grid ----
+		// ---- static background: screen + grid + readout separator ----
 		void draw(const DrawArgs &args) override
 		{
 			NVGcontext *vg = args.vg;
 			const float S = XB_S;
 
-			// Screen radial fill.
-			nvgBeginPath(vg);
-			nvgRoundedRect(vg, 0, 0, S, S, 4.f);
-			nvgFillPaint(vg, nvgRadialGradient(vg, S / 2.f, S / 2.f, 10.f, S * 0.8f,
-											   nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x09)));
-			nvgFill(vg);
+			ag::screen(vg, 0.f, 0.f, S, S + XB_RO_H);
 
 			// Tenth grid (mid line brighter).
 			for (int i = 1; i < 10; ++i)
@@ -974,7 +723,7 @@ namespace
 				nvgLineTo(vg, t + 0.5f, S - 1.f);
 				nvgMoveTo(vg, 1.f, t + 0.5f);
 				nvgLineTo(vg, S - 1.f, t + 0.5f);
-				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, mid ? 26 : 10));
+				nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, mid ? 30 : 12));
 				nvgStrokeWidth(vg, 1.f);
 				nvgStroke(vg);
 			}
@@ -996,37 +745,33 @@ namespace
 			nvgStrokeWidth(vg, 1.f);
 			nvgStroke(vg);
 
-			Widget::draw(args);
-		}
-
-		// Draw one body: outer glow (grows with `glow`), shaded circle,
-		// outline, and a specular highlight.
-		void drawBody(NVGcontext *vg, float x, float y, float r, NVGcolor col, float glow)
-		{
-			NVGcolor hi = nvgLerpRGBA(col, nvgRGB(255, 255, 255), 0.65f);
-			NVGcolor lo = nvgLerpRGBA(col, nvgRGB(0, 0, 0), 0.55f);
-
+			// Separator between the plot and the readout strip.
 			nvgBeginPath(vg);
-			nvgCircle(vg, x, y, r * 2.8f);
-			nvgFillPaint(vg, nvgRadialGradient(vg, x, y, r * 0.6f, r * 2.8f,
-											   withA(col, 0.14f + 0.35f * glow), withA(col, 0.f)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgCircle(vg, x, y, r);
-			nvgFillPaint(vg, nvgRadialGradient(vg, x - r * 0.35f, y - r * 0.4f, r * 0.1f, r * 1.3f, hi, lo));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgCircle(vg, x, y, r - 0.4f);
-			nvgStrokeColor(vg, withA(col, 0.9f));
+			nvgMoveTo(vg, 0.f, S + 0.5f);
+			nvgLineTo(vg, S, S + 0.5f);
+			nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 60));
 			nvgStrokeWidth(vg, 1.f);
 			nvgStroke(vg);
 
+			Widget::draw(args);
+		}
+
+		// Draw one body: flat disc, outline, and an event ring that fades out.
+		void drawBody(NVGcontext *vg, float x, float y, float r, NVGcolor col, float flash)
+		{
 			nvgBeginPath(vg);
-			nvgCircle(vg, x - r * 0.38f, y - r * 0.42f, r * 0.2f);
-			nvgFillColor(vg, nvgRGBA(255, 255, 255, 210));
+			nvgCircle(vg, x, y, r);
+			nvgFillColor(vg, ag::withA(col, 0.9f));
 			nvgFill(vg);
+
+			if (flash > 0.02f)
+			{
+				nvgBeginPath(vg);
+				nvgCircle(vg, x, y, r + 2.f + 3.f * (1.f - flash));
+				nvgStrokeColor(vg, ag::withA(col, flash));
+				nvgStrokeWidth(vg, 1.f);
+				nvgStroke(vg);
+			}
 		}
 
 		// ---- live simulation rendering ----
@@ -1046,8 +791,6 @@ namespace
 			bool wrap = true, paused = false, randMass = false;
 			float G = 0.05f, eps = 0.03f, speed = 1.f, ke = 0.f, trailK = 0.6f;
 			int range = 2, head = 0, count = 0;
-			// Per-draw copy of the trail history (avoids racing the audio thread).
-			static float trX[XB_MAXN][XB_TN], trY[XB_MAXN][XB_TN];
 
 			if (module)
 			{
@@ -1072,8 +815,8 @@ namespace
 					mass[i] = module->massOf(i);
 					evf[i] = module->eventFlash[i];
 				}
-				std::memcpy(trX, module->trX, sizeof(trX));
-				std::memcpy(trY, module->trY, sizeof(trY));
+				std::memcpy(dTrX, module->trX, sizeof(dTrX));
+				std::memcpy(dTrY, module->trY, sizeof(dTrY));
 			}
 			else
 			{
@@ -1093,11 +836,14 @@ namespace
 					for (int k = 0; k < XB_TN; ++k)
 					{
 						float a = 6.2831853f * (float)i / 4.f + 0.4f - 0.012f * (float)(XB_TN - 1 - k);
-						trX[i][k] = 0.5f + 0.28f * std::cos(a);
-						trY[i][k] = 0.5f + 0.28f * std::sin(a);
+						dTrX[i][k] = 0.5f + 0.28f * std::cos(a);
+						dTrY[i][k] = 0.5f + 0.28f * std::sin(a);
 					}
 			}
 			n = rack::math::clamp(n, 2, XB_MAXN);
+			range = rack::math::clamp(range, 0, 4);
+			head = rack::math::clamp(head, 0, XB_TN - 1);
+			count = rack::math::clamp(count, 0, XB_TN);
 
 			// Unit-square -> pixel mapping (+y up -> screen -y).
 			auto SX = [&](float x)
@@ -1136,15 +882,15 @@ namespace
 						nvgMoveTo(vg, SX(px[j]), SY(py[j]));
 						nvgLineTo(vg, SX(px[j] - dx), SY(py[j] - dy));
 					}
-					nvgStrokeColor(vg, withA(c, a));
-					nvgStrokeWidth(vg, 0.8f + 1.6f * a);
+					nvgStrokeColor(vg, ag::withA(c, a));
+					nvgStrokeWidth(vg, 1.f);
 					nvgStroke(vg);
 				}
 			}
 
 			// ================= trails =================
-			// Draw the trail as K-segment chunks with quadratic alpha
-			// (older = dimmer) and a break when the body wrapped.
+			// Drawn as short chunks with quadratic alpha (older = dimmer)
+			// and a break when the body wrapped.
 			int L = std::min(count, (int)std::round(trailK * (float)XB_TN));
 			if (L >= 2)
 			{
@@ -1159,29 +905,27 @@ namespace
 						float t = (float)(s + 1) / (float)L;
 						nvgBeginPath(vg);
 						int i0 = ((head - L + s) % XB_TN + XB_TN) % XB_TN;
-						nvgMoveTo(vg, SX(trX[i][i0]), SY(trY[i][i0]));
+						nvgMoveTo(vg, SX(dTrX[i][i0]), SY(dTrY[i][i0]));
 						for (int k = s + 1; k <= e; ++k)
 						{
 							int ia = ((head - L + k - 1) % XB_TN + XB_TN) % XB_TN;
 							int ib = ((head - L + k) % XB_TN + XB_TN) % XB_TN;
 							// Detect a wrap "jump" and start a new sub-path.
-							bool jump = std::fabs(trX[i][ib] - trX[i][ia]) > 0.5f ||
-										std::fabs(trY[i][ib] - trY[i][ia]) > 0.5f;
+							bool jump = std::fabs(dTrX[i][ib] - dTrX[i][ia]) > 0.5f ||
+										std::fabs(dTrY[i][ib] - dTrY[i][ia]) > 0.5f;
 							if (jump)
-								nvgMoveTo(vg, SX(trX[i][ib]), SY(trY[i][ib]));
+								nvgMoveTo(vg, SX(dTrX[i][ib]), SY(dTrY[i][ib]));
 							else
-								nvgLineTo(vg, SX(trX[i][ib]), SY(trY[i][ib]));
+								nvgLineTo(vg, SX(dTrX[i][ib]), SY(dTrY[i][ib]));
 						}
-						nvgStrokeColor(vg, withA(col, 0.55f * t * t));
-						nvgStrokeWidth(vg, 0.6f + 1.6f * t);
+						nvgStrokeColor(vg, ag::withA(col, 0.55f * t * t));
+						nvgStrokeWidth(vg, 0.8f + 1.2f * t);
 						nvgStroke(vg);
 					}
 				}
 			}
 
 			// ================= centre of mass (bounce mode) =================
-			// A small cross marks the mass-weighted centre; only useful
-			// when the bodies are confined to the box (bounce mode).
 			if (!wrap)
 			{
 				float mx = 0.f, my = 0.f, mt = 0.f;
@@ -1191,16 +935,19 @@ namespace
 					my += mass[i] * py[i];
 					mt += mass[i];
 				}
-				mx /= mt;
-				my /= mt;
-				nvgBeginPath(vg);
-				nvgMoveTo(vg, SX(mx) - 4.f, SY(my));
-				nvgLineTo(vg, SX(mx) + 4.f, SY(my));
-				nvgMoveTo(vg, SX(mx), SY(my) - 4.f);
-				nvgLineTo(vg, SX(mx), SY(my) + 4.f);
-				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 110));
-				nvgStrokeWidth(vg, 1.f);
-				nvgStroke(vg);
+				if (mt > 0.f)
+				{
+					mx /= mt;
+					my /= mt;
+					nvgBeginPath(vg);
+					nvgMoveTo(vg, SX(mx) - 4.f, SY(my));
+					nvgLineTo(vg, SX(mx) + 4.f, SY(my));
+					nvgMoveTo(vg, SX(mx), SY(my) - 4.f);
+					nvgLineTo(vg, SX(mx), SY(my) + 4.f);
+					nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 110));
+					nvgStrokeWidth(vg, 1.f);
+					nvgStroke(vg);
+				}
 			}
 
 			// ================= bodies (with wrap ghosts near the edges) =================
@@ -1224,16 +971,15 @@ namespace
 						nvgBeginPath(vg);
 						nvgMoveTo(vg, x, y);
 						nvgLineTo(vg, x + vx[i] * S * 0.22f, y - vy[i] * S * 0.22f);
-						nvgStrokeColor(vg, withA(col, 0.6f));
+						nvgStrokeColor(vg, ag::withA(col, 0.6f));
 						nvgStrokeWidth(vg, 1.f);
 						nvgStroke(vg);
 
-						// Body + number.
+						// Body + number (dark digit on the flat disc).
 						drawBody(vg, x, y, r, col, evf[i]);
 						char b[4];
 						snprintf(b, sizeof(b), "%d", i + 1);
-						drawText(vg, x + 0.3f, y + 0.8f, b, 5.5f, nvgRGBA(8, 10, 14, 220),
-								 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+						ag::text(vg, x + 0.3f, y + 0.8f, b, 7.f, nvgRGBA(8, 10, 14, 235), ag::ALIGN_C, 0.f);
 					}
 				}
 			}
@@ -1241,8 +987,7 @@ namespace
 			// ================= wall style =================
 			if (wrap)
 			{
-				// Dashed cyan frame with small dashes: leaving one side
-				// re-enters on the other.
+				// Dashed cyan frame: leaving one side re-enters on the other.
 				nvgBeginPath(vg);
 				for (float t = 0.f; t < S; t += 8.f)
 				{
@@ -1256,73 +1001,42 @@ namespace
 					nvgMoveTo(vg, S - 1.f, t);
 					nvgLineTo(vg, S - 1.f, t2);
 				}
-				nvgStrokeColor(vg, withA(colAccent(), 0.55f));
-				nvgStrokeWidth(vg, 1.4f);
+				nvgStrokeColor(vg, ag::withA(ag::accent(), 0.55f));
+				nvgStrokeWidth(vg, 1.f);
 				nvgStroke(vg);
 			}
 			else
 			{
-				// Warm solid frame + faint halo for bounce mode.
+				// Solid warm frame for bounce mode.
 				nvgBeginPath(vg);
-				nvgRoundedRect(vg, 1.f, 1.f, S - 2.f, S - 2.f, 3.f);
-				nvgStrokeColor(vg, withA(colWarm(), 0.75f));
-				nvgStrokeWidth(vg, 2.f);
-				nvgStroke(vg);
-				nvgBeginPath(vg);
-				nvgRoundedRect(vg, 1.f, 1.f, S - 2.f, S - 2.f, 3.f);
-				nvgStrokeColor(vg, withA(colWarm(), 0.16f));
-				nvgStrokeWidth(vg, 6.f);
+				nvgRect(vg, 1.f, 1.f, S - 2.f, S - 2.f);
+				nvgStrokeColor(vg, ag::withA(ag::warm(), 0.8f));
+				nvgStrokeWidth(vg, 1.5f);
 				nvgStroke(vg);
 			}
-
-			// ================= readouts =================
-			{
-				char buf[64];
-				NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 230);
-				NVGcolor cm = nvgRGBA(0xff, 0xe6, 0x80, 225);
-				NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 235);
-
-				// Top-left: N, wall style, mass mode.
-				snprintf(buf, sizeof(buf), "N %02d  %s%s", n, wrap ? "WRAP" : "BOUNCE", randMass ? "  RND" : "");
-				drawText(vg, 8.f, 10.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-
-				// Top-right: X/Y range.
-				snprintf(buf, sizeof(buf), "X/Y %s V", XB_RANGE_NAMES[range]);
-				drawText(vg, S - 8.f, 10.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-				// Bottom-left: speed + gravity multipliers.
-				snprintf(buf, sizeof(buf), "SPD x%.2f  G x%.2f", speed, G / 0.05f);
-				drawText(vg, 8.f, S - 10.f, buf, 6.5f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-
-				// Bottom-right: kinetic energy.
-				snprintf(buf, sizeof(buf), "KE %.3f", ke);
-				drawText(vg, S - 8.f, S - 10.f, buf, 6.5f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-
-				// Centre: pause indicator.
-				if (paused)
-					drawText(vg, S / 2.f, 10.f, "PAUSED", 7.f, colWarm(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-			}
-
-			// ================= scanlines, vignette, glass =================
-			nvgBeginPath(vg);
-			for (int y = 0; y < (int)S; y += 3)
-				nvgRect(vg, 0, y + 1, S, 1);
-			nvgFillColor(vg, nvgRGBA(0, 0, 0, 18));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, S, S);
-			nvgFillPaint(vg, nvgRadialGradient(vg, S / 2.f, S / 2.f, S * 0.55f, S * 0.80f,
-											   nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-			nvgFill(vg);
-
-			nvgBeginPath(vg);
-			nvgRect(vg, 0, 0, S, S * 0.25f);
-			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, S * 0.25f,
-											   nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-			nvgFill(vg);
 
 			nvgRestore(vg);
+
+			// ================= readout strip (below the plot) =================
+			{
+				char buf[64];
+				const float y1 = S + 10.f, y2 = S + 23.f;
+
+				snprintf(buf, sizeof(buf), "N %02d  %s%s", n, wrap ? "WRAP" : "BOUNCE", randMass ? "  RND" : "");
+				ag::text(vg, 8.f, y1, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
+
+				snprintf(buf, sizeof(buf), "X/Y %s V", XB_RANGE_NAMES[range]);
+				ag::text(vg, S - 8.f, y1, buf, 7.f, ag::textCol(), ag::ALIGN_R, 0.5f);
+
+				if (paused)
+					ag::text(vg, S / 2.f + 6.f, y1, "PAUSED", 7.f, ag::warm(), ag::ALIGN_C, 1.f);
+
+				snprintf(buf, sizeof(buf), "SPD x%.2f  G x%.2f", speed, G / 0.05f);
+				ag::text(vg, 8.f, y2, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+
+				snprintf(buf, sizeof(buf), "KE %.3f", ke);
+				ag::text(vg, S - 8.f, y2, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
+			}
 
 			Widget::drawLayer(args, layer);
 		}
@@ -1368,12 +1082,12 @@ struct XBodyProblemWidget : ModuleWidget
 
 		// RESET button + LED + jack.
 		addParam(createParamCentered<LEDButton>(Vec(xbIoX(2), XB_IO_Y), module, XBodyProblem::RESET_PARAM));
-		addChild(createLightCentered<MediumLight<XBCyanLight>>(Vec(xbIoX(2), XB_IO_Y), module, XBodyProblem::RESET_LIGHT));
+		addChild(createLightCentered<MediumLight<ag::CyanLight>>(Vec(xbIoX(2), XB_IO_Y), module, XBodyProblem::RESET_LIGHT));
 		addInput(createInputCentered<DarkPJ301MPort>(Vec(xbIoX(3), XB_IO_Y), module, XBodyProblem::RESET_INPUT));
 
 		// KICK button + LED.
 		addParam(createParamCentered<LEDButton>(Vec(xbIoX(4), XB_IO_Y), module, XBodyProblem::KICK_PARAM));
-		addChild(createLightCentered<MediumLight<XBCyanLight>>(Vec(xbIoX(4), XB_IO_Y), module, XBodyProblem::KICK_LIGHT));
+		addChild(createLightCentered<MediumLight<ag::CyanLight>>(Vec(xbIoX(4), XB_IO_Y), module, XBodyProblem::KICK_LIGHT));
 
 		// Poly outputs.
 		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(xbIoX(5), XB_IO_Y), module, XBodyProblem::X_OUTPUT));
@@ -1396,8 +1110,5 @@ struct XBodyProblemWidget : ModuleWidget
 									  { module->doReset(); }));
 	}
 };
-//
-//
-//
 
 Model *modelXBodyProblem = createModel<XBodyProblem, XBodyProblemWidget>("XBodyProblem");

@@ -20,6 +20,7 @@
 //     click a tab, click the plot to cycle, or use the context menu.
 // ============================================================================
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include "VortexModule.hpp"
 #include <cmath>
 #include <cstdio>
@@ -37,12 +38,16 @@ static const int VX_BANDS = 198;                // spectrum bands (2 px each)
 static const float VX_W = RACK_GRID_WIDTH * 32; // 480
 static const float VX_H = RACK_GRID_HEIGHT;     // 380
 
-static const float VX_DX = 20.f, VX_DY = 46.f, VX_DW = 440.f, VX_DH = 112.f; // display
-static const float VX_COL[6] = {40.f, 120.f, 200.f, 280.f, 360.f, 440.f};    // knob cell centres
-static const float VX_ROW[2] = {168.f, 242.f};                               // top of each cell plate
-static const float VX_CELL_W = 70.f, VX_CELL_H = 68.f;
-static const float VX_STRIP_Y = 314.f, VX_STRIP_H = 48.f; // buttons + jacks
-static float vxStripX(int i) { return 40.f + 40.f * i; }  // 11 items, 40 px apart
+// Display (440 x 112) sits just under the title; the bezel adds 4 px around it.
+static const float VX_DX = 20.f, VX_DY = 26.f, VX_DW = 440.f, VX_DH = 112.f;
+static const float VX_COL[6] = {40.f, 120.f, 200.f, 280.f, 360.f, 440.f}; // knob cell centres
+// Knob cells: 70 x 72, label at +10, knob at +30, CV jack (left) and attenuverter (right) at +58.
+static const float VX_ROW[2] = {148.f, 224.f}; // top of each cell plate
+static const float VX_CELL_W = 70.f, VX_CELL_H = 72.f;
+static const float VX_KNOB_DY = 30.f, VX_SUB_DY = 58.f, VX_SUB_DX = 16.f;
+// Bottom strip: 11 cells of 36 x 46, label at +10, control at +30 (ends at y = 350).
+static const float VX_STRIP_Y = 304.f, VX_STRIP_W = 36.f, VX_STRIP_H = 46.f, VX_STRIP_DY = 30.f;
+static float vxStripX(int i) { return 40.f + 40.f * (float)i; } // 11 items, 40 px apart
 
 // Plot area inside the display (display-local coordinates).
 static const float VP_X = 8.f, VP_Y = 18.f, VP_W = 396.f, VP_H = 76.f;
@@ -239,14 +244,18 @@ struct VortexModule : Module
         configLight(CLEAR_BUTTON_LIGHT, "Clear");
         configLight(FREEZE_BUTTON_LIGHT, "Freeze");
         configLight(ECHO_MODE_BUTTON_LIGHT, "Echo mode");
+
+        configBypass(IN_L_INPUT, OUT_L_OUTPUT);
+        configBypass(IN_R_INPUT, OUT_R_OUTPUT);
     }
 
     // --------------------------------------------------------
     // Reset all engine state and clear the latched toggles.
     // Forces a re-allocation on the next sample by clearing lastSr.
     // --------------------------------------------------------
-    void onReset() override
+    void onReset(const ResetEvent &e) override
     {
+        Module::onReset(e);
         for (int c = 0; c < Vortex::NUM_CHANNELS; ++c)
             voices[c].reset();
         ctl.lastSr = 0.f; // snap smoothers to the controls on the next sample
@@ -331,7 +340,7 @@ struct VortexModule : Module
     // Main per-sample processing:
     //  1. Detect channel configuration (mono/poly/stereo-in/out).
     //  2. Read all 12 (param, atten, CV) tuples + MIX.
-    //  3. Latch mode/freeze buttons; combnie freeze state.
+    //  3. Latch mode/freeze buttons; combine freeze state.
     //  4. Update the per-sample controller (smoothing), snapshot
     //     values into the display fields.
     //  5. Handle the clear fade/trigger sequence.
@@ -546,184 +555,14 @@ struct VortexModule : Module
 };
 
 // ============================================================
-// Theme + drawing helpers (anonymous namespace — UI-only)
+// Drawing helpers (anonymous namespace — UI-only)
 // ------------------------------------------------------------
-// The helpers below are a small self-contained theme so Vortex
-// does not depend on agmm_ui.hpp styling. They cover:
-//   * a colour palette (background, text, accent, violet)
-//   * text rendering with the shared ShareTechMono font
-//   * cyan / violet LED light templates
-//   * the AGMM logo badge
-//   * panel base, bezel, plate, ring, screen base/finish
+// Shared flat panel kit (agmm_ui.hpp): flat fills and hairline strokes only.
 // ============================================================
 namespace
 {
 
-    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
-    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
-    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
-    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
-    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
-    NVGcolor withAlpha(NVGcolor c, float a)
-    {
-        c.a = a;
-        return c;
-    }
-
-    // Load the shared ShareTechMono font (used by every text call below).
-    void setFont(NVGcontext *vg)
-    {
-        std::shared_ptr<window::Font> font =
-            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-        if (font)
-            nvgFontFaceId(vg, font->handle);
-    }
-
-    // Draw a single line of text in the standard font with letter spacing.
-    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
-                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
-    {
-        setFont(vg);
-        nvgFontSize(vg, size);
-        nvgTextLetterSpacing(vg, spacing);
-        nvgTextAlign(vg, align);
-        nvgFillColor(vg, col);
-        nvgText(vg, x, y, s, NULL);
-    }
-
-    // Cyan and violet LED light templates.
-    template <typename TBase = GrayModuleLightWidget>
-    struct TVxCyanLight : TBase
-    {
-        TVxCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-    };
-    using VxCyanLight = TVxCyanLight<>;
-
-    template <typename TBase = GrayModuleLightWidget>
-    struct TVxVioletLight : TBase
-    {
-        TVxVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
-    };
-    using VxVioletLight = TVxVioletLight<>;
-
-    // AGMM logo badge (rounded rect with gradient stroke + 3-block mark).
-    void drawLogo(NVGcontext *vg, float cx, float cy)
-    {
-        const float w = 64.f, h = 18.f;
-        float x = cx - w / 2.f, y = cy - h / 2.f;
-        // Glow
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgFill(vg);
-        // Body
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 7.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-        nvgFill(vg);
-        // Gradient border
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgStrokeWidth(vg, 1.2f);
-        nvgStroke(vg);
-        // 3-block logo mark
-        const float s = 2.2f;
-        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-        nvgBeginPath(vg);
-        nvgRect(vg, tx + s, ty, s, s);
-        nvgRect(vg, tx, ty + s * 1.4f, s, s);
-        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-        nvgFillColor(vg, colAccent());
-        nvgFill(vg);
-        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-    }
-
-    // Panel base: gradient fill, subtle scanlines, border, logo, title.
-    void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
-        // Scanlines (every 3 px, alternating alpha).
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int)H; y += 3)
-        {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-        // Border
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStroke(vg);
-        drawLogo(vg, W / 2.f, 13.f);
-        drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-    }
-
-    // Display bezel: outer glow ring + inner black screen surround.
-    void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
-    {
-        float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-    }
-
-    // Rounded "cell plate" with an optional tinted edge (used for knob cells).
-    void plate(NVGcontext *vg, float x, float y, float w, float h, NVGcolor edge)
-    {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-        nvgFill(vg);
-        nvgStrokeColor(vg, edge);
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // Dark circular "knob ring" behind a knob (unused in strip cells).
-    void ring(NVGcontext *vg, float cx, float cy, float r)
-    {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // Display background: subtle radial gradient (dark edges, lighter centre).
-    void screenBase(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.6f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-        nvgFill(vg);
-    }
-
-    // Display finishing pass: scanlines + top gloss, drawn over the content.
-    void screenFinish(NVGcontext *vg, float W, float H)
-    {
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int)H; y += 3)
-            nvgRect(vg, 0, y + 1, W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-        nvgFill(vg);
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, W, H * 0.3f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
-    }
+    namespace ag = agmm;
 
     // ------------------------------------------------------------
     // Control cells: 12 knobs, each with a CV jack and an attenuverter.
@@ -749,14 +588,15 @@ namespace
         {"ECHO LVL", VortexModule::ECHO_LEVEL_PARAM, VortexModule::ECHO_LEVEL_ATTEN, VortexModule::ECHO_LEVEL_CV_INPUT, 2},
     };
 
+    // Strip order: buttons / switches, then inputs, then outputs (tinted).
     const char *VX_STRIP_NAMES[11] = {"MODE", "FREEZE", "CLEAR", "ST IN", "ST OUT",
-                                      "L IN", "R IN", "L OUT", "R OUT", "FRZ IN", "CLR IN"};
+                                      "L IN", "R IN", "FRZ IN", "CLR IN", "L OUT", "R OUT"};
 
     // ------------------------------------------------------------
     // VxPanel — static panel chrome:
     //   * panel base, bezel
-    //   * 12 knob cells (dimmed if inactive for the current mode)
-    //   * bottom strip with captions for buttons / switches / jacks
+    //   * 12 knob cells (label dimmed if inactive for the current mode)
+    //   * bottom strip with a labelled cell per button / switch / jack
     // The actual controls are placed by VortexWidget at the same positions.
     // ------------------------------------------------------------
     struct VxPanel : TransparentWidget
@@ -767,8 +607,8 @@ namespace
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            drawPanelBase(vg, VX_W, VX_H, "VORTEX");
-            drawBezel(vg, VX_DX, VX_DY, VX_DW, VX_DH);
+            ag::panelBase(vg, VX_W, VX_H, "VORTEX");
+            ag::bezel(vg, VX_DX, VX_DY, VX_DW, VX_DH);
 
             // Current mode: from the module when editing, reverb in the browser.
             const bool echo = module ? module->echoModeState : false;
@@ -779,26 +619,26 @@ namespace
                 int row = i / 6, col = i % 6;
                 float cx = VX_COL[col], T = VX_ROW[row];
                 const VxCellDef &c = VX_CELLS[i];
-                // Highlight cells that are active in the current mode.
                 bool active = (c.group == 0) || (c.group == 1 && !echo) || (c.group == 2 && echo);
-                NVGcolor tint = (c.group == 2) ? colViolet() : colAccent();
-                NVGcolor edge = (active && c.group != 0) ? withAlpha(tint, 0.35f) : nvgRGBA(255, 255, 255, active ? 25 : 12);
-                plate(vg, cx - VX_CELL_W / 2.f, T, VX_CELL_W, VX_CELL_H, edge);
-                ring(vg, cx, T + 27.f, 17.f);
-                NVGcolor lc = active ? (c.group != 0 ? withAlpha(tint, 0.9f) : colDim()) : nvgRGBA(0x7a, 0x85, 0x94, 90);
-                drawText(vg, cx, T + 8.f, c.name, 7.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.4f);
+                NVGcolor tint = (c.group == 2) ? ag::violet() : ag::accent();
+
+                ag::plate(vg, cx, T, VX_CELL_W, VX_CELL_H, false);
+                if (active && c.group != 0)
+                {
+                    // mode-specific cells get a tinted hairline while active
+                    nvgBeginPath(vg);
+                    nvgRoundedRect(vg, cx - VX_CELL_W / 2.f, T, VX_CELL_W, VX_CELL_H, 5.f);
+                    nvgStrokeColor(vg, ag::withA(tint, 0.55f));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                }
+                NVGcolor lc = active ? (c.group != 0 ? tint : ag::dim()) : nvgRGBA(0x8a, 0x95, 0xa4, 110);
+                ag::text(vg, cx, T + 10.f, c.name, 7.f, lc, ag::ALIGN_C, 0.4f);
             }
 
-            // Strip: 5 buttons / switches, then 6 jacks (captions only).
+            // Strip: 5 buttons / switches, 4 inputs, 2 outputs (tinted).
             for (int i = 0; i < 11; ++i)
-            {
-                float x = vxStripX(i);
-                plate(vg, x - 18.f, VX_STRIP_Y, 36.f, VX_STRIP_H, nvgRGBA(255, 255, 255, 25));
-                NVGcolor c = colDim();
-                if (i == 7 || i == 8)
-                    c = withAlpha(colAccent(), 0.9f); // L OUT / R OUT tinted
-                drawText(vg, x, VX_STRIP_Y + 9.f, VX_STRIP_NAMES[i], 6.f, c, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
-            }
+                ag::cell(vg, vxStripX(i), VX_STRIP_Y, VX_STRIP_W, VX_STRIP_H, VX_STRIP_NAMES[i], i >= 9, 7.f);
             Widget::draw(args);
         }
     };
@@ -820,6 +660,7 @@ namespace
         float barPeak[Vortex::NUM_TAPS] = {};
         float specSm[VX_BANDS], specPk[VX_BANDS];
         std::vector<float> win, twC, twS, re, im, pw;
+        float specDb[VX_BANDS]; // latest spectrum in dB (per widget instance)
 
         // Per-draw copy of the wave history (avoids racing the audio thread).
         float scMinL[VX_SCOPE_N], scMaxL[VX_SCOPE_N], scMinR[VX_SCOPE_N], scMaxR[VX_SCOPE_N];
@@ -854,6 +695,7 @@ namespace
             {
                 specSm[b] = -90.f;
                 specPk[b] = -90.f;
+                specDb[b] = -90.f;
             }
             for (int i = 0; i < VX_SCOPE_N; ++i)
             {
@@ -879,7 +721,7 @@ namespace
                             if (e.pos.x >= VP_TABX[i] && e.pos.x < VP_TABX[i] + VP_TABW[i])
                                 module->dispMode = i;
                     }
-                    else if (e.pos.y < VX_DH - 16.f)
+                    else if (e.pos.y < VP_Y + VP_H + 2.f)
                     {
                         module->dispMode = (module->dispMode + 1) % 3;
                     }
@@ -987,20 +829,12 @@ namespace
             }
         }
 
-        // ---- static background (screen fill + plot frame) ----
+        // ---- static background (flat screen + plot frame) ----
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            screenBase(vg, VX_DW, VX_DH);
-
-            // Plot frame.
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, VP_X - 1.f, VP_Y - 1.f, VP_W + 2.f, VP_H + 2.f, 2.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
+            ag::screen(vg, 0.f, 0.f, VX_DW, VX_DH);
+            ag::plotFrame(vg, VP_X - 1.f, VP_Y - 1.f, VP_W + 2.f, VP_H + 2.f);
             Widget::draw(args);
         }
 
@@ -1022,7 +856,6 @@ namespace
             float pv[12] = {0.f, 0.6f, 0.5f, 0.7f, 0.5f, 0.f, 0.3f, 0.2f, 0.5f, 0.3f, 0.5f, 0.8f};
             float mL = 2.6f, mR = 2.2f, fade = 1.f, rt = 2.f, sr = 48000.f, size = 1.15f, eMs = 300.f;
             float tapLv[Vortex::NUM_TAPS];
-            static float specDb[VX_BANDS]; // cached between draws (recomputed if mode==2)
             for (int i = 0; i < Vortex::NUM_TAPS; ++i)
                 tapLv[i] = 0.f;
 
@@ -1070,9 +903,9 @@ namespace
                 // module browser preview: synthetic data
                 mode = 2;
                 for (int i = 0; i < Vortex::NUM_TAPS; ++i)
-                    tapLv[i] = 3.f * (0.3f + 0.7f * std::fabs(std::sin(i * 1.7f + 0.4f)));
+                    tapLv[i] = 3.f * (0.3f + 0.7f * std::fabs(std::sin((float)i * 1.7f + 0.4f)));
                 for (int b = 0; b < VX_BANDS; ++b)
-                    specDb[b] = -16.f - 58.f * std::pow((float)b / VX_BANDS, 0.75f) + 5.f * std::sin(b * 0.45f);
+                    specDb[b] = -16.f - 58.f * std::pow((float)b / (float)VX_BANDS, 0.75f) + 5.f * std::sin((float)b * 0.45f);
             }
 
             // ---------- plot (clipped to the frame) ----------
@@ -1089,7 +922,7 @@ namespace
                 nvgBeginPath(vg);
                 for (int k = 1; k < 8; ++k)
                 {
-                    float x = PX + PW - k * (PW / 8.f) + 0.5f;
+                    float x = PX + PW - (float)k * (PW / 8.f) + 0.5f;
                     nvgMoveTo(vg, x, PY);
                     nvgLineTo(vg, x, PY + PH);
                 }
@@ -1099,12 +932,11 @@ namespace
                 nvgLineTo(vg, PX + PW, mid - half * 0.5f + 0.5f);
                 nvgMoveTo(vg, PX, mid + half * 0.5f + 0.5f);
                 nvgLineTo(vg, PX + PW, mid + half * 0.5f + 0.5f);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
-                // Draw one envelope (min..max per bin) split into 4 alpha bands
-                // for a "fading history" look. Later draws overwrite earlier ones.
+                // One envelope (min..max per bin) in 4 flat alpha bands (older = fainter).
                 const float step = PW / (float)VX_SCOPE_N;
                 auto env = [&](const float *mn, const float *mx, NVGcolor col, float baseA)
                 {
@@ -1119,47 +951,47 @@ namespace
                             float hi = rack::math::clamp(mx[i] * sc, -half, half);
                             float lo = rack::math::clamp(mn[i] * sc, -half, half);
                             float hh = std::max(hi - lo, 1.f);
-                            nvgRect(vg, PX + i * step, mid - hi, std::max(step, 1.f), hh);
+                            nvgRect(vg, PX + (float)i * step, mid - hi, std::max(step, 1.f), hh);
                         }
-                        nvgFillColor(vg, withAlpha(col, baseA * (0.35f + 0.65f * (q + 1) / 4.f)));
+                        nvgFillColor(vg, ag::withA(col, baseA * (0.35f + 0.65f * (float)(q + 1) / 4.f)));
                         nvgFill(vg);
                     }
                 };
                 env(scMinI, scMaxI, nvgRGB(255, 255, 255), 0.22f); // dry input (white)
-                env(scMinR, scMaxR, colViolet(), 0.75f);           // right
-                env(scMinL, scMaxL, colAccent(), 0.75f);           // left
+                env(scMinR, scMaxR, ag::violet(), 0.75f);          // right
+                env(scMinL, scMaxL, ag::accent(), 0.75f);          // left
 
                 // Legend.
                 const char *lg[3] = {"L", "R", "IN"};
-                NVGcolor lc[3] = {colAccent(), colViolet(), nvgRGB(255, 255, 255)};
+                NVGcolor lc[3] = {ag::accent(), ag::violet(), nvgRGB(255, 255, 255)};
                 for (int i = 0; i < 3; ++i)
                 {
-                    float x = PX + 6.f + i * 22.f;
+                    float x = PX + 6.f + (float)i * 24.f;
                     nvgBeginPath(vg);
                     nvgRect(vg, x, PY + 5.f, 4.f, 4.f);
-                    nvgFillColor(vg, withAlpha(lc[i], 0.9f));
+                    nvgFillColor(vg, ag::withA(lc[i], 0.9f));
                     nvgFill(vg);
-                    drawText(vg, x + 7.f, PY + 7.f, lg[i], 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.5f);
+                    ag::text(vg, x + 7.f, PY + 7.f, lg[i], 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
                 }
-                drawText(vg, PX + 4.f, PY + PH - 6.f, "-4 S", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
-                drawText(vg, PX + PW - 4.f, PY + PH - 6.f, "NOW", 5.5f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.f);
+                ag::text(vg, PX + 4.f, PY + PH - 6.f, "-4 S", 7.f, ag::dim(), ag::ALIGN_L, 0.f);
+                ag::text(vg, PX + PW - 4.f, PY + PH - 6.f, "NOW", 7.f, ag::dim(), ag::ALIGN_R, 0.f);
             }
             else if (mode == 1)
             {
                 // ===== BARS: reverb = the 14 output taps of the plate; echo = the repeat levels =====
                 const int NB = Vortex::NUM_TAPS;
                 const float cell = PW / (float)NB, barW = 20.f;
-                const float base = PY + PH - 11.f, maxH = PH - 20.f;
+                const float base = PY + PH - 12.f, maxH = PH - 24.f; // bars stay below the caption
 
                 // Horizontal guides.
                 nvgBeginPath(vg);
                 for (int k = 1; k <= 3; ++k)
                 {
-                    float y = base - maxH * k / 4.f + 0.5f;
+                    float y = base - maxH * (float)k / 4.f + 0.5f;
                     nvgMoveTo(vg, PX, y);
                     nvgLineTo(vg, PX + PW, y);
                 }
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
@@ -1181,56 +1013,44 @@ namespace
                         h = rack::math::clamp(std::sqrt(tapLv[i] / 4.f), 0.f, 1.f);
                     }
                     barPeak[i] = std::max(h, barPeak[i] - 0.007f);
-                    float x = PX + i * cell + (cell - barW) / 2.f;
+                    float x = PX + (float)i * cell + (cell - barW) / 2.f;
                     float bh = std::max(h * maxH, 1.f);
                     NVGcolor c0;
                     if (echo)
-                        c0 = (pp > 0.5f && (i & 1)) ? colViolet() : colAccent(); // ping-pong alternate colouring
+                        c0 = (pp > 0.5f && (i & 1)) ? ag::violet() : ag::accent(); // ping-pong alternate colouring
                     else
-                        c0 = (i < 7) ? nvgLerpRGBA(colAccent(), nvgRGB(0x6f, 0xa8, 0xff), i / 6.f)
-                                     : nvgLerpRGBA(nvgRGB(0x8a, 0x7a, 0xff), colViolet(), (i - 7) / 6.f);
+                        c0 = (i < 7) ? ag::accent() : ag::violet(); // left taps | right taps
 
-                    // Soft halo behind the bar.
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x - 2.f, base - bh - 2.f, barW + 4.f, bh + 4.f);
-                    nvgFillColor(vg, withAlpha(c0, 0.10f));
-                    nvgFill(vg);
-                    // Bar body (vertical gradient).
+                    // Flat bar body.
                     nvgBeginPath(vg);
                     nvgRect(vg, x, base - bh, barW, bh);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, base, 0, base - maxH, withAlpha(c0, 0.55f), nvgLerpRGBA(c0, nvgRGB(255, 255, 255), 0.55f)));
+                    nvgFillColor(vg, ag::withA(c0, 0.7f));
                     nvgFill(vg);
                     // Peak-hold line.
                     float py = base - barPeak[i] * maxH;
                     nvgBeginPath(vg);
-                    nvgRect(vg, x, py - 1.f, barW, 1.6f);
+                    nvgRect(vg, x, py - 1.f, barW, 1.5f);
                     nvgFillColor(vg, nvgRGBA(255, 255, 255, 220));
                     nvgFill(vg);
 
                     // Labels: echo = seconds, reverb = tap delay in ms (scaled by size).
                     if (echo)
-                        snprintf(buf, sizeof(buf), "%.1f", (i + 1) * eMs / 1000.f);
+                        snprintf(buf, sizeof(buf), "%.1f", (float)(i + 1) * eMs / 1000.f);
                     else
                     {
                         float ref = (i < 7) ? Vortex::TAP_L[i] : Vortex::TAP_R[i - 7];
                         snprintf(buf, sizeof(buf), "%.0f", ref / Vortex::REF_SR * 1000.f * size);
                     }
-                    drawText(vg, x + barW / 2.f, base + 6.f, buf, 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
+                    ag::text(vg, x + barW / 2.f, base + 6.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.f);
                 }
-                // Horizontal gaps between "segments" for a stepped look.
-                nvgBeginPath(vg);
-                for (float y = base - 3.f; y > base - maxH; y -= 4.f)
-                    nvgRect(vg, PX, y, PW, 1.f);
-                nvgFillColor(vg, nvgRGBA(3, 6, 9, 235));
-                nvgFill(vg);
 
-                drawText(vg, PX + 4.f, PY + 7.f, echo ? "ECHO REPEATS (S)  0 TO -60 DB" : "PLATE OUTPUT TAPS (MS)  L | R",
-                         6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+                ag::text(vg, PX + 6.f, PY + 7.f, echo ? "ECHO REPEATS (S)  0 TO -60 DB" : "PLATE OUTPUT TAPS (MS)  L | R",
+                         7.f, ag::dim(), ag::ALIGN_L, 0.5f);
                 // Divider between the L and R halves in reverb mode.
                 if (!echo)
                 {
                     nvgBeginPath(vg);
-                    nvgRect(vg, PX + PW / 2.f - 0.5f, PY + 2.f, 1.f, PH - 4.f);
+                    nvgRect(vg, PX + PW / 2.f - 0.5f, PY + 14.f, 1.f, PH - 16.f);
                     nvgFillColor(vg, nvgRGBA(255, 255, 255, 30));
                     nvgFill(vg);
                 }
@@ -1261,7 +1081,7 @@ namespace
                     nvgMoveTo(vg, PX, y);
                     nvgLineTo(vg, PX + PW, y);
                 }
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
@@ -1273,48 +1093,45 @@ namespace
                     specPk[b] = std::max(specSm[b], specPk[b] - 0.35f);
                 }
 
-                // Filled spectrum (area under the smoothed curve).
+                // Filled spectrum (flat area under the smoothed curve).
                 const float bw = PW / (float)VX_BANDS;
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, PX, PY + PH);
                 for (int b = 0; b < VX_BANDS; ++b)
-                    nvgLineTo(vg, PX + (b + 0.5f) * bw, yOf(specSm[b]));
+                    nvgLineTo(vg, PX + ((float)b + 0.5f) * bw, yOf(specSm[b]));
                 nvgLineTo(vg, PX + PW, PY + PH);
                 nvgClosePath(vg);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY, 0, PY + PH, nvgRGBA(0x3d, 0xe0, 0xff, 120), nvgRGBA(0xb0, 0x5a, 0xff, 8)));
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.18f));
                 nvgFill(vg);
 
                 // Peak-hold line.
                 nvgBeginPath(vg);
                 for (int b = 0; b < VX_BANDS; ++b)
                 {
-                    float x = PX + (b + 0.5f) * bw, y = yOf(specPk[b]);
+                    float x = PX + ((float)b + 0.5f) * bw, y = yOf(specPk[b]);
                     if (b == 0)
                         nvgMoveTo(vg, x, y);
                     else
                         nvgLineTo(vg, x, y);
                 }
-                nvgStrokeColor(vg, withAlpha(colViolet(), 0.55f));
+                nvgStrokeColor(vg, ag::withA(ag::violet(), 0.55f));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
-                // Main curve: thin underglow, then bright stroke on top.
-                for (int pass = 0; pass < 2; ++pass)
+                // Main curve: a single hairline.
+                nvgBeginPath(vg);
+                for (int b = 0; b < VX_BANDS; ++b)
                 {
-                    nvgBeginPath(vg);
-                    for (int b = 0; b < VX_BANDS; ++b)
-                    {
-                        float x = PX + (b + 0.5f) * bw, y = yOf(specSm[b]);
-                        if (b == 0)
-                            nvgMoveTo(vg, x, y);
-                        else
-                            nvgLineTo(vg, x, y);
-                    }
-                    nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.25f) : nvgRGB(0x8a, 0xee, 0xff));
-                    nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
-                    nvgLineJoin(vg, NVG_ROUND);
-                    nvgStroke(vg);
+                    float x = PX + ((float)b + 0.5f) * bw, y = yOf(specSm[b]);
+                    if (b == 0)
+                        nvgMoveTo(vg, x, y);
+                    else
+                        nvgLineTo(vg, x, y);
                 }
+                nvgStrokeColor(vg, ag::bright());
+                nvgStrokeWidth(vg, 1.f);
+                nvgLineJoin(vg, NVG_ROUND);
+                nvgStroke(vg);
 
                 // Frequency / dB labels.
                 const char *fn[9] = {"50", "100", "200", "500", "1K", "2K", "5K", "10K", "20K"};
@@ -1322,13 +1139,13 @@ namespace
                 {
                     if (fl[i] >= fMax)
                         continue;
-                    drawText(vg, xOf(fl[i]), PY + PH - 5.f, fn[i], 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                    ag::text(vg, xOf(fl[i]), PY + PH - 5.f, fn[i], 7.f, ag::dim(), ag::ALIGN_C, 0.f);
                 }
                 char buf[16];
                 for (int d = -20; d >= -80; d -= 20)
                 {
                     snprintf(buf, sizeof(buf), "%d", d);
-                    drawText(vg, PX + 3.f, yOf((float)d) - 4.f, buf, 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
+                    ag::text(vg, PX + 3.f, yOf((float)d) - 5.f, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.f);
                 }
             }
 
@@ -1337,32 +1154,15 @@ namespace
             {
                 nvgBeginPath(vg);
                 nvgRect(vg, PX, PY, PW, PH);
-                nvgFillColor(vg, withAlpha(colViolet(), 0.28f * (1.f - fade)));
+                nvgFillColor(vg, ag::withA(ag::violet(), 0.28f * (1.f - fade)));
                 nvgFill(vg);
             }
             nvgResetScissor(vg);
             nvgRestore(vg);
 
-            // ---------- stereo output meters ----------
-            for (int c = 0; c < 2; ++c)
-            {
-                float lv = std::min(std::max((c == 0 ? mL : mR) / 5.f, 0.f), 1.f);
-                float x = PX + PW + 8.f + c * 9.f;
-                nvgBeginPath(vg);
-                nvgRect(vg, x, PY, 6.f, PH);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-                nvgFill(vg);
-                if (lv > 0.01f)
-                {
-                    float h = lv * PH;
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x, PY + PH - h, 6.f, h);
-                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY + PH, 0, PY, colAccent(), colViolet()));
-                    nvgFill(vg);
-                }
-            }
-
-            screenFinish(vg, W, H);
+            // ---------- stereo output meters (right of the plot) ----------
+            ag::meter(vg, PX + PW + 8.f, PY, 6.f, PH, mL / 5.f);
+            ag::meter(vg, PX + PW + 17.f, PY, 6.f, PH, mR / 5.f);
 
             // ---------- header: tabs + status ----------
             const char *tn[3] = {"WAVE", "BARS", "SPECTRUM"};
@@ -1373,9 +1173,9 @@ namespace
                 nvgRoundedRect(vg, VP_TABX[i], 3.f, VP_TABW[i], 11.f, 3.f);
                 if (on)
                 {
-                    nvgFillColor(vg, withAlpha(colAccent(), 0.22f));
+                    nvgFillColor(vg, ag::withA(ag::accent(), 0.22f));
                     nvgFill(vg);
-                    nvgStrokeColor(vg, withAlpha(colAccent(), 0.9f));
+                    nvgStrokeColor(vg, ag::withA(ag::accent(), 0.9f));
                 }
                 else
                 {
@@ -1383,29 +1183,27 @@ namespace
                 }
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
-                drawText(vg, VP_TABX[i] + VP_TABW[i] / 2.f, 8.5f, tn[i], 6.f, on ? colAccent() : colDim(),
-                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+                ag::text(vg, VP_TABX[i] + VP_TABW[i] / 2.f, 8.8f, tn[i], 7.f, on ? ag::accent() : ag::dim(),
+                         ag::ALIGN_C, 0.5f);
             }
             char buf[96];
             // Mode + status.
-            drawText(vg, W - 6.f, 8.f, echo ? "ECHO" : "REVERB", 7.f, echo ? colViolet() : colAccent(),
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.5f);
+            ag::text(vg, W - 6.f, 8.5f, echo ? "ECHO" : "REVERB", 7.f, echo ? ag::violet() : ag::accent(),
+                     ag::ALIGN_R, 1.f);
             if (fade < 0.99f)
             {
-                drawText(vg, W - 52.f, 8.f, "CLEARING", 7.f, withAlpha(colViolet(), 0.95f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+                ag::text(vg, W - 52.f, 8.5f, "CLEARING", 7.f, ag::violet(), ag::ALIGN_R, 0.5f);
             }
             else
             {
                 snprintf(buf, sizeof(buf), "%s%s%sCH %d", frz ? "FROZEN  " : "", sIn ? "ST IN  " : "", sOut ? "ST OUT  " : "", ch);
-                drawText(vg, W - 52.f, 8.f, buf, 6.5f, frz ? withAlpha(colViolet(), 0.95f) : nvgRGBA(0x3d, 0xe0, 0xff, 210),
-                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+                ag::text(vg, W - 52.f, 8.5f, buf, 7.f, frz ? ag::violet() : ag::accent(), ag::ALIGN_R, 0.5f);
             }
 
             // ---------- footer: readouts for the current mode ----------
             // Five pairs: PRE, SIZE/TIME, RT60/FDBK, DAMP/PING, MIX.
             const char *nm[5];
             char val[5][16];
-            NVGcolor vc = nvgRGBA(0x3d, 0xe0, 0xff, 210);
             snprintf(val[0], sizeof(val[0]), "%.0fMS", pv[0] * 500.f);
             float fc = 18000.f * std::pow(2500.f / 18000.f, pv[4]);
             if (!echo)
@@ -1435,9 +1233,9 @@ namespace
             const float cw = (W - 16.f) / 5.f;
             for (int i = 0; i < 5; ++i)
             {
-                float x = 8.f + i * cw;
-                drawText(vg, x, H - 7.f, nm[i], 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
-                drawText(vg, x + cw - 6.f, H - 7.f, val[i], 6.5f, vc, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+                float x = 8.f + (float)i * cw;
+                ag::text(vg, x, H - 7.f, nm[i], 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+                ag::text(vg, x + cw - 8.f, H - 7.f, val[i], 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
             }
 
             Widget::drawLayer(args, layer);
@@ -1476,28 +1274,29 @@ struct VortexWidget : ModuleWidget
             int row = i / 6, col = i % 6;
             float cx = VX_COL[col], T = VX_ROW[row];
             const VxCellDef &c = VX_CELLS[i];
-            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, T + 27.f), module, c.param));
-            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, T + 54.f), module, c.cv));
-            addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, T + 54.f), module, c.atten));
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, T + VX_KNOB_DY), module, c.param));
+            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - VX_SUB_DX, T + VX_SUB_DY), module, c.cv));
+            addParam(createParamCentered<Trimpot>(Vec(cx + VX_SUB_DX, T + VX_SUB_DY), module, c.atten));
         }
 
         // Strip: mode / freeze / clear buttons, stereo switches, then the jacks.
-        const float sy = VX_STRIP_Y + 32.f;
+        const float sy = VX_STRIP_Y + VX_STRIP_DY;
         addParam(createParamCentered<LEDButton>(Vec(vxStripX(0), sy), module, VortexModule::ECHO_MODE_BUTTON_PARAM));
-        addChild(createLightCentered<SmallLight<VxVioletLight>>(Vec(vxStripX(0), sy), module, VortexModule::ECHO_MODE_BUTTON_LIGHT));
+        addChild(createLightCentered<SmallLight<ag::VioletLight>>(Vec(vxStripX(0), sy), module, VortexModule::ECHO_MODE_BUTTON_LIGHT));
         addParam(createParamCentered<LEDButton>(Vec(vxStripX(1), sy), module, VortexModule::FREEZE_BUTTON_PARAM));
-        addChild(createLightCentered<SmallLight<VxCyanLight>>(Vec(vxStripX(1), sy), module, VortexModule::FREEZE_BUTTON_LIGHT));
+        addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(vxStripX(1), sy), module, VortexModule::FREEZE_BUTTON_LIGHT));
         addParam(createParamCentered<LEDButton>(Vec(vxStripX(2), sy), module, VortexModule::CLEAR_BUTTON_PARAM));
-        addChild(createLightCentered<SmallLight<VxCyanLight>>(Vec(vxStripX(2), sy), module, VortexModule::CLEAR_BUTTON_LIGHT));
+        addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(vxStripX(2), sy), module, VortexModule::CLEAR_BUTTON_LIGHT));
         addParam(createParamCentered<CKSS>(Vec(vxStripX(3), sy), module, VortexModule::IN_STEREO_BUTTON_PARAM));
         addParam(createParamCentered<CKSS>(Vec(vxStripX(4), sy), module, VortexModule::OUT_STEREO_BUTTON_PARAM));
 
+        // Inputs (L, R, freeze gate, clear trigger), then outputs (L, R).
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(5), sy), module, VortexModule::IN_L_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(6), sy), module, VortexModule::IN_R_INPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(7), sy), module, VortexModule::OUT_L_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(8), sy), module, VortexModule::OUT_R_OUTPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(9), sy), module, VortexModule::FREEZE_CV_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(10), sy), module, VortexModule::CLEAR_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(7), sy), module, VortexModule::FREEZE_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(8), sy), module, VortexModule::CLEAR_INPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(9), sy), module, VortexModule::OUT_L_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(10), sy), module, VortexModule::OUT_R_OUTPUT));
     }
 
     // Add a "Display" submenu (Wave / Bars / Spectrum) and a "CV range"
