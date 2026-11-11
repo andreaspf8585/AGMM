@@ -35,7 +35,7 @@ static const int XB_TN = 120; // trail points
 static const float XB_TRAIL_HZ = 60.f;
 
 static const float XB_PANEL_W = RACK_GRID_WIDTH * 28; // 420
-static const float XB_PANEL_H = RACK_GRID_HEIGHT;     // 380
+static const float XB_PANEL_H = RACK_GRID_HEIGHT;	  // 380
 
 // Square display (220 x 220) plus a 32 px readout strip underneath; the bezel adds 4 px.
 static const float XB_S = 220.f;
