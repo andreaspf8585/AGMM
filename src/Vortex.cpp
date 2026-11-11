@@ -1,3 +1,24 @@
+// ============================================================================
+// Vortex — dual-mode reverb / echo (32 HP Rack module)
+// ----------------------------------------------------------------------------
+// Overview:
+//   * Two engines in one module: REVERB (a plate) and ECHO (a modulated
+//     echo with optional ping-pong). MODE button toggles; it latches and
+//     is saved with the patch.
+//   * 12 parameter cells, each with a knob, CV jack and attenuverter:
+//       PRE-DLY, SIZE*, DECAY*, DIFF/PING, DAMP, LOW CUT,
+//       MOD SPD, MOD DEP, MIX, ECHO TIME*, ECHO FB*, ECHO LVL*.
+//       (*) SIZE and DECAY are used only in reverb mode; the ECHO cell
+//       group is used only in echo mode. Inactive cells are dimmed.
+//   * FREEZE: latching button plus a gate input (high = freeze).
+//   * CLEAR: momentary button plus a trigger input; fades the wet
+//     signal out, resets the engines, then fades back in.
+//   * IN/OUT stereo switches; mono/poly otherwise (up to NUM_CHANNELS).
+//   * CV range menu: 0..+10 V (default) or -5..+5 V, applied to every
+//     CV input (attenuverter then scales this into the knob offset).
+//   * Three display modes (WAVE / BARS / SPECTRUM) drawn by VxDisplay;
+//     click a tab, click the plot to cycle, or use the context menu.
+// ============================================================================
 #include "plugin.hpp"
 #include "VortexModule.hpp"
 #include <cmath>
@@ -10,101 +31,157 @@
 // ------------------------------------------------------------
 // Layout constants (32 HP = 480 px)
 // ------------------------------------------------------------
-static const int   VX_SCOPE_N = 396;                 // waveform history bins (1 px each)
-static const int   VX_SPEC_N  = 4096;                // FFT size
-static const int   VX_BANDS   = 198;                 // spectrum bands (2 px each)
-static const float VX_W = RACK_GRID_WIDTH * 32;      // 480
-static const float VX_H = RACK_GRID_HEIGHT;          // 380
+static const int VX_SCOPE_N = 396;              // waveform history bins (1 px each)
+static const int VX_SPEC_N = 4096;              // FFT size
+static const int VX_BANDS = 198;                // spectrum bands (2 px each)
+static const float VX_W = RACK_GRID_WIDTH * 32; // 480
+static const float VX_H = RACK_GRID_HEIGHT;     // 380
 
-static const float VX_DX = 20.f, VX_DY = 46.f, VX_DW = 440.f, VX_DH = 112.f;   // display
-static const float VX_COL[6] = {40.f, 120.f, 200.f, 280.f, 360.f, 440.f};     // knob cell centres
-static const float VX_ROW[2] = {168.f, 242.f};                                 // top of each cell plate
+static const float VX_DX = 20.f, VX_DY = 46.f, VX_DW = 440.f, VX_DH = 112.f; // display
+static const float VX_COL[6] = {40.f, 120.f, 200.f, 280.f, 360.f, 440.f};    // knob cell centres
+static const float VX_ROW[2] = {168.f, 242.f};                               // top of each cell plate
 static const float VX_CELL_W = 70.f, VX_CELL_H = 68.f;
-static const float VX_STRIP_Y = 314.f, VX_STRIP_H = 48.f;                      // buttons + jacks
-static float vxStripX(int i) { return 40.f + 40.f * i; }                       // 11 items, 40 px apart
+static const float VX_STRIP_Y = 314.f, VX_STRIP_H = 48.f; // buttons + jacks
+static float vxStripX(int i) { return 40.f + 40.f * i; }  // 11 items, 40 px apart
 
-// plot area inside the display
+// Plot area inside the display (display-local coordinates).
 static const float VP_X = 8.f, VP_Y = 18.f, VP_W = 396.f, VP_H = 76.f;
 static const float VP_TABX[3] = {6.f, 46.f, 86.f};
 static const float VP_TABW[3] = {36.f, 36.f, 46.f};
 
 // ============================================================
 // Module
+//
+// The DSP itself lives in Vortex::Voice / Vortex::Controller
+// (declared in VortexModule.hpp). This file's job is:
+//   * translate Rack params / CV into Vortex::Params once per sample,
+//   * drive the per-voice engine,
+//   * mix dry + wet with equal-power crossfade,
+//   * feed display data (wave history, spectrum, peaks, readouts),
+//   * persist non-param state (CV range, display mode, freeze, echo).
 // ============================================================
-struct VortexModule : Module {
+struct VortexModule : Module
+{
     // Order is unchanged from earlier versions, so saved patches keep loading.
-    enum ParamId {
-        PRE_DELAY_PARAM, PRE_DELAY_ATTEN,
-        SIZE_PARAM, SIZE_ATTEN,
-        DECAY_PARAM, DECAY_ATTEN,
-        DIFFUSION_PARAM, DIFFUSION_ATTEN,
-        HIGH_DAMP_PARAM, HIGH_DAMP_ATTEN,
-        LOW_CUT_PARAM, LOW_CUT_ATTEN,
-        MOD_SPEED_PARAM, MOD_SPEED_ATTEN,
-        MOD_DEPTH_PARAM, MOD_DEPTH_ATTEN,
-        MIX_PARAM, MIX_ATTEN,
+    enum ParamId
+    {
+        PRE_DELAY_PARAM,
+        PRE_DELAY_ATTEN,
+        SIZE_PARAM,
+        SIZE_ATTEN,
+        DECAY_PARAM,
+        DECAY_ATTEN,
+        DIFFUSION_PARAM,
+        DIFFUSION_ATTEN,
+        HIGH_DAMP_PARAM,
+        HIGH_DAMP_ATTEN,
+        LOW_CUT_PARAM,
+        LOW_CUT_ATTEN,
+        MOD_SPEED_PARAM,
+        MOD_SPEED_ATTEN,
+        MOD_DEPTH_PARAM,
+        MOD_DEPTH_ATTEN,
+        MIX_PARAM,
+        MIX_ATTEN,
         ECHO_MODE_BUTTON_PARAM,
-        ECHO_TIME_PARAM, ECHO_TIME_ATTEN,
-        ECHO_FEEDBACK_PARAM, ECHO_FEEDBACK_ATTEN,
-        ECHO_LEVEL_PARAM, ECHO_LEVEL_ATTEN,
+        ECHO_TIME_PARAM,
+        ECHO_TIME_ATTEN,
+        ECHO_FEEDBACK_PARAM,
+        ECHO_FEEDBACK_ATTEN,
+        ECHO_LEVEL_PARAM,
+        ECHO_LEVEL_ATTEN,
         FREEZE_BUTTON_PARAM,
-        IN_STEREO_BUTTON_PARAM, OUT_STEREO_BUTTON_PARAM,
+        IN_STEREO_BUTTON_PARAM,
+        OUT_STEREO_BUTTON_PARAM,
         CLEAR_BUTTON_PARAM,
         PARAMS_LEN
     };
-    enum InputId {
-        IN_L_INPUT, IN_R_INPUT,
-        PRE_DELAY_CV_INPUT, SIZE_CV_INPUT, DECAY_CV_INPUT,
-        DIFFUSION_CV_INPUT, HIGH_DAMP_CV_INPUT, LOW_CUT_CV_INPUT,
-        MOD_SPEED_CV_INPUT, MOD_DEPTH_CV_INPUT, MIX_CV_INPUT,
-        ECHO_TIME_CV_INPUT, ECHO_FEEDBACK_CV_INPUT, ECHO_LEVEL_CV_INPUT,
+    enum InputId
+    {
+        IN_L_INPUT,
+        IN_R_INPUT,
+        PRE_DELAY_CV_INPUT,
+        SIZE_CV_INPUT,
+        DECAY_CV_INPUT,
+        DIFFUSION_CV_INPUT,
+        HIGH_DAMP_CV_INPUT,
+        LOW_CUT_CV_INPUT,
+        MOD_SPEED_CV_INPUT,
+        MOD_DEPTH_CV_INPUT,
+        MIX_CV_INPUT,
+        ECHO_TIME_CV_INPUT,
+        ECHO_FEEDBACK_CV_INPUT,
+        ECHO_LEVEL_CV_INPUT,
         FREEZE_CV_INPUT,
         CLEAR_INPUT,
         INPUTS_LEN
     };
-    enum OutputId { OUT_L_OUTPUT, OUT_R_OUTPUT, OUTPUTS_LEN };
-    enum LightId {
-        CLEAR_BUTTON_LIGHT, FREEZE_BUTTON_LIGHT, ECHO_MODE_BUTTON_LIGHT,
+    enum OutputId
+    {
+        OUT_L_OUTPUT,
+        OUT_R_OUTPUT,
+        OUTPUTS_LEN
+    };
+    enum LightId
+    {
+        CLEAR_BUTTON_LIGHT,
+        FREEZE_BUTTON_LIGHT,
+        ECHO_MODE_BUTTON_LIGHT,
         LIGHTS_LEN
     };
 
-    enum CVRange { BIPOLAR_M5_5, UNIPOLAR_0_10 };
+    // CV interpretation mode (persisted via dataToJson).
+    enum CVRange
+    {
+        BIPOLAR_M5_5,
+        UNIPOLAR_0_10
+    };
     CVRange cvRangeMode = UNIPOLAR_0_10;
 
     // ---- engine ----
     Vortex::Voice voices[Vortex::NUM_CHANNELS];
     Vortex::Controller ctl;
-    float allocSr = 0.f;
-    float kMix = 0.001f, mixS = 0.5f;
+    float allocSr = 0.f;              // sample rate the voices were init'd with
+    float kMix = 0.001f, mixS = 0.5f; // one-pole coefficient + state for MIX smoothing
 
     dsp::SchmittTrigger clearButtonTrigger, clearInputTrigger;
     dsp::SchmittTrigger freezeButtonTrigger, echoModeButtonTrigger;
-    bool clearRequested = false;
-    float clearFade = 1.0f;
-    bool clearActive = false;
-    int limiterRecovery = 0;
-    bool freezeLatched = false;
-    bool echoModeState = false;
+    bool clearRequested = false; // latched request to clear the tail
+    float clearFade = 1.0f;      // 0..1 fade used during a clear
+    bool clearActive = false;    // true while fading back in after a clear
+    int limiterRecovery = 0;     // countdown after a NaN/limiter event
+    bool freezeLatched = false;  // latching freeze state (saved with the patch)
+    bool echoModeState = false;  // false = reverb, true = echo (saved)
 
     // ---- display data (written by the audio thread, read by the UI thread;
     //      a torn read is only cosmetic) ----
-    int dispMode = 0;                 // 0 wave, 1 bars, 2 spectrum (saved with the patch)
-    int dispCh = 1;
-    bool dispFreeze = false;
-    float dispVal[12] = {};           // pre, size, decay, diff, damp, lowcut, speed, depth, mix, eTime, eFb, eLvl (with CV)
+    int dispMode = 0;        // 0 wave, 1 bars, 2 spectrum (saved with the patch)
+    int dispCh = 1;          // current channel count shown in the header
+    bool dispFreeze = false; // freeze state shown in the header
+    float dispVal[12] = {};  // pre, size, decay, diff, damp, lowcut, speed, depth, mix, eTime, eFb, eLvl (with CV)
     float dispRt60 = 2.f, dispEchoMs = 300.f, dispSize = 1.f, dispSr = 48000.f;
-    float peakL = 0.f, peakR = 0.f;
+    float peakL = 0.f, peakR = 0.f; // output peak meters (stereo)
 
+    // Waveform history: min/max per bin, one bin per pixel; L, R and the
+    // mono-input overlay are stored separately. scopeHead is the newest bin.
     float scopeMinL[VX_SCOPE_N] = {}, scopeMaxL[VX_SCOPE_N] = {};
     float scopeMinR[VX_SCOPE_N] = {}, scopeMaxR[VX_SCOPE_N] = {};
     float scopeMinI[VX_SCOPE_N] = {}, scopeMaxI[VX_SCOPE_N] = {};
     int scopeHead = 0, scopeCount = 0, scopeBinSamples = 485;
+    // Running accumulators between bin commits.
     float accMinL = 1e9f, accMaxL = -1e9f, accMinR = 1e9f, accMaxR = -1e9f, accMinI = 1e9f, accMaxI = -1e9f;
 
+    // Circular buffer feeding the FFT (power-of-two size).
     float specBuf[VX_SPEC_N] = {};
     int specPos = 0;
 
-    VortexModule() {
+    // --------------------------------------------------------
+    // Constructor — configure params, inputs, outputs, lights.
+    // Param displays are wired via displayBase/displayMultiplier
+    // so the UI shows real units (ms, s, Hz, %).
+    // --------------------------------------------------------
+    VortexModule()
+    {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
         configParam(PRE_DELAY_PARAM, 0.f, 1.f, 0.f, "Pre-delay", " ms", 0.f, 500.f);
@@ -164,10 +241,15 @@ struct VortexModule : Module {
         configLight(ECHO_MODE_BUTTON_LIGHT, "Echo mode");
     }
 
-    void onReset() override {
+    // --------------------------------------------------------
+    // Reset all engine state and clear the latched toggles.
+    // Forces a re-allocation on the next sample by clearing lastSr.
+    // --------------------------------------------------------
+    void onReset() override
+    {
         for (int c = 0; c < Vortex::NUM_CHANNELS; ++c)
             voices[c].reset();
-        ctl.lastSr = 0.f;                 // snap smoothers to the controls on the next sample
+        ctl.lastSr = 0.f; // snap smoothers to the controls on the next sample
         clearRequested = false;
         clearFade = 1.0f;
         clearActive = false;
@@ -176,8 +258,12 @@ struct VortexModule : Module {
         echoModeState = false;
     }
 
-    json_t* dataToJson() override {
-        json_t* root = json_object();
+    // --------------------------------------------------------
+    // Persist non-param state: CV range, display mode, freeze latch, echo mode.
+    // --------------------------------------------------------
+    json_t *dataToJson() override
+    {
+        json_t *root = json_object();
         json_object_set_new(root, "cvRangeMode", json_integer(cvRangeMode));
         json_object_set_new(root, "displayMode", json_integer(dispMode));
         json_object_set_new(root, "freeze", json_boolean(freezeLatched));
@@ -185,28 +271,51 @@ struct VortexModule : Module {
         return root;
     }
 
-    void dataFromJson(json_t* root) override {
-        json_t* j = json_object_get(root, "cvRangeMode");
-        if (j) cvRangeMode = (json_integer_value(j) == (json_int_t) BIPOLAR_M5_5) ? BIPOLAR_M5_5 : UNIPOLAR_0_10;
+    // --------------------------------------------------------
+    // Restore the fields written by dataToJson() (with clamps).
+    // --------------------------------------------------------
+    void dataFromJson(json_t *root) override
+    {
+        json_t *j = json_object_get(root, "cvRangeMode");
+        if (j)
+            cvRangeMode = (json_integer_value(j) == (json_int_t)BIPOLAR_M5_5) ? BIPOLAR_M5_5 : UNIPOLAR_0_10;
         j = json_object_get(root, "displayMode");
-        if (j) dispMode = rack::math::clamp((int) json_integer_value(j), 0, 2);
+        if (j)
+            dispMode = rack::math::clamp((int)json_integer_value(j), 0, 2);
         j = json_object_get(root, "freeze");
-        if (j) freezeLatched = json_is_true(j);
+        if (j)
+            freezeLatched = json_is_true(j);
         j = json_object_get(root, "echoMode");
-        if (j) echoModeState = json_is_true(j);
+        if (j)
+            echoModeState = json_is_true(j);
     }
 
-    void allocate(float sr) {
+    // --------------------------------------------------------
+    // (Re)initialise the engines for a given sample rate.
+    // Called lazily whenever the Rack sample rate changes.
+    // `scopeBinSamples` sizes each wave bin so that ~99 bins/s are
+    // produced (396 bins ~ 4 s of visible history).
+    // --------------------------------------------------------
+    void allocate(float sr)
+    {
         for (int c = 0; c < Vortex::NUM_CHANNELS; ++c)
             voices[c].init(sr);
         allocSr = sr;
         dispSr = sr;
-        kMix = 1.f - std::exp(-1.f / (0.02f * sr));
-        scopeBinSamples = std::max(1, (int) (sr / 99.f));      // 396 bins ~ 4 s of history
+        kMix = 1.f - std::exp(-1.f / (0.02f * sr));      // 20 ms mix smoothing
+        scopeBinSamples = std::max(1, (int)(sr / 99.f)); // 396 bins ~ 4 s of history
         ctl.lastSr = 0.f;
     }
 
-    float getParam(int paramId, int attenId, int cvId) {
+    // --------------------------------------------------------
+    // Read one (param, attenuverter, CV) triple and combine them.
+    // cvRangeMode determines how a raw CV is interpreted:
+    //   BIPOLAR_M5_5:  cv = clamp(raw/5, -1, 1)  (i.e. -5..+5 V -> -1..1)
+    //   UNIPOLAR_0_10: cv = raw / 10             (0..+10 V -> 0..1)
+    // Final value = clamp(knob + atten * cv, 0, 1).
+    // --------------------------------------------------------
+    float getParam(int paramId, int attenId, int cvId)
+    {
         float knob = params[paramId].getValue();
         float atten = params[attenId].getValue();
         float cvRaw = inputs[cvId].getVoltageSum();
@@ -218,10 +327,24 @@ struct VortexModule : Module {
         return rack::math::clamp(knob + atten * cv, 0.0f, 1.0f);
     }
 
-    void process(const ProcessArgs& args) override {
+    // --------------------------------------------------------
+    // Main per-sample processing:
+    //  1. Detect channel configuration (mono/poly/stereo-in/out).
+    //  2. Read all 12 (param, atten, CV) tuples + MIX.
+    //  3. Latch mode/freeze buttons; combnie freeze state.
+    //  4. Update the per-sample controller (smoothing), snapshot
+    //     values into the display fields.
+    //  5. Handle the clear fade/trigger sequence.
+    //  6. Run each active voice, mix dry + wet (equal-power),
+    //     sum for stereo output if requested, with NaN/limiter safety.
+    //  7. Feed the display: peak meters, scope bins, FFT buffer.
+    // --------------------------------------------------------
+    void process(const ProcessArgs &args) override
+    {
         const float sr = args.sampleRate;
         const float sampleTime = args.sampleTime;
-        if (sr != allocSr) allocate(sr);
+        if (sr != allocSr)
+            allocate(sr);
 
         // ---------------- channels ----------------
         int inLch = inputs[IN_L_INPUT].getChannels();
@@ -235,20 +358,20 @@ struct VortexModule : Module {
 
         // ---------------- controls ----------------
         Vortex::Params p;
-        p.pre    = getParam(PRE_DELAY_PARAM, PRE_DELAY_ATTEN, PRE_DELAY_CV_INPUT);
-        p.size   = getParam(SIZE_PARAM, SIZE_ATTEN, SIZE_CV_INPUT);
-        p.decay  = getParam(DECAY_PARAM, DECAY_ATTEN, DECAY_CV_INPUT);
-        p.diff   = getParam(DIFFUSION_PARAM, DIFFUSION_ATTEN, DIFFUSION_CV_INPUT);
-        p.damp   = getParam(HIGH_DAMP_PARAM, HIGH_DAMP_ATTEN, HIGH_DAMP_CV_INPUT);
+        p.pre = getParam(PRE_DELAY_PARAM, PRE_DELAY_ATTEN, PRE_DELAY_CV_INPUT);
+        p.size = getParam(SIZE_PARAM, SIZE_ATTEN, SIZE_CV_INPUT);
+        p.decay = getParam(DECAY_PARAM, DECAY_ATTEN, DECAY_CV_INPUT);
+        p.diff = getParam(DIFFUSION_PARAM, DIFFUSION_ATTEN, DIFFUSION_CV_INPUT);
+        p.damp = getParam(HIGH_DAMP_PARAM, HIGH_DAMP_ATTEN, HIGH_DAMP_CV_INPUT);
         p.lowcut = getParam(LOW_CUT_PARAM, LOW_CUT_ATTEN, LOW_CUT_CV_INPUT);
-        p.speed  = getParam(MOD_SPEED_PARAM, MOD_SPEED_ATTEN, MOD_SPEED_CV_INPUT);
-        p.depth  = getParam(MOD_DEPTH_PARAM, MOD_DEPTH_ATTEN, MOD_DEPTH_CV_INPUT);
+        p.speed = getParam(MOD_SPEED_PARAM, MOD_SPEED_ATTEN, MOD_SPEED_CV_INPUT);
+        p.depth = getParam(MOD_DEPTH_PARAM, MOD_DEPTH_ATTEN, MOD_DEPTH_CV_INPUT);
         float mix = getParam(MIX_PARAM, MIX_ATTEN, MIX_CV_INPUT);
-        p.eTime  = getParam(ECHO_TIME_PARAM, ECHO_TIME_ATTEN, ECHO_TIME_CV_INPUT);
-        p.eFb    = getParam(ECHO_FEEDBACK_PARAM, ECHO_FEEDBACK_ATTEN, ECHO_FEEDBACK_CV_INPUT);
-        p.eLvl   = getParam(ECHO_LEVEL_PARAM, ECHO_LEVEL_ATTEN, ECHO_LEVEL_CV_INPUT);
+        p.eTime = getParam(ECHO_TIME_PARAM, ECHO_TIME_ATTEN, ECHO_TIME_CV_INPUT);
+        p.eFb = getParam(ECHO_FEEDBACK_PARAM, ECHO_FEEDBACK_ATTEN, ECHO_FEEDBACK_CV_INPUT);
+        p.eLvl = getParam(ECHO_LEVEL_PARAM, ECHO_LEVEL_ATTEN, ECHO_LEVEL_CV_INPUT);
 
-        // mode + freeze: the buttons latch, the freeze gate holds while high
+        // Mode + freeze: the buttons latch, the freeze gate holds while high.
         if (echoModeButtonTrigger.process(params[ECHO_MODE_BUTTON_PARAM].getValue() > 0.5f ? 1.f : 0.f))
             echoModeState = !echoModeState;
         if (freezeButtonTrigger.process(params[FREEZE_BUTTON_PARAM].getValue() > 0.5f ? 1.f : 0.f))
@@ -259,14 +382,24 @@ struct VortexModule : Module {
         lights[ECHO_MODE_BUTTON_LIGHT].setSmoothBrightness(echoModeState ? 1.f : 0.f, sampleTime);
         lights[FREEZE_BUTTON_LIGHT].setSmoothBrightness(freezeActive ? 1.f : 0.f, sampleTime);
 
-        // smoothed per-sample engine state
+        // Smoothed per-sample engine state.
         ctl.update(p, sr);
-        const Vortex::Shared& sh = ctl.sh;
+        const Vortex::Shared &sh = ctl.sh;
 
+        // Snapshot the current control values for the display / footer.
         dispFreeze = freezeActive;
-        dispVal[0] = p.pre;  dispVal[1] = p.size;   dispVal[2] = p.decay; dispVal[3] = p.diff;
-        dispVal[4] = p.damp; dispVal[5] = p.lowcut; dispVal[6] = p.speed; dispVal[7] = p.depth;
-        dispVal[8] = mix;    dispVal[9] = p.eTime;  dispVal[10] = p.eFb;  dispVal[11] = p.eLvl;
+        dispVal[0] = p.pre;
+        dispVal[1] = p.size;
+        dispVal[2] = p.decay;
+        dispVal[3] = p.diff;
+        dispVal[4] = p.damp;
+        dispVal[5] = p.lowcut;
+        dispVal[6] = p.speed;
+        dispVal[7] = p.depth;
+        dispVal[8] = mix;
+        dispVal[9] = p.eTime;
+        dispVal[10] = p.eFb;
+        dispVal[11] = p.eLvl;
         dispRt60 = ctl.rt60();
         dispEchoMs = ctl.echoMs();
         dispSize = ctl.sizeScale();
@@ -275,62 +408,88 @@ struct VortexModule : Module {
         bool clearPressed = params[CLEAR_BUTTON_PARAM].getValue() > 0.5f;
         bool clearTrig = clearButtonTrigger.process(clearPressed ? 1.f : 0.f) ||
                          clearInputTrigger.process(inputs[CLEAR_INPUT].getVoltage());
-        if (clearTrig) clearRequested = true;
+        if (clearTrig)
+            clearRequested = true;
 
-        if (clearRequested) {
+        if (clearRequested)
+        {
+            // Phase 1: fade the wet signal down.
             clearFade -= sampleTime * 10.f;
-            if (clearFade <= 0.0f) {
-                for (int i = 0; i < Vortex::NUM_CHANNELS; ++i) voices[i].reset();
+            if (clearFade <= 0.0f)
+            {
+                for (int i = 0; i < Vortex::NUM_CHANNELS; ++i)
+                    voices[i].reset();
                 clearFade = 0.0f;
                 clearRequested = false;
                 clearActive = true;
             }
-        } else if (clearActive) {
+        }
+        else if (clearActive)
+        {
+            // Phase 2: fade the (now-cleared) wet signal back in.
             clearFade += sampleTime * 10.f;
-            if (clearFade >= 1.0f) {
+            if (clearFade >= 1.0f)
+            {
                 clearFade = 1.0f;
                 clearActive = false;
             }
-        } else {
+        }
+        else
+        {
             clearFade = 1.0f;
         }
         lights[CLEAR_BUTTON_LIGHT].setSmoothBrightness(clearPressed ? 1.0f : 0.0f, sampleTime);
 
         // ---------------- voices ----------------
+        // Equal-power dry/wet crossfade; mix is smoothed by kMix.
         mixS += kMix * (mix - mixS);
-        const float cd = std::cos(mixS * 0.5f * (float) M_PI);       // equal-power dry / wet
-        const float sw = std::sin(mixS * 0.5f * (float) M_PI);
+        const float cd = std::cos(mixS * 0.5f * (float)M_PI); // equal-power dry / wet
+        const float sw = std::sin(mixS * 0.5f * (float)M_PI);
+        // Peak meter decay coefficient.
         const float md = 1.f - 4.f * sampleTime;
 
         float sumL = 0.f, sumR = 0.f, monIn = 0.f;
-        for (int c = 0; c < numCh; ++c) {
+        for (int c = 0; c < numCh; ++c)
+        {
+            // Dry input: in stereo-in mode both voices see the same L/R;
+            // otherwise per-channel poly inputs are used (L falls back to R).
             float dryL, dryR;
-            if (stIn) {
+            if (stIn)
+            {
                 dryL = inputs[IN_L_INPUT].getVoltage();
                 dryR = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getVoltage() : dryL;
-            } else {
+            }
+            else
+            {
                 dryL = inputs[IN_L_INPUT].getPolyVoltage(c);
                 dryR = inputs[IN_R_INPUT].isConnected() ? inputs[IN_R_INPUT].getPolyVoltage(c) : dryL;
             }
-            if (!std::isfinite(dryL)) dryL = 0.f;
-            if (!std::isfinite(dryR)) dryR = 0.f;
+            if (!std::isfinite(dryL))
+                dryL = 0.f;
+            if (!std::isfinite(dryR))
+                dryR = 0.f;
 
             float wetL, wetR;
             voices[c].process(sh, dryL, dryR, wetL, wetR);
 
-            // safety: never let a NaN or runaway value out
-            if (!std::isfinite(wetL) || !std::isfinite(wetR)) {
+            // Safety: never let a NaN or runaway value out.
+            if (!std::isfinite(wetL) || !std::isfinite(wetR))
+            {
                 wetL = wetR = 0.f;
-                if (limiterRecovery == 0) {
-                    for (int i = 0; i < Vortex::NUM_CHANNELS; ++i) voices[i].reset();
-                    limiterRecovery = (int) (sr * 0.1f);
+                if (limiterRecovery == 0)
+                {
+                    for (int i = 0; i < Vortex::NUM_CHANNELS; ++i)
+                        voices[i].reset();
+                    limiterRecovery = (int)(sr * 0.1f);
                 }
             }
-            if (limiterRecovery > 0) {
+            if (limiterRecovery > 0)
+            {
                 wetL = wetR = 0.f;
                 limiterRecovery--;
             }
 
+            // Equal-power dry/wet mix, hard-clamped to ±12 V.
             float outL = rack::math::clamp(dryL * cd + wetL * clearFade * sw, -12.f, 12.f);
             float outR = rack::math::clamp(dryR * cd + wetR * clearFade * sw, -12.f, 12.f);
 
@@ -338,12 +497,15 @@ struct VortexModule : Module {
             sumR += outR;
             monIn += 0.5f * (dryL + dryR);
 
-            if (!stOut) {
+            if (!stOut)
+            {
                 outputs[OUT_L_OUTPUT].setVoltage(outL, c);
                 outputs[OUT_R_OUTPUT].setVoltage(outR, c);
             }
         }
-        if (stOut) {
+        // Stereo-out: sum all voices to L/R.
+        if (stOut)
+        {
             sumL = rack::math::clamp(sumL, -12.f, 12.f);
             sumR = rack::math::clamp(sumR, -12.f, 12.f);
             outputs[OUT_L_OUTPUT].setVoltage(sumL, 0);
@@ -351,21 +513,32 @@ struct VortexModule : Module {
         }
 
         // ---------------- display feeds ----------------
+        // Stereo peak meters with one-pole decay.
         peakL = std::max(std::fabs(sumL), peakL * md);
         peakR = std::max(std::fabs(sumR), peakR * md);
 
+        // FFT ring buffer (mono sum, power-of-two size).
         specBuf[specPos] = 0.5f * (sumL + sumR);
         specPos = (specPos + 1) & (VX_SPEC_N - 1);
 
-        accMinL = std::min(accMinL, sumL); accMaxL = std::max(accMaxL, sumL);
-        accMinR = std::min(accMinR, sumR); accMaxR = std::max(accMaxR, sumR);
-        accMinI = std::min(accMinI, monIn); accMaxI = std::max(accMaxI, monIn);
-        if (++scopeCount >= scopeBinSamples) {
+        // Wave history: accumulate min/max per channel, then commit one bin
+        // every `scopeBinSamples` samples.
+        accMinL = std::min(accMinL, sumL);
+        accMaxL = std::max(accMaxL, sumL);
+        accMinR = std::min(accMinR, sumR);
+        accMaxR = std::max(accMaxR, sumR);
+        accMinI = std::min(accMinI, monIn);
+        accMaxI = std::max(accMaxI, monIn);
+        if (++scopeCount >= scopeBinSamples)
+        {
             scopeCount = 0;
             scopeHead = (scopeHead + 1) % VX_SCOPE_N;
-            scopeMinL[scopeHead] = accMinL; scopeMaxL[scopeHead] = accMaxL;
-            scopeMinR[scopeHead] = accMinR; scopeMaxR[scopeHead] = accMaxR;
-            scopeMinI[scopeHead] = accMinI; scopeMaxI[scopeHead] = accMaxI;
+            scopeMinL[scopeHead] = accMinL;
+            scopeMaxL[scopeHead] = accMaxL;
+            scopeMinR[scopeHead] = accMinR;
+            scopeMaxR[scopeHead] = accMaxR;
+            scopeMinI[scopeHead] = accMinI;
+            scopeMaxI[scopeHead] = accMaxI;
             accMinL = accMinR = accMinI = 1e9f;
             accMaxL = accMaxR = accMaxI = -1e9f;
         }
@@ -373,661 +546,919 @@ struct VortexModule : Module {
 };
 
 // ============================================================
-// Theme + drawing helpers
+// Theme + drawing helpers (anonymous namespace — UI-only)
+// ------------------------------------------------------------
+// The helpers below are a small self-contained theme so Vortex
+// does not depend on agmm_ui.hpp styling. They cover:
+//   * a colour palette (background, text, accent, violet)
+//   * text rendering with the shared ShareTechMono font
+//   * cyan / violet LED light templates
+//   * the AGMM logo badge
+//   * panel base, bezel, plate, ring, screen base/finish
 // ============================================================
-namespace {
+namespace
+{
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
-NVGcolor withAlpha(NVGcolor c, float a) { c.a = a; return c; }
+    NVGcolor colBgTop() { return nvgRGB(0x23, 0x26, 0x2d); }
+    NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
+    NVGcolor colText() { return nvgRGB(0xc9, 0xd1, 0xdc); }
+    NVGcolor colDim() { return nvgRGB(0x7a, 0x85, 0x94); }
+    NVGcolor colAccent() { return nvgRGB(0x3d, 0xe0, 0xff); }
+    NVGcolor colViolet() { return nvgRGB(0xb0, 0x5a, 0xff); }
+    NVGcolor withAlpha(NVGcolor c, float a)
+    {
+        c.a = a;
+        return c;
+    }
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
+    // Load the shared ShareTechMono font (used by every text call below).
+    void setFont(NVGcontext *vg)
+    {
+        std::shared_ptr<window::Font> font =
+            APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
+        if (font)
+            nvgFontFaceId(vg, font->handle);
+    }
 
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
+    // Draw a single line of text in the standard font with letter spacing.
+    void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
+                  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
+    {
+        setFont(vg);
+        nvgFontSize(vg, size);
+        nvgTextLetterSpacing(vg, spacing);
+        nvgTextAlign(vg, align);
+        nvgFillColor(vg, col);
+        nvgText(vg, x, y, s, NULL);
+    }
 
-template <typename TBase = GrayModuleLightWidget>
-struct TVxCyanLight : TBase {
-    TVxCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using VxCyanLight = TVxCyanLight<>;
+    // Cyan and violet LED light templates.
+    template <typename TBase = GrayModuleLightWidget>
+    struct TVxCyanLight : TBase
+    {
+        TVxCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
+    };
+    using VxCyanLight = TVxCyanLight<>;
 
-template <typename TBase = GrayModuleLightWidget>
-struct TVxVioletLight : TBase {
-    TVxVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
-};
-using VxVioletLight = TVxVioletLight<>;
+    template <typename TBase = GrayModuleLightWidget>
+    struct TVxVioletLight : TBase
+    {
+        TVxVioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
+    };
+    using VxVioletLight = TVxVioletLight<>;
 
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
+    // AGMM logo badge (rounded rect with gradient stroke + 3-block mark).
+    void drawLogo(NVGcontext *vg, float cx, float cy)
+    {
+        const float w = 64.f, h = 18.f;
+        float x = cx - w / 2.f, y = cy - h / 2.f;
+        // Glow
         nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-        nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
-
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h, NVGcolor edge) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-    nvgFill(vg);
-    nvgStrokeColor(vg, edge);
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.6f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenFinish(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
-// ------------------------------------------------------------
-// Control cells: 12 knobs, each with a CV jack and an attenuverter.
-// group: 0 = used in both modes, 1 = reverb only, 2 = echo only
-// ------------------------------------------------------------
-struct VxCellDef { const char* name; int param, atten, cv, group; };
-const VxCellDef VX_CELLS[12] = {
-    {"PRE-DLY",   VortexModule::PRE_DELAY_PARAM,     VortexModule::PRE_DELAY_ATTEN,     VortexModule::PRE_DELAY_CV_INPUT,     0},
-    {"SIZE",      VortexModule::SIZE_PARAM,          VortexModule::SIZE_ATTEN,          VortexModule::SIZE_CV_INPUT,          1},
-    {"DECAY",     VortexModule::DECAY_PARAM,         VortexModule::DECAY_ATTEN,         VortexModule::DECAY_CV_INPUT,         1},
-    {"DIFF/PING", VortexModule::DIFFUSION_PARAM,     VortexModule::DIFFUSION_ATTEN,     VortexModule::DIFFUSION_CV_INPUT,     0},
-    {"DAMP",      VortexModule::HIGH_DAMP_PARAM,     VortexModule::HIGH_DAMP_ATTEN,     VortexModule::HIGH_DAMP_CV_INPUT,     0},
-    {"LOW CUT",   VortexModule::LOW_CUT_PARAM,       VortexModule::LOW_CUT_ATTEN,       VortexModule::LOW_CUT_CV_INPUT,       0},
-    {"MOD SPD",   VortexModule::MOD_SPEED_PARAM,     VortexModule::MOD_SPEED_ATTEN,     VortexModule::MOD_SPEED_CV_INPUT,     0},
-    {"MOD DEP",   VortexModule::MOD_DEPTH_PARAM,     VortexModule::MOD_DEPTH_ATTEN,     VortexModule::MOD_DEPTH_CV_INPUT,     0},
-    {"MIX",       VortexModule::MIX_PARAM,           VortexModule::MIX_ATTEN,           VortexModule::MIX_CV_INPUT,           0},
-    {"ECHO TIME", VortexModule::ECHO_TIME_PARAM,     VortexModule::ECHO_TIME_ATTEN,     VortexModule::ECHO_TIME_CV_INPUT,     2},
-    {"ECHO FB",   VortexModule::ECHO_FEEDBACK_PARAM, VortexModule::ECHO_FEEDBACK_ATTEN, VortexModule::ECHO_FEEDBACK_CV_INPUT, 2},
-    {"ECHO LVL",  VortexModule::ECHO_LEVEL_PARAM,    VortexModule::ECHO_LEVEL_ATTEN,    VortexModule::ECHO_LEVEL_CV_INPUT,    2},
-};
-
-const char* VX_STRIP_NAMES[11] = {"MODE", "FREEZE", "CLEAR", "ST IN", "ST OUT",
-                                  "L IN", "R IN", "L OUT", "R OUT", "FRZ IN", "CLR IN"};
-
-struct VxPanel : TransparentWidget {
-    VortexModule* module = nullptr;
-    VxPanel(VortexModule* m) : module(m) { box.size = Vec(VX_W, VX_H); }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        drawPanelBase(vg, VX_W, VX_H, "VORTEX");
-        drawBezel(vg, VX_DX, VX_DY, VX_DW, VX_DH);
-
-        const bool echo = module ? module->echoModeState : false;
-
-        for (int i = 0; i < 12; ++i) {
-            int row = i / 6, col = i % 6;
-            float cx = VX_COL[col], T = VX_ROW[row];
-            const VxCellDef& c = VX_CELLS[i];
-            bool active = (c.group == 0) || (c.group == 1 && !echo) || (c.group == 2 && echo);
-            NVGcolor tint = (c.group == 2) ? colViolet() : colAccent();
-            NVGcolor edge = (active && c.group != 0) ? withAlpha(tint, 0.35f) : nvgRGBA(255, 255, 255, active ? 25 : 12);
-            plate(vg, cx - VX_CELL_W / 2.f, T, VX_CELL_W, VX_CELL_H, edge);
-            ring(vg, cx, T + 27.f, 17.f);
-            NVGcolor lc = active ? (c.group != 0 ? withAlpha(tint, 0.9f) : colDim()) : nvgRGBA(0x7a, 0x85, 0x94, 90);
-            drawText(vg, cx, T + 8.f, c.name, 7.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.4f);
-        }
-
-        // strip: 5 buttons, then 6 jacks
-        for (int i = 0; i < 11; ++i) {
-            float x = vxStripX(i);
-            plate(vg, x - 18.f, VX_STRIP_Y, 36.f, VX_STRIP_H, nvgRGBA(255, 255, 255, 25));
-            NVGcolor c = colDim();
-            if (i == 7 || i == 8) c = withAlpha(colAccent(), 0.9f);
-            drawText(vg, x, VX_STRIP_Y + 9.f, VX_STRIP_NAMES[i], 6.f, c, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
-        }
-        Widget::draw(args);
-    }
-};
-
-// ------------------------------------------------------------
-// Display: WAVE / BARS / SPECTRUM. Click a tab, click the plot to cycle,
-// or use the module's context menu.
-// ------------------------------------------------------------
-struct VxDisplay : OpaqueWidget {
-    VortexModule* module = nullptr;
-
-    float barPeak[Vortex::NUM_TAPS] = {};
-    float specSm[VX_BANDS], specPk[VX_BANDS];
-    std::vector<float> win, twC, twS, re, im, pw;
-
-    float scMinL[VX_SCOPE_N], scMaxL[VX_SCOPE_N], scMinR[VX_SCOPE_N], scMaxR[VX_SCOPE_N];
-    float scMinI[VX_SCOPE_N], scMaxI[VX_SCOPE_N];
-
-    VxDisplay(VortexModule* m) : module(m) {
-        box.pos = Vec(VX_DX, VX_DY);
-        box.size = Vec(VX_DW, VX_DH);
-
-        win.resize(VX_SPEC_N);
-        twC.resize(VX_SPEC_N / 2);
-        twS.resize(VX_SPEC_N / 2);
-        re.assign(VX_SPEC_N, 0.f);
-        im.assign(VX_SPEC_N, 0.f);
-        pw.assign(VX_SPEC_N / 2, 0.f);
-        for (int i = 0; i < VX_SPEC_N; ++i)
-            win[i] = 0.5f - 0.5f * std::cos(2.f * (float) M_PI * i / (float) VX_SPEC_N);   // Hann
-        for (int i = 0; i < VX_SPEC_N / 2; ++i) {
-            twC[i] = std::cos(2.f * (float) M_PI * i / (float) VX_SPEC_N);
-            twS[i] = std::sin(2.f * (float) M_PI * i / (float) VX_SPEC_N);
-        }
-        for (int b = 0; b < VX_BANDS; ++b) { specSm[b] = -90.f; specPk[b] = -90.f; }
-        for (int i = 0; i < VX_SCOPE_N; ++i) {
-            scMinL[i] = scMinR[i] = scMinI[i] = 0.f;
-            scMaxL[i] = scMaxR[i] = scMaxI[i] = 0.f;
-        }
-    }
-
-    void onButton(const ButtonEvent& e) override {
-        if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS) {
-            if (module) {
-                if (e.pos.y < 15.f) {
-                    for (int i = 0; i < 3; ++i)
-                        if (e.pos.x >= VP_TABX[i] && e.pos.x < VP_TABX[i] + VP_TABW[i])
-                            module->dispMode = i;
-                } else if (e.pos.y < VX_DH - 16.f) {
-                    module->dispMode = (module->dispMode + 1) % 3;
-                }
-            }
-            e.consume(this);
-        }
-    }
-
-    // ---------- FFT (iterative radix-2, in place) ----------
-    void fft() {
-        const int N = VX_SPEC_N;
-        for (int i = 1, j = 0; i < N; ++i) {
-            int bit = N >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
-        }
-        for (int len = 2; len <= N; len <<= 1) {
-            int half = len >> 1, step = N / len;
-            for (int i = 0; i < N; i += len) {
-                for (int k = 0; k < half; ++k) {
-                    float wr = twC[k * step], wi = -twS[k * step];
-                    int a = i + k, b = a + half;
-                    float tr = re[b] * wr - im[b] * wi;
-                    float ti = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - tr; im[b] = im[a] - ti;
-                    re[a] += tr;        im[a] += ti;
-                }
-            }
-        }
-    }
-
-    // fills dbOut[VX_BANDS] (dB re 5 V peak) from the module's output history
-    void computeSpectrum(float sr, float* dbOut) {
-        int pos = module->specPos;
-        for (int i = 0; i < VX_SPEC_N; ++i) {
-            re[i] = module->specBuf[(pos + i) & (VX_SPEC_N - 1)] * win[i];
-            im[i] = 0.f;
-        }
-        fft();
-        for (int k = 0; k < VX_SPEC_N / 2; ++k) {
-            float a = std::sqrt(re[k] * re[k] + im[k] * im[k]) * 4.f / (float) VX_SPEC_N;
-            pw[k] = a * a;
-        }
-        const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
-        const float binHz = sr / (float) VX_SPEC_N;
-        const float ratio = fMax / fMin;
-        for (int b = 0; b < VX_BANDS; ++b) {
-            float f0 = fMin * std::pow(ratio, (float) b / VX_BANDS);
-            float f1 = fMin * std::pow(ratio, (float) (b + 1) / VX_BANDS);
-            float lo = f0 / binHz, hi = f1 / binHz;
-            float p;
-            if (hi - lo < 1.f) {
-                float posb = 0.5f * (lo + hi);
-                int i0 = rack::math::clamp((int) posb, 0, VX_SPEC_N / 2 - 2);
-                float fr = posb - (float) i0;
-                p = pw[i0] * (1.f - fr) + pw[i0 + 1] * fr;
-            } else {
-                int i0 = rack::math::clamp((int) std::ceil(lo), 0, VX_SPEC_N / 2 - 1);
-                int i1 = rack::math::clamp((int) std::floor(hi), i0, VX_SPEC_N / 2 - 1);
-                float s = 0.f;
-                for (int k = i0; k <= i1; ++k) s += pw[k];
-                p = s / (float) (i1 - i0 + 1);
-            }
-            dbOut[b] = 10.f * std::log10(p / 25.f + 1e-12f);      // 0 dB = 5 V amplitude
-        }
-    }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        screenBase(vg, VX_DW, VX_DH);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, VP_X - 1.f, VP_Y - 1.f, VP_W + 2.f, VP_H + 2.f, 2.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
+        nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
+        nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
         nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+        // Body
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 7.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
+        nvgFill(vg);
+        // Gradient border
+        nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
+        nvgStrokeWidth(vg, 1.2f);
+        nvgStroke(vg);
+        // 3-block logo mark
+        const float s = 2.2f;
+        float tx = x + 7.f, ty = y + h / 2.f - 3.f;
+        nvgBeginPath(vg);
+        nvgRect(vg, tx + s, ty, s, s);
+        nvgRect(vg, tx, ty + s * 1.4f, s, s);
+        nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
+        nvgFillColor(vg, colAccent());
+        nvgFill(vg);
+        drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
+    }
+
+    // Panel base: gradient fill, subtle scanlines, border, logo, title.
+    void drawPanelBase(NVGcontext *vg, float W, float H, const char *title)
+    {
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H);
+        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
+        nvgFill(vg);
+        // Scanlines (every 3 px, alternating alpha).
+        nvgStrokeWidth(vg, 1.f);
+        for (int y = 0; y < (int)H; y += 3)
+        {
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 0, y + 0.5f);
+            nvgLineTo(vg, W, y + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
+            nvgStroke(vg);
+        }
+        // Border
+        nvgBeginPath(vg);
+        nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+        nvgStroke(vg);
+        drawLogo(vg, W / 2.f, 13.f);
+        drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
+    }
+
+    // Display bezel: outer glow ring + inner black screen surround.
+    void drawBezel(NVGcontext *vg, float x, float y, float w, float h)
+    {
+        float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
+        nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
+        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
+        nvgFill(vg);
+    }
+
+    // Rounded "cell plate" with an optional tinted edge (used for knob cells).
+    void plate(NVGcontext *vg, float x, float y, float w, float h, NVGcolor edge)
+    {
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, x, y, w, h, 6.f);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
+        nvgFill(vg);
+        nvgStrokeColor(vg, edge);
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
-        Widget::draw(args);
     }
 
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) { Widget::drawLayer(args, layer); return; }
-        NVGcontext* vg = args.vg;
-        const float W = VX_DW, H = VX_DH;
-        const float PX = VP_X, PY = VP_Y, PW = VP_W, PH = VP_H;
+    // Dark circular "knob ring" behind a knob (unused in strip cells).
+    void ring(NVGcontext *vg, float cx, float cy, float r)
+    {
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx, cy, r);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
+        nvgFill(vg);
+        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+    }
 
-        // ---------- gather data ----------
-        int mode = 0, ch = 1;
-        bool echo = false, frz = false, sIn = false, sOut = false;
-        float pv[12] = {0.f, 0.6f, 0.5f, 0.7f, 0.5f, 0.f, 0.3f, 0.2f, 0.5f, 0.3f, 0.5f, 0.8f};
-        float mL = 2.6f, mR = 2.2f, fade = 1.f, rt = 2.f, sr = 48000.f, size = 1.15f, eMs = 300.f;
-        float tapLv[Vortex::NUM_TAPS];
-        static float specDb[VX_BANDS];
-        for (int i = 0; i < Vortex::NUM_TAPS; ++i) tapLv[i] = 0.f;
+    // Display background: subtle radial gradient (dark edges, lighter centre).
+    void screenBase(NVGcontext *vg, float W, float H)
+    {
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H);
+        nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.6f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
+        nvgFill(vg);
+    }
 
-        if (module) {
-            mode = rack::math::clamp(module->dispMode, 0, 2);
-            ch = module->dispCh;
-            echo = module->echoModeState;
-            frz = module->dispFreeze;
-            for (int i = 0; i < 12; ++i) pv[i] = module->dispVal[i];
-            mL = module->peakL; mR = module->peakR;
-            fade = module->clearFade;
-            rt = module->dispRt60; sr = module->dispSr; size = module->dispSize; eMs = module->dispEchoMs;
-            sIn = module->params[VortexModule::IN_STEREO_BUTTON_PARAM].getValue() > 0.5f;
-            sOut = module->params[VortexModule::OUT_STEREO_BUTTON_PARAM].getValue() > 0.5f;
-            for (int i = 0; i < Vortex::NUM_TAPS; ++i) tapLv[i] = module->voices[0].plate.tapLvl[i];
-            if (mode == 0) {
-                int head = module->scopeHead;
-                for (int i = 0; i < VX_SCOPE_N; ++i) {
-                    int idx = (head + 1 + i) % VX_SCOPE_N;
-                    scMinL[i] = module->scopeMinL[idx]; scMaxL[i] = module->scopeMaxL[idx];
-                    scMinR[i] = module->scopeMinR[idx]; scMaxR[i] = module->scopeMaxR[idx];
-                    scMinI[i] = module->scopeMinI[idx]; scMaxI[i] = module->scopeMaxI[idx];
-                }
-            } else if (mode == 2) {
-                computeSpectrum(sr, specDb);
+    // Display finishing pass: scanlines + top gloss, drawn over the content.
+    void screenFinish(NVGcontext *vg, float W, float H)
+    {
+        nvgBeginPath(vg);
+        for (int y = 0; y < (int)H; y += 3)
+            nvgRect(vg, 0, y + 1, W, 1);
+        nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
+        nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRect(vg, 0, 0, W, H * 0.3f);
+        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
+        nvgFill(vg);
+    }
+
+    // ------------------------------------------------------------
+    // Control cells: 12 knobs, each with a CV jack and an attenuverter.
+    // group: 0 = used in both modes, 1 = reverb only, 2 = echo only
+    // ------------------------------------------------------------
+    struct VxCellDef
+    {
+        const char *name;
+        int param, atten, cv, group;
+    };
+    const VxCellDef VX_CELLS[12] = {
+        {"PRE-DLY", VortexModule::PRE_DELAY_PARAM, VortexModule::PRE_DELAY_ATTEN, VortexModule::PRE_DELAY_CV_INPUT, 0},
+        {"SIZE", VortexModule::SIZE_PARAM, VortexModule::SIZE_ATTEN, VortexModule::SIZE_CV_INPUT, 1},
+        {"DECAY", VortexModule::DECAY_PARAM, VortexModule::DECAY_ATTEN, VortexModule::DECAY_CV_INPUT, 1},
+        {"DIFF/PING", VortexModule::DIFFUSION_PARAM, VortexModule::DIFFUSION_ATTEN, VortexModule::DIFFUSION_CV_INPUT, 0},
+        {"DAMP", VortexModule::HIGH_DAMP_PARAM, VortexModule::HIGH_DAMP_ATTEN, VortexModule::HIGH_DAMP_CV_INPUT, 0},
+        {"LOW CUT", VortexModule::LOW_CUT_PARAM, VortexModule::LOW_CUT_ATTEN, VortexModule::LOW_CUT_CV_INPUT, 0},
+        {"MOD SPD", VortexModule::MOD_SPEED_PARAM, VortexModule::MOD_SPEED_ATTEN, VortexModule::MOD_SPEED_CV_INPUT, 0},
+        {"MOD DEP", VortexModule::MOD_DEPTH_PARAM, VortexModule::MOD_DEPTH_ATTEN, VortexModule::MOD_DEPTH_CV_INPUT, 0},
+        {"MIX", VortexModule::MIX_PARAM, VortexModule::MIX_ATTEN, VortexModule::MIX_CV_INPUT, 0},
+        {"ECHO TIME", VortexModule::ECHO_TIME_PARAM, VortexModule::ECHO_TIME_ATTEN, VortexModule::ECHO_TIME_CV_INPUT, 2},
+        {"ECHO FB", VortexModule::ECHO_FEEDBACK_PARAM, VortexModule::ECHO_FEEDBACK_ATTEN, VortexModule::ECHO_FEEDBACK_CV_INPUT, 2},
+        {"ECHO LVL", VortexModule::ECHO_LEVEL_PARAM, VortexModule::ECHO_LEVEL_ATTEN, VortexModule::ECHO_LEVEL_CV_INPUT, 2},
+    };
+
+    const char *VX_STRIP_NAMES[11] = {"MODE", "FREEZE", "CLEAR", "ST IN", "ST OUT",
+                                      "L IN", "R IN", "L OUT", "R OUT", "FRZ IN", "CLR IN"};
+
+    // ------------------------------------------------------------
+    // VxPanel — static panel chrome:
+    //   * panel base, bezel
+    //   * 12 knob cells (dimmed if inactive for the current mode)
+    //   * bottom strip with captions for buttons / switches / jacks
+    // The actual controls are placed by VortexWidget at the same positions.
+    // ------------------------------------------------------------
+    struct VxPanel : TransparentWidget
+    {
+        VortexModule *module = nullptr;
+        VxPanel(VortexModule *m) : module(m) { box.size = Vec(VX_W, VX_H); }
+
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            drawPanelBase(vg, VX_W, VX_H, "VORTEX");
+            drawBezel(vg, VX_DX, VX_DY, VX_DW, VX_DH);
+
+            // Current mode: from the module when editing, reverb in the browser.
+            const bool echo = module ? module->echoModeState : false;
+
+            // 12 knob cells in two rows of six.
+            for (int i = 0; i < 12; ++i)
+            {
+                int row = i / 6, col = i % 6;
+                float cx = VX_COL[col], T = VX_ROW[row];
+                const VxCellDef &c = VX_CELLS[i];
+                // Highlight cells that are active in the current mode.
+                bool active = (c.group == 0) || (c.group == 1 && !echo) || (c.group == 2 && echo);
+                NVGcolor tint = (c.group == 2) ? colViolet() : colAccent();
+                NVGcolor edge = (active && c.group != 0) ? withAlpha(tint, 0.35f) : nvgRGBA(255, 255, 255, active ? 25 : 12);
+                plate(vg, cx - VX_CELL_W / 2.f, T, VX_CELL_W, VX_CELL_H, edge);
+                ring(vg, cx, T + 27.f, 17.f);
+                NVGcolor lc = active ? (c.group != 0 ? withAlpha(tint, 0.9f) : colDim()) : nvgRGBA(0x7a, 0x85, 0x94, 90);
+                drawText(vg, cx, T + 8.f, c.name, 7.f, lc, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.4f);
             }
-        } else {
-            // module browser preview: synthetic data
-            mode = 2;
-            for (int i = 0; i < Vortex::NUM_TAPS; ++i) tapLv[i] = 3.f * (0.3f + 0.7f * std::fabs(std::sin(i * 1.7f + 0.4f)));
+
+            // Strip: 5 buttons / switches, then 6 jacks (captions only).
+            for (int i = 0; i < 11; ++i)
+            {
+                float x = vxStripX(i);
+                plate(vg, x - 18.f, VX_STRIP_Y, 36.f, VX_STRIP_H, nvgRGBA(255, 255, 255, 25));
+                NVGcolor c = colDim();
+                if (i == 7 || i == 8)
+                    c = withAlpha(colAccent(), 0.9f); // L OUT / R OUT tinted
+                drawText(vg, x, VX_STRIP_Y + 9.f, VX_STRIP_NAMES[i], 6.f, c, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
+            }
+            Widget::draw(args);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // VxDisplay — live 440x112 display with three modes:
+    //   WAVE     : scrolling min/max envelope (L cyan, R violet, dry white)
+    //   BARS     : reverb => the 14 plate taps, echo => repeats in dB
+    //   SPECTRUM : log-freq FFT with smoothing + peak-hold line
+    // Interaction: click a tab (top row) to switch modes, or click the
+    // plot area to cycle; also set from the context menu.
+    // If module == nullptr (browser preview) synthetic demo data is drawn.
+    // ------------------------------------------------------------
+    struct VxDisplay : OpaqueWidget
+    {
+        VortexModule *module = nullptr;
+
+        // UI-side caches (mains-thread only).
+        float barPeak[Vortex::NUM_TAPS] = {};
+        float specSm[VX_BANDS], specPk[VX_BANDS];
+        std::vector<float> win, twC, twS, re, im, pw;
+
+        // Per-draw copy of the wave history (avoids racing the audio thread).
+        float scMinL[VX_SCOPE_N], scMaxL[VX_SCOPE_N], scMinR[VX_SCOPE_N], scMaxR[VX_SCOPE_N];
+        float scMinI[VX_SCOPE_N], scMaxI[VX_SCOPE_N];
+
+        // --------------------------------------------------------
+        // Precompute the Hann window and twiddle factors so the FFT
+        // only does the actual butterfly passes at draw time.
+        // --------------------------------------------------------
+        VxDisplay(VortexModule *m) : module(m)
+        {
+            box.pos = Vec(VX_DX, VX_DY);
+            box.size = Vec(VX_DW, VX_DH);
+
+            win.resize(VX_SPEC_N);
+            twC.resize(VX_SPEC_N / 2);
+            twS.resize(VX_SPEC_N / 2);
+            re.assign(VX_SPEC_N, 0.f);
+            im.assign(VX_SPEC_N, 0.f);
+            pw.assign(VX_SPEC_N / 2, 0.f);
+            // Hann window.
+            for (int i = 0; i < VX_SPEC_N; ++i)
+                win[i] = 0.5f - 0.5f * std::cos(2.f * (float)M_PI * i / (float)VX_SPEC_N); // Hann
+            // Twiddle factors for the FFT (cos/sin tables).
+            for (int i = 0; i < VX_SPEC_N / 2; ++i)
+            {
+                twC[i] = std::cos(2.f * (float)M_PI * i / (float)VX_SPEC_N);
+                twS[i] = std::sin(2.f * (float)M_PI * i / (float)VX_SPEC_N);
+            }
+            // Spectrum smoothing / peak-hold state (start at floor).
             for (int b = 0; b < VX_BANDS; ++b)
-                specDb[b] = -16.f - 58.f * std::pow((float) b / VX_BANDS, 0.75f) + 5.f * std::sin(b * 0.45f);
+            {
+                specSm[b] = -90.f;
+                specPk[b] = -90.f;
+            }
+            for (int i = 0; i < VX_SCOPE_N; ++i)
+            {
+                scMinL[i] = scMinR[i] = scMinI[i] = 0.f;
+                scMaxL[i] = scMaxR[i] = scMaxI[i] = 0.f;
+            }
         }
 
-        // ---------- plot ----------
-        nvgSave(vg);
-        nvgScissor(vg, PX - 1.f, PY - 1.f, PW + 2.f, PH + 2.f);
-        nvgLineCap(vg, NVG_BUTT);
-
-        if (mode == 0) {
-            // ===== WAVE: scrolling min/max envelope (L cyan, R violet), dry input in white =====
-            const float mid = PY + PH / 2.f, half = PH / 2.f - 2.f, sc = half / 5.f;
-
-            nvgBeginPath(vg);
-            for (int k = 1; k < 8; ++k) {
-                float x = PX + PW - k * (PW / 8.f) + 0.5f;
-                nvgMoveTo(vg, x, PY); nvgLineTo(vg, x, PY + PH);
+        // --------------------------------------------------------
+        // Click handling:
+        //   * top row inside a tab rect -> switch to that mode.
+        //   * click inside the plot area -> cycle to the next mode.
+        // --------------------------------------------------------
+        void onButton(const ButtonEvent &e) override
+        {
+            if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
+            {
+                if (module)
+                {
+                    if (e.pos.y < 15.f)
+                    {
+                        for (int i = 0; i < 3; ++i)
+                            if (e.pos.x >= VP_TABX[i] && e.pos.x < VP_TABX[i] + VP_TABW[i])
+                                module->dispMode = i;
+                    }
+                    else if (e.pos.y < VX_DH - 16.f)
+                    {
+                        module->dispMode = (module->dispMode + 1) % 3;
+                    }
+                }
+                e.consume(this);
             }
-            nvgMoveTo(vg, PX, mid + 0.5f); nvgLineTo(vg, PX + PW, mid + 0.5f);
-            nvgMoveTo(vg, PX, mid - half * 0.5f + 0.5f); nvgLineTo(vg, PX + PW, mid - half * 0.5f + 0.5f);
-            nvgMoveTo(vg, PX, mid + half * 0.5f + 0.5f); nvgLineTo(vg, PX + PW, mid + half * 0.5f + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+        }
+
+        // --------------------------------------------------------
+        // In-place iterative radix-2 FFT on the `re`/`im` vectors.
+        // Assumes the size is a power of two (VX_SPEC_N = 4096).
+        // Uses the precomputed twiddle factors in twC / twS.
+        // --------------------------------------------------------
+        void fft()
+        {
+            const int N = VX_SPEC_N;
+            // Bit-reversal permutation.
+            for (int i = 1, j = 0; i < N; ++i)
+            {
+                int bit = N >> 1;
+                for (; j & bit; bit >>= 1)
+                    j ^= bit;
+                j ^= bit;
+                if (i < j)
+                {
+                    std::swap(re[i], re[j]);
+                    std::swap(im[i], im[j]);
+                }
+            }
+            // Butterfly passes.
+            for (int len = 2; len <= N; len <<= 1)
+            {
+                int half = len >> 1, step = N / len;
+                for (int i = 0; i < N; i += len)
+                {
+                    for (int k = 0; k < half; ++k)
+                    {
+                        float wr = twC[k * step], wi = -twS[k * step];
+                        int a = i + k, b = a + half;
+                        float tr = re[b] * wr - im[b] * wi;
+                        float ti = re[b] * wi + im[b] * wr;
+                        re[b] = re[a] - tr;
+                        im[b] = im[a] - ti;
+                        re[a] += tr;
+                        im[a] += ti;
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------------
+        // Fill dbOut[VX_BANDS] (dB re 5 V peak) from the module's
+        // output history:
+        //   * window + FFT the most recent VX_SPEC_N samples
+        //   * bin into VX_BANDS log-spaced bands from 20 Hz to Nyquist
+        //   * single-bin bands use linear interpolation between bins,
+        //     wider bands average their included bins
+        //   * convert to dB and normalise so 0 dB = 5 V amplitude
+        // --------------------------------------------------------
+        void computeSpectrum(float sr, float *dbOut)
+        {
+            int pos = module->specPos;
+            // Apply the window and zero the imaginary part.
+            for (int i = 0; i < VX_SPEC_N; ++i)
+            {
+                re[i] = module->specBuf[(pos + i) & (VX_SPEC_N - 1)] * win[i];
+                im[i] = 0.f;
+            }
+            fft();
+            // Magnitude -> power spectrum for the first half.
+            for (int k = 0; k < VX_SPEC_N / 2; ++k)
+            {
+                float a = std::sqrt(re[k] * re[k] + im[k] * im[k]) * 4.f / (float)VX_SPEC_N;
+                pw[k] = a * a;
+            }
+            // Log-band aggregation.
+            const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
+            const float binHz = sr / (float)VX_SPEC_N;
+            const float ratio = fMax / fMin;
+            for (int b = 0; b < VX_BANDS; ++b)
+            {
+                float f0 = fMin * std::pow(ratio, (float)b / VX_BANDS);
+                float f1 = fMin * std::pow(ratio, (float)(b + 1) / VX_BANDS);
+                float lo = f0 / binHz, hi = f1 / binHz;
+                float p;
+                if (hi - lo < 1.f)
+                {
+                    // Narrow band: linear interpolation between two bins.
+                    float posb = 0.5f * (lo + hi);
+                    int i0 = rack::math::clamp((int)posb, 0, VX_SPEC_N / 2 - 2);
+                    float fr = posb - (float)i0;
+                    p = pw[i0] * (1.f - fr) + pw[i0 + 1] * fr;
+                }
+                else
+                {
+                    // Wider band: average of the included bins.
+                    int i0 = rack::math::clamp((int)std::ceil(lo), 0, VX_SPEC_N / 2 - 1);
+                    int i1 = rack::math::clamp((int)std::floor(hi), i0, VX_SPEC_N / 2 - 1);
+                    float s = 0.f;
+                    for (int k = i0; k <= i1; ++k)
+                        s += pw[k];
+                    p = s / (float)(i1 - i0 + 1);
+                }
+                dbOut[b] = 10.f * std::log10(p / 25.f + 1e-12f); // 0 dB = 5 V amplitude
+            }
+        }
+
+        // ---- static background (screen fill + plot frame) ----
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            screenBase(vg, VX_DW, VX_DH);
+
+            // Plot frame.
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, VP_X - 1.f, VP_Y - 1.f, VP_W + 2.f, VP_H + 2.f, 2.f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
+            Widget::draw(args);
+        }
 
-            const float step = PW / (float) VX_SCOPE_N;
-            auto env = [&](const float* mn, const float* mx, NVGcolor col, float baseA) {
-                for (int q = 0; q < 4; ++q) {
-                    int i0 = q * VX_SCOPE_N / 4, i1 = (q + 1) * VX_SCOPE_N / 4;
-                    nvgBeginPath(vg);
-                    for (int i = i0; i < i1; ++i) {
-                        if (mx[i] < mn[i]) continue;               // empty bin
-                        float hi = rack::math::clamp(mx[i] * sc, -half, half);
-                        float lo = rack::math::clamp(mn[i] * sc, -half, half);
-                        float hh = std::max(hi - lo, 1.f);
-                        nvgRect(vg, PX + i * step, mid - hi, std::max(step, 1.f), hh);
+        // ---- live content ----
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
+                return;
+            }
+            NVGcontext *vg = args.vg;
+            const float W = VX_DW, H = VX_DH;
+            const float PX = VP_X, PY = VP_Y, PW = VP_W, PH = VP_H;
+
+            // ---------- gather data (or demo data when previewing) ----------
+            int mode = 0, ch = 1;
+            bool echo = false, frz = false, sIn = false, sOut = false;
+            float pv[12] = {0.f, 0.6f, 0.5f, 0.7f, 0.5f, 0.f, 0.3f, 0.2f, 0.5f, 0.3f, 0.5f, 0.8f};
+            float mL = 2.6f, mR = 2.2f, fade = 1.f, rt = 2.f, sr = 48000.f, size = 1.15f, eMs = 300.f;
+            float tapLv[Vortex::NUM_TAPS];
+            static float specDb[VX_BANDS]; // cached between draws (recomputed if mode==2)
+            for (int i = 0; i < Vortex::NUM_TAPS; ++i)
+                tapLv[i] = 0.f;
+
+            if (module)
+            {
+                mode = rack::math::clamp(module->dispMode, 0, 2);
+                ch = module->dispCh;
+                echo = module->echoModeState;
+                frz = module->dispFreeze;
+                for (int i = 0; i < 12; ++i)
+                    pv[i] = module->dispVal[i];
+                mL = module->peakL;
+                mR = module->peakR;
+                fade = module->clearFade;
+                rt = module->dispRt60;
+                sr = module->dispSr;
+                size = module->dispSize;
+                eMs = module->dispEchoMs;
+                sIn = module->params[VortexModule::IN_STEREO_BUTTON_PARAM].getValue() > 0.5f;
+                sOut = module->params[VortexModule::OUT_STEREO_BUTTON_PARAM].getValue() > 0.5f;
+                for (int i = 0; i < Vortex::NUM_TAPS; ++i)
+                    tapLv[i] = module->voices[0].plate.tapLvl[i];
+                if (mode == 0)
+                {
+                    // Copy the wave history in chronological order (oldest first).
+                    int head = module->scopeHead;
+                    for (int i = 0; i < VX_SCOPE_N; ++i)
+                    {
+                        int idx = (head + 1 + i) % VX_SCOPE_N;
+                        scMinL[i] = module->scopeMinL[idx];
+                        scMaxL[i] = module->scopeMaxL[idx];
+                        scMinR[i] = module->scopeMinR[idx];
+                        scMaxR[i] = module->scopeMaxR[idx];
+                        scMinI[i] = module->scopeMinI[idx];
+                        scMaxI[i] = module->scopeMaxI[idx];
                     }
-                    nvgFillColor(vg, withAlpha(col, baseA * (0.35f + 0.65f * (q + 1) / 4.f)));
+                }
+                else if (mode == 2)
+                {
+                    computeSpectrum(sr, specDb);
+                }
+            }
+            else
+            {
+                // module browser preview: synthetic data
+                mode = 2;
+                for (int i = 0; i < Vortex::NUM_TAPS; ++i)
+                    tapLv[i] = 3.f * (0.3f + 0.7f * std::fabs(std::sin(i * 1.7f + 0.4f)));
+                for (int b = 0; b < VX_BANDS; ++b)
+                    specDb[b] = -16.f - 58.f * std::pow((float)b / VX_BANDS, 0.75f) + 5.f * std::sin(b * 0.45f);
+            }
+
+            // ---------- plot (clipped to the frame) ----------
+            nvgSave(vg);
+            nvgScissor(vg, PX - 1.f, PY - 1.f, PW + 2.f, PH + 2.f);
+            nvgLineCap(vg, NVG_BUTT);
+
+            if (mode == 0)
+            {
+                // ===== WAVE: scrolling min/max envelope (L cyan, R violet), dry input in white =====
+                const float mid = PY + PH / 2.f, half = PH / 2.f - 2.f, sc = half / 5.f;
+
+                // Grid (vertical 1/8 divisions, horizontal quarter marks).
+                nvgBeginPath(vg);
+                for (int k = 1; k < 8; ++k)
+                {
+                    float x = PX + PW - k * (PW / 8.f) + 0.5f;
+                    nvgMoveTo(vg, x, PY);
+                    nvgLineTo(vg, x, PY + PH);
+                }
+                nvgMoveTo(vg, PX, mid + 0.5f);
+                nvgLineTo(vg, PX + PW, mid + 0.5f);
+                nvgMoveTo(vg, PX, mid - half * 0.5f + 0.5f);
+                nvgLineTo(vg, PX + PW, mid - half * 0.5f + 0.5f);
+                nvgMoveTo(vg, PX, mid + half * 0.5f + 0.5f);
+                nvgLineTo(vg, PX + PW, mid + half * 0.5f + 0.5f);
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+
+                // Draw one envelope (min..max per bin) split into 4 alpha bands
+                // for a "fading history" look. Later draws overwrite earlier ones.
+                const float step = PW / (float)VX_SCOPE_N;
+                auto env = [&](const float *mn, const float *mx, NVGcolor col, float baseA)
+                {
+                    for (int q = 0; q < 4; ++q)
+                    {
+                        int i0 = q * VX_SCOPE_N / 4, i1 = (q + 1) * VX_SCOPE_N / 4;
+                        nvgBeginPath(vg);
+                        for (int i = i0; i < i1; ++i)
+                        {
+                            if (mx[i] < mn[i])
+                                continue; // empty bin
+                            float hi = rack::math::clamp(mx[i] * sc, -half, half);
+                            float lo = rack::math::clamp(mn[i] * sc, -half, half);
+                            float hh = std::max(hi - lo, 1.f);
+                            nvgRect(vg, PX + i * step, mid - hi, std::max(step, 1.f), hh);
+                        }
+                        nvgFillColor(vg, withAlpha(col, baseA * (0.35f + 0.65f * (q + 1) / 4.f)));
+                        nvgFill(vg);
+                    }
+                };
+                env(scMinI, scMaxI, nvgRGB(255, 255, 255), 0.22f); // dry input (white)
+                env(scMinR, scMaxR, colViolet(), 0.75f);           // right
+                env(scMinL, scMaxL, colAccent(), 0.75f);           // left
+
+                // Legend.
+                const char *lg[3] = {"L", "R", "IN"};
+                NVGcolor lc[3] = {colAccent(), colViolet(), nvgRGB(255, 255, 255)};
+                for (int i = 0; i < 3; ++i)
+                {
+                    float x = PX + 6.f + i * 22.f;
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, PY + 5.f, 4.f, 4.f);
+                    nvgFillColor(vg, withAlpha(lc[i], 0.9f));
+                    nvgFill(vg);
+                    drawText(vg, x + 7.f, PY + 7.f, lg[i], 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.5f);
+                }
+                drawText(vg, PX + 4.f, PY + PH - 6.f, "-4 S", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
+                drawText(vg, PX + PW - 4.f, PY + PH - 6.f, "NOW", 5.5f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.f);
+            }
+            else if (mode == 1)
+            {
+                // ===== BARS: reverb = the 14 output taps of the plate; echo = the repeat levels =====
+                const int NB = Vortex::NUM_TAPS;
+                const float cell = PW / (float)NB, barW = 20.f;
+                const float base = PY + PH - 11.f, maxH = PH - 20.f;
+
+                // Horizontal guides.
+                nvgBeginPath(vg);
+                for (int k = 1; k <= 3; ++k)
+                {
+                    float y = base - maxH * k / 4.f + 0.5f;
+                    nvgMoveTo(vg, PX, y);
+                    nvgLineTo(vg, PX + PW, y);
+                }
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+
+                // Bar heights: echo uses the geometric repeat-decay envelope
+                // (dB-log mapped to 0..1); reverb uses the measured tap levels.
+                const float fb = frz ? 1.f : pv[10] * 0.95f;
+                const float pp = pv[3];
+                char buf[32];
+                for (int i = 0; i < NB; ++i)
+                {
+                    float h;
+                    if (echo)
+                    {
+                        float lvl = std::max(pv[11] * std::pow(fb, (float)i), 1e-6f);         // repeat i+1
+                        h = rack::math::clamp(1.f + 20.f * std::log10(lvl) / 60.f, 0.f, 1.f); // -60 .. 0 dB
+                    }
+                    else
+                    {
+                        h = rack::math::clamp(std::sqrt(tapLv[i] / 4.f), 0.f, 1.f);
+                    }
+                    barPeak[i] = std::max(h, barPeak[i] - 0.007f);
+                    float x = PX + i * cell + (cell - barW) / 2.f;
+                    float bh = std::max(h * maxH, 1.f);
+                    NVGcolor c0;
+                    if (echo)
+                        c0 = (pp > 0.5f && (i & 1)) ? colViolet() : colAccent(); // ping-pong alternate colouring
+                    else
+                        c0 = (i < 7) ? nvgLerpRGBA(colAccent(), nvgRGB(0x6f, 0xa8, 0xff), i / 6.f)
+                                     : nvgLerpRGBA(nvgRGB(0x8a, 0x7a, 0xff), colViolet(), (i - 7) / 6.f);
+
+                    // Soft halo behind the bar.
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x - 2.f, base - bh - 2.f, barW + 4.f, bh + 4.f);
+                    nvgFillColor(vg, withAlpha(c0, 0.10f));
+                    nvgFill(vg);
+                    // Bar body (vertical gradient).
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, base - bh, barW, bh);
+                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, base, 0, base - maxH, withAlpha(c0, 0.55f), nvgLerpRGBA(c0, nvgRGB(255, 255, 255), 0.55f)));
+                    nvgFill(vg);
+                    // Peak-hold line.
+                    float py = base - barPeak[i] * maxH;
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, py - 1.f, barW, 1.6f);
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 220));
+                    nvgFill(vg);
+
+                    // Labels: echo = seconds, reverb = tap delay in ms (scaled by size).
+                    if (echo)
+                        snprintf(buf, sizeof(buf), "%.1f", (i + 1) * eMs / 1000.f);
+                    else
+                    {
+                        float ref = (i < 7) ? Vortex::TAP_L[i] : Vortex::TAP_R[i - 7];
+                        snprintf(buf, sizeof(buf), "%.0f", ref / Vortex::REF_SR * 1000.f * size);
+                    }
+                    drawText(vg, x + barW / 2.f, base + 6.f, buf, 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
+                }
+                // Horizontal gaps between "segments" for a stepped look.
+                nvgBeginPath(vg);
+                for (float y = base - 3.f; y > base - maxH; y -= 4.f)
+                    nvgRect(vg, PX, y, PW, 1.f);
+                nvgFillColor(vg, nvgRGBA(3, 6, 9, 235));
+                nvgFill(vg);
+
+                drawText(vg, PX + 4.f, PY + 7.f, echo ? "ECHO REPEATS (S)  0 TO -60 DB" : "PLATE OUTPUT TAPS (MS)  L | R",
+                         6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+                // Divider between the L and R halves in reverb mode.
+                if (!echo)
+                {
+                    nvgBeginPath(vg);
+                    nvgRect(vg, PX + PW / 2.f - 0.5f, PY + 2.f, 1.f, PH - 4.f);
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 30));
                     nvgFill(vg);
                 }
-            };
-            env(scMinI, scMaxI, nvgRGB(255, 255, 255), 0.22f);
-            env(scMinR, scMaxR, colViolet(), 0.75f);
-            env(scMinL, scMaxL, colAccent(), 0.75f);
+            }
+            else
+            {
+                // ===== SPECTRUM: log-frequency FFT of the output =====
+                const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
+                auto xOf = [&](float f)
+                { return PX + PW * std::log(f / fMin) / std::log(fMax / fMin); };
+                auto yOf = [&](float db)
+                { return PY + PH - rack::math::clamp((db + 90.f) / 90.f, 0.f, 1.f) * PH; };
 
-            const char* lg[3] = {"L", "R", "IN"};
-            NVGcolor lc[3] = {colAccent(), colViolet(), nvgRGB(255, 255, 255)};
-            for (int i = 0; i < 3; ++i) {
-                float x = PX + 6.f + i * 22.f;
+                // Grid: log-frequency verticals and dB horizontals.
                 nvgBeginPath(vg);
-                nvgRect(vg, x, PY + 5.f, 4.f, 4.f);
-                nvgFillColor(vg, withAlpha(lc[i], 0.9f));
-                nvgFill(vg);
-                drawText(vg, x + 7.f, PY + 7.f, lg[i], 6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.5f);
-            }
-            drawText(vg, PX + 4.f, PY + PH - 6.f, "-4 S", 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
-            drawText(vg, PX + PW - 4.f, PY + PH - 6.f, "NOW", 5.5f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.f);
-        } else if (mode == 1) {
-            // ===== BARS: reverb = the 14 output taps of the plate; echo = the repeat levels =====
-            const int NB = Vortex::NUM_TAPS;
-            const float cell = PW / (float) NB, barW = 20.f;
-            const float base = PY + PH - 11.f, maxH = PH - 20.f;
-
-            nvgBeginPath(vg);
-            for (int k = 1; k <= 3; ++k) {
-                float y = base - maxH * k / 4.f + 0.5f;
-                nvgMoveTo(vg, PX, y); nvgLineTo(vg, PX + PW, y);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            const float fb = frz ? 1.f : pv[10] * 0.95f;
-            const float pp = pv[3];
-            char buf[32];
-            for (int i = 0; i < NB; ++i) {
-                float h;
-                if (echo) {
-                    float lvl = std::max(pv[11] * std::pow(fb, (float) i), 1e-6f);     // repeat i+1
-                    h = rack::math::clamp(1.f + 20.f * std::log10(lvl) / 60.f, 0.f, 1.f);   // -60 .. 0 dB
-                } else {
-                    h = rack::math::clamp(std::sqrt(tapLv[i] / 4.f), 0.f, 1.f);
+                const float fl[9] = {50.f, 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f, 20000.f};
+                for (int i = 0; i < 9; ++i)
+                {
+                    if (fl[i] >= fMax)
+                        continue;
+                    float x = xOf(fl[i]) + 0.5f;
+                    nvgMoveTo(vg, x, PY);
+                    nvgLineTo(vg, x, PY + PH);
                 }
-                barPeak[i] = std::max(h, barPeak[i] - 0.007f);
-                float x = PX + i * cell + (cell - barW) / 2.f;
-                float bh = std::max(h * maxH, 1.f);
-                NVGcolor c0;
-                if (echo) c0 = (pp > 0.5f && (i & 1)) ? colViolet() : colAccent();
-                else      c0 = (i < 7) ? nvgLerpRGBA(colAccent(), nvgRGB(0x6f, 0xa8, 0xff), i / 6.f)
-                                       : nvgLerpRGBA(nvgRGB(0x8a, 0x7a, 0xff), colViolet(), (i - 7) / 6.f);
-
-                nvgBeginPath(vg);
-                nvgRect(vg, x - 2.f, base - bh - 2.f, barW + 4.f, bh + 4.f);
-                nvgFillColor(vg, withAlpha(c0, 0.10f));
-                nvgFill(vg);
-                nvgBeginPath(vg);
-                nvgRect(vg, x, base - bh, barW, bh);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, base, 0, base - maxH, withAlpha(c0, 0.55f), nvgLerpRGBA(c0, nvgRGB(255, 255, 255), 0.55f)));
-                nvgFill(vg);
-                float py = base - barPeak[i] * maxH;
-                nvgBeginPath(vg);
-                nvgRect(vg, x, py - 1.f, barW, 1.6f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 220));
-                nvgFill(vg);
-
-                if (echo) snprintf(buf, sizeof(buf), "%.1f", (i + 1) * eMs / 1000.f);
-                else {
-                    float ref = (i < 7) ? Vortex::TAP_L[i] : Vortex::TAP_R[i - 7];
-                    snprintf(buf, sizeof(buf), "%.0f", ref / Vortex::REF_SR * 1000.f * size);
+                for (int d = -20; d >= -80; d -= 20)
+                {
+                    float y = yOf((float)d) + 0.5f;
+                    nvgMoveTo(vg, PX, y);
+                    nvgLineTo(vg, PX + PW, y);
                 }
-                drawText(vg, x + barW / 2.f, base + 6.f, buf, 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.3f);
-            }
-            // segment gaps
-            nvgBeginPath(vg);
-            for (float y = base - 3.f; y > base - maxH; y -= 4.f)
-                nvgRect(vg, PX, y, PW, 1.f);
-            nvgFillColor(vg, nvgRGBA(3, 6, 9, 235));
-            nvgFill(vg);
-
-            drawText(vg, PX + 4.f, PY + 7.f, echo ? "ECHO REPEATS (S)  0 TO -60 DB" : "PLATE OUTPUT TAPS (MS)  L | R",
-                     6.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
-            if (!echo) {
-                nvgBeginPath(vg);
-                nvgRect(vg, PX + PW / 2.f - 0.5f, PY + 2.f, 1.f, PH - 4.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 30));
-                nvgFill(vg);
-            }
-        } else {
-            // ===== SPECTRUM: log-frequency FFT of the output =====
-            const float fMin = 20.f, fMax = std::min(20000.f, sr * 0.5f);
-            auto xOf = [&](float f) { return PX + PW * std::log(f / fMin) / std::log(fMax / fMin); };
-            auto yOf = [&](float db) { return PY + PH - rack::math::clamp((db + 90.f) / 90.f, 0.f, 1.f) * PH; };
-
-            nvgBeginPath(vg);
-            const float fl[9] = {50.f, 100.f, 200.f, 500.f, 1000.f, 2000.f, 5000.f, 10000.f, 20000.f};
-            for (int i = 0; i < 9; ++i) {
-                if (fl[i] >= fMax) continue;
-                float x = xOf(fl[i]) + 0.5f;
-                nvgMoveTo(vg, x, PY); nvgLineTo(vg, x, PY + PH);
-            }
-            for (int d = -20; d >= -80; d -= 20) {
-                float y = yOf((float) d) + 0.5f;
-                nvgMoveTo(vg, PX, y); nvgLineTo(vg, PX + PW, y);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            for (int b = 0; b < VX_BANDS; ++b) {
-                float v = rack::math::clamp(specDb[b], -90.f, 0.f);
-                specSm[b] += (v > specSm[b] ? 0.55f : 0.14f) * (v - specSm[b]);
-                specPk[b] = std::max(specSm[b], specPk[b] - 0.35f);
-            }
-
-            const float bw = PW / (float) VX_BANDS;
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, PX, PY + PH);
-            for (int b = 0; b < VX_BANDS; ++b)
-                nvgLineTo(vg, PX + (b + 0.5f) * bw, yOf(specSm[b]));
-            nvgLineTo(vg, PX + PW, PY + PH);
-            nvgClosePath(vg);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY, 0, PY + PH, nvgRGBA(0x3d, 0xe0, 0xff, 120), nvgRGBA(0xb0, 0x5a, 0xff, 8)));
-            nvgFill(vg);
-
-            nvgBeginPath(vg);
-            for (int b = 0; b < VX_BANDS; ++b) {
-                float x = PX + (b + 0.5f) * bw, y = yOf(specPk[b]);
-                if (b == 0) nvgMoveTo(vg, x, y); else nvgLineTo(vg, x, y);
-            }
-            nvgStrokeColor(vg, withAlpha(colViolet(), 0.55f));
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-
-            for (int pass = 0; pass < 2; ++pass) {
-                nvgBeginPath(vg);
-                for (int b = 0; b < VX_BANDS; ++b) {
-                    float x = PX + (b + 0.5f) * bw, y = yOf(specSm[b]);
-                    if (b == 0) nvgMoveTo(vg, x, y); else nvgLineTo(vg, x, y);
-                }
-                nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.25f) : nvgRGB(0x8a, 0xee, 0xff));
-                nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
-                nvgLineJoin(vg, NVG_ROUND);
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+                nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
-            }
 
-            const char* fn[9] = {"50", "100", "200", "500", "1K", "2K", "5K", "10K", "20K"};
-            for (int i = 0; i < 9; ++i) {
-                if (fl[i] >= fMax) continue;
-                drawText(vg, xOf(fl[i]), PY + PH - 5.f, fn[i], 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
-            }
-            char buf[16];
-            for (int d = -20; d >= -80; d -= 20) {
-                snprintf(buf, sizeof(buf), "%d", d);
-                drawText(vg, PX + 3.f, yOf((float) d) - 4.f, buf, 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
-            }
-        }
+                // Smoothing (fast attack, slow release) + peak-hold decay.
+                for (int b = 0; b < VX_BANDS; ++b)
+                {
+                    float v = rack::math::clamp(specDb[b], -90.f, 0.f);
+                    specSm[b] += (v > specSm[b] ? 0.55f : 0.14f) * (v - specSm[b]);
+                    specPk[b] = std::max(specSm[b], specPk[b] - 0.35f);
+                }
 
-        // clear flash across the plot
-        if (fade < 0.99f) {
-            nvgBeginPath(vg);
-            nvgRect(vg, PX, PY, PW, PH);
-            nvgFillColor(vg, withAlpha(colViolet(), 0.28f * (1.f - fade)));
-            nvgFill(vg);
-        }
-        nvgResetScissor(vg);
-        nvgRestore(vg);
-
-        // ---------- stereo output meters ----------
-        for (int c = 0; c < 2; ++c) {
-            float lv = std::min(std::max((c == 0 ? mL : mR) / 5.f, 0.f), 1.f);
-            float x = PX + PW + 8.f + c * 9.f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x, PY, 6.f, PH);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-            nvgFill(vg);
-            if (lv > 0.01f) {
-                float h = lv * PH;
+                // Filled spectrum (area under the smoothed curve).
+                const float bw = PW / (float)VX_BANDS;
                 nvgBeginPath(vg);
-                nvgRect(vg, x, PY + PH - h, 6.f, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY + PH, 0, PY, colAccent(), colViolet()));
+                nvgMoveTo(vg, PX, PY + PH);
+                for (int b = 0; b < VX_BANDS; ++b)
+                    nvgLineTo(vg, PX + (b + 0.5f) * bw, yOf(specSm[b]));
+                nvgLineTo(vg, PX + PW, PY + PH);
+                nvgClosePath(vg);
+                nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY, 0, PY + PH, nvgRGBA(0x3d, 0xe0, 0xff, 120), nvgRGBA(0xb0, 0x5a, 0xff, 8)));
+                nvgFill(vg);
+
+                // Peak-hold line.
+                nvgBeginPath(vg);
+                for (int b = 0; b < VX_BANDS; ++b)
+                {
+                    float x = PX + (b + 0.5f) * bw, y = yOf(specPk[b]);
+                    if (b == 0)
+                        nvgMoveTo(vg, x, y);
+                    else
+                        nvgLineTo(vg, x, y);
+                }
+                nvgStrokeColor(vg, withAlpha(colViolet(), 0.55f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+
+                // Main curve: thin underglow, then bright stroke on top.
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    nvgBeginPath(vg);
+                    for (int b = 0; b < VX_BANDS; ++b)
+                    {
+                        float x = PX + (b + 0.5f) * bw, y = yOf(specSm[b]);
+                        if (b == 0)
+                            nvgMoveTo(vg, x, y);
+                        else
+                            nvgLineTo(vg, x, y);
+                    }
+                    nvgStrokeColor(vg, pass == 0 ? withAlpha(colAccent(), 0.25f) : nvgRGB(0x8a, 0xee, 0xff));
+                    nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
+                    nvgLineJoin(vg, NVG_ROUND);
+                    nvgStroke(vg);
+                }
+
+                // Frequency / dB labels.
+                const char *fn[9] = {"50", "100", "200", "500", "1K", "2K", "5K", "10K", "20K"};
+                for (int i = 0; i < 9; ++i)
+                {
+                    if (fl[i] >= fMax)
+                        continue;
+                    drawText(vg, xOf(fl[i]), PY + PH - 5.f, fn[i], 5.5f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+                }
+                char buf[16];
+                for (int d = -20; d >= -80; d -= 20)
+                {
+                    snprintf(buf, sizeof(buf), "%d", d);
+                    drawText(vg, PX + 3.f, yOf((float)d) - 4.f, buf, 5.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.f);
+                }
+            }
+
+            // Clear flash across the plot while a clear is in progress.
+            if (fade < 0.99f)
+            {
+                nvgBeginPath(vg);
+                nvgRect(vg, PX, PY, PW, PH);
+                nvgFillColor(vg, withAlpha(colViolet(), 0.28f * (1.f - fade)));
                 nvgFill(vg);
             }
-        }
+            nvgResetScissor(vg);
+            nvgRestore(vg);
 
-        screenFinish(vg, W, H);
-
-        // ---------- header: tabs + status ----------
-        const char* tn[3] = {"WAVE", "BARS", "SPECTRUM"};
-        for (int i = 0; i < 3; ++i) {
-            bool on = (i == mode);
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, VP_TABX[i], 3.f, VP_TABW[i], 11.f, 3.f);
-            if (on) {
-                nvgFillColor(vg, withAlpha(colAccent(), 0.22f));
+            // ---------- stereo output meters ----------
+            for (int c = 0; c < 2; ++c)
+            {
+                float lv = std::min(std::max((c == 0 ? mL : mR) / 5.f, 0.f), 1.f);
+                float x = PX + PW + 8.f + c * 9.f;
+                nvgBeginPath(vg);
+                nvgRect(vg, x, PY, 6.f, PH);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
                 nvgFill(vg);
-                nvgStrokeColor(vg, withAlpha(colAccent(), 0.9f));
-            } else {
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+                if (lv > 0.01f)
+                {
+                    float h = lv * PH;
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x, PY + PH - h, 6.f, h);
+                    nvgFillPaint(vg, nvgLinearGradient(vg, 0, PY + PH, 0, PY, colAccent(), colViolet()));
+                    nvgFill(vg);
+                }
             }
-            nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-            drawText(vg, VP_TABX[i] + VP_TABW[i] / 2.f, 8.5f, tn[i], 6.f, on ? colAccent() : colDim(),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
-        }
-        char buf[96];
-        drawText(vg, W - 6.f, 8.f, echo ? "ECHO" : "REVERB", 7.f, echo ? colViolet() : colAccent(),
-                 NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.5f);
-        if (fade < 0.99f) {
-            drawText(vg, W - 52.f, 8.f, "CLEARING", 7.f, withAlpha(colViolet(), 0.95f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-        } else {
-            snprintf(buf, sizeof(buf), "%s%s%sCH %d", frz ? "FROZEN  " : "", sIn ? "ST IN  " : "", sOut ? "ST OUT  " : "", ch);
-            drawText(vg, W - 52.f, 8.f, buf, 6.5f, frz ? withAlpha(colViolet(), 0.95f) : nvgRGBA(0x3d, 0xe0, 0xff, 210),
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
-        }
 
-        // ---------- footer: readouts for the current mode ----------
-        const char* nm[5];
-        char val[5][16];
-        NVGcolor vc = nvgRGBA(0x3d, 0xe0, 0xff, 210);
-        snprintf(val[0], sizeof(val[0]), "%.0fMS", pv[0] * 500.f);
-        float fc = 18000.f * std::pow(2500.f / 18000.f, pv[4]);
-        if (!echo) {
-            nm[0] = "PRE"; nm[1] = "SIZE"; nm[2] = "RT60"; nm[3] = "DAMP"; nm[4] = "MIX";
-            snprintf(val[1], sizeof(val[1]), "%.0f%%", size * 100.f);
-            snprintf(val[2], sizeof(val[2]), "%.1fS", rt);
-            snprintf(val[3], sizeof(val[3]), "%.1fK", fc / 1000.f);
-            snprintf(val[4], sizeof(val[4]), "%.0f%%", pv[8] * 100.f);
-        } else {
-            nm[0] = "PRE"; nm[1] = "TIME"; nm[2] = "FDBK"; nm[3] = "PING"; nm[4] = "MIX";
-            snprintf(val[1], sizeof(val[1]), "%.0fMS", eMs);
-            snprintf(val[2], sizeof(val[2]), "%.0f%%", frz ? 100.f : pv[10] * 95.f);
-            snprintf(val[3], sizeof(val[3]), "%.0f%%", pv[3] * 100.f);
-            snprintf(val[4], sizeof(val[4]), "%.0f%%", pv[8] * 100.f);
-        }
-        const float cw = (W - 16.f) / 5.f;
-        for (int i = 0; i < 5; ++i) {
-            float x = 8.f + i * cw;
-            drawText(vg, x, H - 7.f, nm[i], 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
-            drawText(vg, x + cw - 6.f, H - 7.f, val[i], 6.5f, vc, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
-        }
+            screenFinish(vg, W, H);
 
-        Widget::drawLayer(args, layer);
-    }
-};
+            // ---------- header: tabs + status ----------
+            const char *tn[3] = {"WAVE", "BARS", "SPECTRUM"};
+            for (int i = 0; i < 3; ++i)
+            {
+                bool on = (i == mode);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, VP_TABX[i], 3.f, VP_TABW[i], 11.f, 3.f);
+                if (on)
+                {
+                    nvgFillColor(vg, withAlpha(colAccent(), 0.22f));
+                    nvgFill(vg);
+                    nvgStrokeColor(vg, withAlpha(colAccent(), 0.9f));
+                }
+                else
+                {
+                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+                }
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+                drawText(vg, VP_TABX[i] + VP_TABW[i] / 2.f, 8.5f, tn[i], 6.f, on ? colAccent() : colDim(),
+                         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.8f);
+            }
+            char buf[96];
+            // Mode + status.
+            drawText(vg, W - 6.f, 8.f, echo ? "ECHO" : "REVERB", 7.f, echo ? colViolet() : colAccent(),
+                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.5f);
+            if (fade < 0.99f)
+            {
+                drawText(vg, W - 52.f, 8.f, "CLEARING", 7.f, withAlpha(colViolet(), 0.95f), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            }
+            else
+            {
+                snprintf(buf, sizeof(buf), "%s%s%sCH %d", frz ? "FROZEN  " : "", sIn ? "ST IN  " : "", sOut ? "ST OUT  " : "", ch);
+                drawText(vg, W - 52.f, 8.f, buf, 6.5f, frz ? withAlpha(colViolet(), 0.95f) : nvgRGBA(0x3d, 0xe0, 0xff, 210),
+                         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+            }
+
+            // ---------- footer: readouts for the current mode ----------
+            // Five pairs: PRE, SIZE/TIME, RT60/FDBK, DAMP/PING, MIX.
+            const char *nm[5];
+            char val[5][16];
+            NVGcolor vc = nvgRGBA(0x3d, 0xe0, 0xff, 210);
+            snprintf(val[0], sizeof(val[0]), "%.0fMS", pv[0] * 500.f);
+            float fc = 18000.f * std::pow(2500.f / 18000.f, pv[4]);
+            if (!echo)
+            {
+                nm[0] = "PRE";
+                nm[1] = "SIZE";
+                nm[2] = "RT60";
+                nm[3] = "DAMP";
+                nm[4] = "MIX";
+                snprintf(val[1], sizeof(val[1]), "%.0f%%", size * 100.f);
+                snprintf(val[2], sizeof(val[2]), "%.1fS", rt);
+                snprintf(val[3], sizeof(val[3]), "%.1fK", fc / 1000.f);
+                snprintf(val[4], sizeof(val[4]), "%.0f%%", pv[8] * 100.f);
+            }
+            else
+            {
+                nm[0] = "PRE";
+                nm[1] = "TIME";
+                nm[2] = "FDBK";
+                nm[3] = "PING";
+                nm[4] = "MIX";
+                snprintf(val[1], sizeof(val[1]), "%.0fMS", eMs);
+                snprintf(val[2], sizeof(val[2]), "%.0f%%", frz ? 100.f : pv[10] * 95.f);
+                snprintf(val[3], sizeof(val[3]), "%.0f%%", pv[3] * 100.f);
+                snprintf(val[4], sizeof(val[4]), "%.0f%%", pv[8] * 100.f);
+            }
+            const float cw = (W - 16.f) / 5.f;
+            for (int i = 0; i < 5; ++i)
+            {
+                float x = 8.f + i * cw;
+                drawText(vg, x, H - 7.f, nm[i], 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+                drawText(vg, x + cw - 6.f, H - 7.f, val[i], 6.5f, vc, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+            }
+
+            Widget::drawLayer(args, layer);
+        }
+    };
 
 } // namespace
 
 // ============================================================
 // Module widget
+// ------------------------------------------------------------
+// Layout:
+//   * static panel + display
+//   * 12 control cells (knob / CV jack / trimpot attenuverter)
+//   * bottom strip: 3 LED buttons, 2 CKSS switches, 6 jacks
+//   * context menu: display mode + CV range
 // ============================================================
-struct VortexWidget : ModuleWidget {
-    VortexWidget(VortexModule* module) {
+struct VortexWidget : ModuleWidget
+{
+    VortexWidget(VortexModule *module)
+    {
         setModule(module);
         box.size = Vec(VX_W, VX_H);
 
@@ -1039,17 +1470,18 @@ struct VortexWidget : ModuleWidget {
 
         addChild(new VxDisplay(module));
 
-        // 12 cells: knob on top, CV jack (left) and attenuverter (right) below
-        for (int i = 0; i < 12; ++i) {
+        // 12 cells: knob on top, CV jack (left) and attenuverter (right) below.
+        for (int i = 0; i < 12; ++i)
+        {
             int row = i / 6, col = i % 6;
             float cx = VX_COL[col], T = VX_ROW[row];
-            const VxCellDef& c = VX_CELLS[i];
+            const VxCellDef &c = VX_CELLS[i];
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, T + 27.f), module, c.param));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, T + 54.f), module, c.cv));
             addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, T + 54.f), module, c.atten));
         }
 
-        // strip: mode / freeze / clear buttons, stereo switches, then the jacks
+        // Strip: mode / freeze / clear buttons, stereo switches, then the jacks.
         const float sy = VX_STRIP_Y + 32.f;
         addParam(createParamCentered<LEDButton>(Vec(vxStripX(0), sy), module, VortexModule::ECHO_MODE_BUTTON_PARAM));
         addChild(createLightCentered<SmallLight<VxVioletLight>>(Vec(vxStripX(0), sy), module, VortexModule::ECHO_MODE_BUTTON_LIGHT));
@@ -1068,27 +1500,31 @@ struct VortexWidget : ModuleWidget {
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(10), sy), module, VortexModule::CLEAR_INPUT));
     }
 
-    void appendContextMenu(Menu* menu) override {
-        VortexModule* module = dynamic_cast<VortexModule*>(this->module);
-        if (!module) return;
+    // Add a "Display" submenu (Wave / Bars / Spectrum) and a "CV range"
+    // submenu (unipolar / bipolar) to the module context menu.
+    void appendContextMenu(Menu *menu) override
+    {
+        VortexModule *module = dynamic_cast<VortexModule *>(this->module);
+        if (!module)
+            return;
 
         menu->addChild(new MenuSeparator);
-        menu->addChild(createSubmenuItem("Display", "", [=](Menu* sub) {
+        menu->addChild(createSubmenuItem("Display", "", [=](Menu *sub)
+                                         {
             const char* names[3] = {"Wave", "Bars", "Spectrum"};
             for (int i = 0; i < 3; ++i)
                 sub->addChild(createCheckMenuItem(names[i], "",
                     [=]() { return module->dispMode == i; },
-                    [=]() { module->dispMode = i; }));
-        }));
-        menu->addChild(createSubmenuItem("CV range", "", [=](Menu* sub) {
+                    [=]() { module->dispMode = i; })); }));
+        menu->addChild(createSubmenuItem("CV range", "", [=](Menu *sub)
+                                         {
             sub->addChild(createCheckMenuItem("0 V to +10 V (unipolar, default)", "",
                 [=]() { return module->cvRangeMode == VortexModule::UNIPOLAR_0_10; },
                 [=]() { module->cvRangeMode = VortexModule::UNIPOLAR_0_10; }));
             sub->addChild(createCheckMenuItem("-5 V to +5 V (bipolar)", "",
                 [=]() { return module->cvRangeMode == VortexModule::BIPOLAR_M5_5; },
-                [=]() { module->cvRangeMode = VortexModule::BIPOLAR_M5_5; }));
-        }));
+                [=]() { module->cvRangeMode = VortexModule::BIPOLAR_M5_5; })); }));
     }
 };
 
-Model* modelVortex = createModel<VortexModule, VortexWidget>("Vortex");
+Model *modelVortex = createModel<VortexModule, VortexWidget>("Vortex");

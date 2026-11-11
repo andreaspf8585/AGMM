@@ -1,48 +1,145 @@
+// ============================================================================
+// VCAPoly — polyphonic VCA with global limit (14 HP Rack module)
+// ----------------------------------------------------------------------------
+// Overview:
+//   * Polyphonic audio in / out, up to 16 voices.
+//   * Per-voice gain = env * limit, where:
+//       - `env`   comes from a poly ENV CV (0..10 V per channel), or 1.0
+//                 when the ENV input is unpatched (unity gain),
+//       - `limit` comes from the GLOBAL LIMIT knob, or from a per-channel
+//                 LIMIT CV override when that jack is patched.
+//   * Output channel count follows the AUDIO input's channel count.
+//   * Display:
+//       16 stacked voice rows showing the current gain (0..2x) as a bar,
+//       a thin violet line = output peak, and a limit marker per row
+//       (per-channel if LIMIT CV is patched, otherwise one global line).
+//   * Footer shows the global limit plus "CH n", "UNITY" or "LIM CV".
+//   * The output jack is bypassed to the input when unpatched.
+// ============================================================================
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 
-static const float VP_W = RACK_GRID_WIDTH * 14;   // 210 (wider for extra input)
-static const float VP_H = RACK_GRID_HEIGHT;       // 380
-static const float VP_DX = 20.f, VP_DY = 46.f, VP_DW = 140.f, VP_DH = 200.f;
-static const float VP_BX0 = 26.f, VP_BW = 106.f;  // bar area inside the display
-static const float VP_ROW0 = 24.f, VP_PITCH = 10.f;
-static const float VP_KNOBY = 288.f;
-static const float VP_JY = 348.f;
-static float vpJx(int i) { return 30.f + 50.f * i; }
+// ------------------------------------------------------------
+// Layout constants (14 HP = 210 px wide)
+// ------------------------------------------------------------
+static const float VP_W = RACK_GRID_WIDTH * 14; // 210
+static const float VP_H = RACK_GRID_HEIGHT;     // 380
 
-struct VCAPoly : Module {
-    enum ParamId { PARAM_LIMIT, PARAMS_LEN };
-    enum InputId { INPUT_AUDIO, INPUT_ENV, INPUT_LIMIT_CV, INPUTS_LEN };
-    enum OutputId { OUTPUT_AUDIO, OUTPUTS_LEN };
-    enum LightId { LIGHTS_LEN };
+// Display (140 x 196): scale header, 16 voice rows, footer. Bezel adds 4 px around it.
+static const float VP_DW = 140.f, VP_DH = 196.f;
+static const float VP_DX = (VP_W - VP_DW) / 2.f; // 35
+static const float VP_DY = 26.f;
+static const float VP_HEAD_LINE = 15.5f;            // hairline under the scale header (display-local)
+static const float VP_BX0 = 26.f, VP_BW = 106.f;    // bar area inside the display
+static const float VP_ROW0 = 22.f, VP_PITCH = 10.f; // first row y and row pitch
+static const float VP_FOOT_LINE = 184.5f;           // hairline above the footer row
+static const float VP_FOOT_Y = 190.f;               // footer text centre line
 
-    // Meter: fill ratio (0..1) per voice, relative to limit*10V
+// Global limit knob cell: 80 x 52, label at +10, knob at +32
+static const float VP_KNOB_TOP = 234.f, VP_KNOB_W = 80.f, VP_KNOB_H = 52.f;
+static const float VP_KNOBY = VP_KNOB_TOP + 32.f;
+
+// Jack cells: four 44 x 42, label at +10, jack at +28
+static const float VP_JTOP = 296.f, VP_JW = 44.f, VP_JH = 42.f, VP_JDY = 28.f;
+static float vpJx(int i) { return 30.f + 50.f * (float)i; }
+
+// ------------------------------------------------------------
+// Module — polyphonic DSP + state.
+//
+// Gain law per voice:
+//   * ENV unpatched  -> g = 1, out = in, meter fill = 1.0
+//   * ENV patched    -> g = clamp(env/10,0,1) * limit
+//                      out = in * g
+//                      fill = clamp(env/(limit*10),0,1)  (so the bar and
+//                             limit marker share a coordinate system)
+//
+// Limit source:
+//   * LIMIT CV patched -> limit = clamp(limitCv/10, 0, 2) per channel
+//   * otherwise         -> limit = GLOBAL LIMIT knob value
+//
+// Display members are written every sample and read by the UI thread;
+// torn reads are cosmetic only.
+// ------------------------------------------------------------
+struct VCAPoly : Module
+{
+    enum ParamId
+    {
+        PARAM_LIMIT,
+        PARAMS_LEN
+    };
+    enum InputId
+    {
+        INPUT_AUDIO,
+        INPUT_ENV,
+        INPUT_LIMIT_CV,
+        INPUTS_LEN
+    };
+    enum OutputId
+    {
+        OUTPUT_AUDIO,
+        OUTPUTS_LEN
+    };
+    enum LightId
+    {
+        LIGHTS_LEN
+    };
+
+    // --------------------------------------------------------
+    // Meter: fill ratio (0..1) per voice, relative to limit * 10 V.
+    // --------------------------------------------------------
     float envelopeFill[16] = {};
 
-    // Display data (written by the audio thread, read by the UI thread)
-    float gainNow[16] = {};
-    float outPeak[16] = {};
-    int activeCh = 0;
-    bool envConn = false;
-    bool limitCvConn = false;
+    // --------------------------------------------------------
+    // Display data (written by the audio thread, read by the UI thread).
+    // --------------------------------------------------------
+    float gainNow[16] = {};   // current per-voice gain
+    float outPeak[16] = {};   // per-voice output peak (one-pole decay)
+    int activeCh = 0;         // number of channels being processed
+    bool envConn = false;     // true if the ENV input is patched
+    bool limitCvConn = false; // true if the LIMIT CV input is patched
 
-    VCAPoly() {
+    // --------------------------------------------------------
+    // Constructor — configure the single param, inputs, output, bypass.
+    // --------------------------------------------------------
+    VCAPoly()
+    {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(PARAM_LIMIT, 0.f, 2.f, 1.f, "Global gain limit", "x");
         configInput(INPUT_AUDIO, "Polyphonic audio");
         configInput(INPUT_ENV, "Polyphonic envelope CV (0 to 10 V)");
         configInput(INPUT_LIMIT_CV, "Polyphonic gain limit CV (0 to 10 V)");
         configOutput(OUTPUT_AUDIO, "Polyphonic output");
+
+        // Pass-through when unpatched.
+        configBypass(INPUT_AUDIO, OUTPUT_AUDIO);
     }
 
-    void process(const ProcessArgs& args) override {
+    // --------------------------------------------------------
+    // Per-sample DSP for all active voices.
+    //   * No AUDIO channels     -> emit 0 channels, clear all display state.
+    //   * ENV unpatched         -> unity gain, fill = 1.0.
+    //   * ENV patched           -> per-voice gain = envNorm * limit;
+    //                              fill = env/(limit*10), capped at 1.
+    //   * Missing env/limit-CV channels read as 0 V.
+    // --------------------------------------------------------
+    void process(const ProcessArgs &args) override
+    {
         int audioChannels = inputs[INPUT_AUDIO].getChannels();
         activeCh = audioChannels;
-        if (audioChannels == 0) {
-            for (int c = 0; c < 16; ++c) { envelopeFill[c] = 0.f; gainNow[c] = 0.f; outPeak[c] = 0.f; }
+        if (audioChannels == 0)
+        {
+            // No audio connected: emit no channels and wipe the display.
+            outputs[OUTPUT_AUDIO].setChannels(0);
+            for (int c = 0; c < 16; ++c)
+            {
+                envelopeFill[c] = 0.f;
+                gainNow[c] = 0.f;
+                outPeak[c] = 0.f;
+            }
             return;
         }
 
@@ -54,35 +151,41 @@ struct VCAPoly : Module {
         limitCvConn = limitCvConnected;
         int limitCvChannels = limitCvConnected ? inputs[INPUT_LIMIT_CV].getChannels() : 0;
 
-        int channels = audioChannels;  // output always follows audio channel count
+        int channels = audioChannels; // output always follows audio channel count
 
         outputs[OUTPUT_AUDIO].setChannels(channels);
 
         float globalLimit = params[PARAM_LIMIT].getValue();
+        // Per-sample peak decay coefficient for the display meters.
         float md = 1.f - 5.f * args.sampleTime;
 
-        for (int c = 0; c < channels; ++c) {
+        for (int c = 0; c < channels; ++c)
+        {
             float audio = inputs[INPUT_AUDIO].getVoltage(c);
             float out, fill, g;
 
-            // Per-channel limit: global knob value, overridden by limit CV if connected
+            // Per-channel limit: global knob value, overridden by limit CV if connected.
             float limit = globalLimit;
-            if (limitCvConnected) {
+            if (limitCvConnected)
+            {
                 float limitCv = (c < limitCvChannels) ? inputs[INPUT_LIMIT_CV].getVoltage(c) : 0.f;
-                limit = clamp(limitCv / 10.f, 0.f, 2.f);
+                limit = rack::math::clamp(limitCv / 10.f, 0.f, 2.f);
             }
             float limitVoltage = limit * 10.f;
 
-            if (!envConnected) {
-                out = audio;       // no envelope cable: unity gain
+            if (!envConnected)
+            {
+                out = audio; // no envelope cable: unity gain
                 fill = 1.0f;
                 g = 1.f;
-            } else {
+            }
+            else
+            {
                 float envVoltage = (c < envChannels) ? inputs[INPUT_ENV].getVoltage(c) : 0.f;
-                float envNorm = clamp(envVoltage / 10.f, 0.f, 1.f);
+                float envNorm = rack::math::clamp(envVoltage / 10.f, 0.f, 1.f);
                 g = envNorm * limit;
                 out = audio * g;
-                fill = (limitVoltage > 0.f) ? clamp(envVoltage / limitVoltage, 0.f, 1.f) : 0.f;
+                fill = (limitVoltage > 0.f) ? rack::math::clamp(envVoltage / limitVoltage, 0.f, 1.f) : 0.f;
             }
             outputs[OUTPUT_AUDIO].setVoltage(out, c);
             envelopeFill[c] = fill;
@@ -90,322 +193,319 @@ struct VCAPoly : Module {
             outPeak[c] = std::max(std::fabs(out), outPeak[c] * md);
         }
 
-        for (int c = channels; c < 16; ++c) { envelopeFill[c] = 0.f; gainNow[c] = 0.f; outPeak[c] = 0.f; }
-    }
-};
-
-namespace {
-
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
-NVGcolor withAlpha(NVGcolor c, float a) { c.a = a; return c; }
-
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-        nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
-
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 80));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 25));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void label(NVGcontext* vg, float x, float y, const char* t) {
-    drawText(vg, x, y, t, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-}
-
-void topCell(NVGcontext* vg, float cx, float cy, const char* t) {
-    plate(vg, cx - 17.f, cy - 27.f, 34.f, 44.f);
-    label(vg, cx, cy - 19.f, t);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenFinish(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
-struct VPPanel : TransparentWidget {
-    VPPanel() { box.size = Vec(VP_W, VP_H); }
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        drawPanelBase(vg, VP_W, VP_H, "VCAPOLY");
-        drawBezel(vg, VP_DX, VP_DY, VP_DW, VP_DH);
-        ring(vg, VP_W / 2.f, VP_KNOBY, 18.f);
-        label(vg, VP_W / 2.f, VP_KNOBY + 25.f, "GLOBAL LIMIT");
-        const char* names[4] = {"AUDIO", "ENV", "LIMIT", "OUT"};
-        for (int i = 0; i < 4; ++i) topCell(vg, vpJx(i), VP_JY, names[i]);
-        Widget::draw(args);
-    }
-};
-
-// 16 voice rows: gain bar (0..2x) with the limit marker, plus a thin output meter
-struct VPDisplay : TransparentWidget {
-    VCAPoly* module = nullptr;
-    VPDisplay(VCAPoly* m) : module(m) {
-        box.pos = Vec(VP_DX, VP_DY);
-        box.size = Vec(VP_DW, VP_DH);
-    }
-
-    void draw(const DrawArgs& args) override {
-        NVGcontext* vg = args.vg;
-        screenBase(vg, VP_DW, VP_DH);
-
-        // scale ticks at 0, 1x and 2x
-        const char* sc[3] = {"0", "1", "2"};
-        nvgBeginPath(vg);
-        for (int k = 0; k < 3; ++k) {
-            float x = VP_BX0 + VP_BW * k / 2.f + 0.5f;
-            nvgMoveTo(vg, x, 17.f);
-            nvgLineTo(vg, x, VP_ROW0 + 16 * VP_PITCH);
+        // Clear display state for voices that are no longer active.
+        for (int c = channels; c < 16; ++c)
+        {
+            envelopeFill[c] = 0.f;
+            gainNow[c] = 0.f;
+            outPeak[c] = 0.f;
         }
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-        for (int k = 0; k < 3; ++k)
-            drawText(vg, VP_BX0 + VP_BW * k / 2.f, 11.f, sc[k], 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+    }
+};
 
-        for (int c = 0; c < 16; ++c) {
-            float y = VP_ROW0 + c * VP_PITCH;
+// ------------------------------------------------------------
+// Drawing helpers (anonymous namespace — UI-only)
+// ------------------------------------------------------------
+namespace
+{
+
+    namespace ag = agmm;
+
+    // ------------------------------------------------------------
+    // VPPanel — static panel chrome:
+    //   * title + panel base
+    //   * display bezel
+    //   * single GLOBAL LIMIT knob cell
+    //   * four jack cells: AUDIO, ENV, LIMIT, OUT (OUT tinted as an output)
+    // The actual widgets are placed by VCAPolyWidget at the same positions.
+    // ------------------------------------------------------------
+    struct VPPanel : TransparentWidget
+    {
+        VPPanel() { box.size = Vec(VP_W, VP_H); }
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            ag::panelBase(vg, VP_W, VP_H, "VCAPOLY");
+            ag::bezel(vg, VP_DX, VP_DY, VP_DW, VP_DH);
+
+            // GLOBAL LIMIT knob cell.
+            ag::cell(vg, VP_W / 2.f, VP_KNOB_TOP, VP_KNOB_W, VP_KNOB_H, "GLOBAL LIMIT");
+
+            // Jack cells; the OUT cell is tinted (output colouring).
+            const char *names[4] = {"AUDIO", "ENV", "LIMIT", "OUT"};
+            for (int i = 0; i < 4; ++i)
+                ag::cell(vg, vpJx(i), VP_JTOP, VP_JW, VP_JH, names[i], i == 3, 7.f);
+            Widget::draw(args);
+        }
+    };
+
+    // ------------------------------------------------------------
+    // VPKnobArc — arc track + value arc around the GLOBAL LIMIT knob.
+    // Non-interactive; purely visual feedback.
+    // ------------------------------------------------------------
+    struct VPKnobArc : TransparentWidget
+    {
+        VCAPoly *module = nullptr;
+        VPKnobArc(VCAPoly *m) : module(m) { box.size = Vec(VP_W, VP_H); }
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            const float R = 16.f;
+            // Arc from ~225° to ~315° (CCW around the knob face).
+            const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
+            const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
+            // Track
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, VP_BX0, y, VP_BW, 6.f, 1.5f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 9));
-            nvgFill(vg);
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%d", c + 1);
-            drawText(vg, 10.f, y + 3.f, buf, 6.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+            nvgArc(vg, VP_W / 2.f, VP_KNOBY, R, a0, a1, NVG_CW);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+            nvgStrokeWidth(vg, 2.f);
+            nvgLineCap(vg, NVG_ROUND);
+            nvgStroke(vg);
+            // Value arc (skip when very small).
+            if (!module)
+                return;
+            float v = module->paramQuantities[VCAPoly::PARAM_LIMIT]->getScaledValue();
+            if (v < 0.004f)
+                return;
+            nvgBeginPath(vg);
+            nvgArc(vg, VP_W / 2.f, VP_KNOBY, R, a0, a0 + (a1 - a0) * v, NVG_CW);
+            nvgStrokeColor(vg, ag::accent());
+            nvgStrokeWidth(vg, 2.f);
+            nvgStroke(vg);
         }
-        Widget::draw(args);
-    }
+    };
 
-    void drawLayer(const DrawArgs& args, int layer) override {
-        if (layer != 1) { Widget::drawLayer(args, layer); return; }
-        NVGcontext* vg = args.vg;
+    // ------------------------------------------------------------
+    // VPDisplay — the live 140x196 voice display.
+    //   draw()       : static background (screen fill, separators,
+    //                  scale gridlines at 0 / 1x / 2x, row slots,
+    //                  voice numbers 1..16).
+    //   drawLayer(1) : live content per voice (gain bar 0..2x, output
+    //                  peak tick, per-row or global limit marker),
+    //                  footer readouts (GLOBAL x.xxX + CH n / UNITY /
+    //                  LIM CV).
+    // If module == nullptr (browser preview) synthetic data is drawn.
+    // ------------------------------------------------------------
+    struct VPDisplay : TransparentWidget
+    {
+        VCAPoly *module = nullptr;
+        VPDisplay(VCAPoly *m) : module(m)
+        {
+            box.pos = Vec(VP_DX, VP_DY);
+            box.size = Vec(VP_DW, VP_DH);
+        }
 
-        float globalLimit = 1.f;
-        int n = 8;
-        bool conn = true;
-        bool limitCvConn = false;
-        float gain[16], pk[16];
-        float perChLimit[16];
-        if (module) {
-            globalLimit = module->params[VCAPoly::PARAM_LIMIT].getValue();
-            n = module->activeCh;
-            conn = module->envConn;
-            limitCvConn = module->limitCvConn;
-            for (int c = 0; c < 16; ++c) { gain[c] = module->gainNow[c]; pk[c] = module->outPeak[c]; }
-            // compute per-channel limits for display
-            int limitCvChannels = limitCvConn ? module->inputs[VCAPoly::INPUT_LIMIT_CV].getChannels() : 0;
-            for (int c = 0; c < 16; ++c) {
-                float lim = globalLimit;
-                if (limitCvConn) {
-                    float limitCv = (c < limitCvChannels) ? module->inputs[VCAPoly::INPUT_LIMIT_CV].getVoltage(c) : 0.f;
-                    lim = clamp(limitCv / 10.f, 0.f, 2.f);
+        // ---- static background ----
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            ag::screen(vg, 0.f, 0.f, VP_DW, VP_DH);
+
+            // Separators under the scale header and above the footer.
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 8.f, VP_HEAD_LINE);
+            nvgLineTo(vg, VP_DW - 8.f, VP_HEAD_LINE);
+            nvgMoveTo(vg, 8.f, VP_FOOT_LINE);
+            nvgLineTo(vg, VP_DW - 8.f, VP_FOOT_LINE);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // Scale gridlines at 0, 1x and 2x, labels in the header row.
+            const char *sc[3] = {"0", "1X", "2X"};
+            const float rowsEnd = VP_ROW0 + 16.f * VP_PITCH - 2.f;
+            nvgBeginPath(vg);
+            for (int k = 0; k < 3; ++k)
+            {
+                float x = VP_BX0 + VP_BW * (float)k / 2.f + 0.5f;
+                nvgMoveTo(vg, x, VP_HEAD_LINE + 2.f);
+                nvgLineTo(vg, x, rowsEnd);
+            }
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 26));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+            for (int k = 0; k < 3; ++k)
+                ag::text(vg, VP_BX0 + VP_BW * (float)k / 2.f, 8.f, sc[k], 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+
+            // Row slots + voice numbers.
+            for (int c = 0; c < 16; ++c)
+            {
+                float y = VP_ROW0 + (float)c * VP_PITCH;
+                nvgBeginPath(vg);
+                nvgRect(vg, VP_BX0, y, VP_BW, 6.f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
+                nvgFill(vg);
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d", c + 1);
+                ag::text(vg, 11.f, y + 3.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            }
+            Widget::draw(args);
+        }
+
+        // ---- live content ----
+        void drawLayer(const DrawArgs &args, int layer) override
+        {
+            if (layer != 1)
+            {
+                Widget::drawLayer(args, layer);
+                return;
+            }
+            NVGcontext *vg = args.vg;
+
+            // Snapshot module state (or demo data) into locals.
+            float globalLimit = 1.f;
+            int n = 8;
+            bool conn = true;
+            bool limitCvConn = false;
+            float gain[16], pk[16];
+            float perChLimit[16];
+            if (module)
+            {
+                globalLimit = module->params[VCAPoly::PARAM_LIMIT].getValue();
+                n = module->activeCh;
+                conn = module->envConn;
+                limitCvConn = module->limitCvConn;
+                for (int c = 0; c < 16; ++c)
+                {
+                    gain[c] = module->gainNow[c];
+                    pk[c] = module->outPeak[c];
                 }
-                perChLimit[c] = lim;
+                // Per-channel limits for display: knob value, or LIMIT CV if patched.
+                int limitCvChannels = limitCvConn ? module->inputs[VCAPoly::INPUT_LIMIT_CV].getChannels() : 0;
+                for (int c = 0; c < 16; ++c)
+                {
+                    float lim = globalLimit;
+                    if (limitCvConn)
+                    {
+                        float limitCv = (c < limitCvChannels) ? module->inputs[VCAPoly::INPUT_LIMIT_CV].getVoltage(c) : 0.f;
+                        lim = rack::math::clamp(limitCv / 10.f, 0.f, 2.f);
+                    }
+                    perChLimit[c] = lim;
+                }
             }
-        } else {
-            for (int c = 0; c < 16; ++c) {
-                gain[c] = std::max(0.f, globalLimit * (0.5f + 0.5f * std::sin(c * 0.7f + 0.3f)));
-                pk[c] = 4.f * gain[c] * 0.5f;
-                perChLimit[c] = globalLimit;
+            else
+            {
+                // demo values for the module browser
+                for (int c = 0; c < 16; ++c)
+                {
+                    gain[c] = std::max(0.f, globalLimit * (0.5f + 0.5f * std::sin((float)c * 0.7f + 0.3f)));
+                    pk[c] = 4.f * gain[c] * 0.5f;
+                    perChLimit[c] = globalLimit;
+                }
             }
-        }
-        n = std::min(std::max(n, 0), 16);
+            n = std::min(std::max(n, 0), 16);
 
-        for (int c = 0; c < 16; ++c) {
-            float y = VP_ROW0 + c * VP_PITCH;
-            if (c >= n) {
-                nvgBeginPath(vg);
-                nvgRect(vg, VP_BX0, y + 2.5f, 3.f, 1.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 28));
-                nvgFill(vg);
-                continue;
-            }
-            float t = (float) c / 15.f;
-            NVGcolor col = nvgHSL(0.5f + 0.12f * t, 0.9f, 0.6f);
-            float w = std::min(gain[c] / 2.f, 1.f) * VP_BW;
-            if (w > 0.5f) {
-                nvgBeginPath(vg);
-                nvgRect(vg, VP_BX0 - 1.f, y - 1.5f, w + 2.f, 9.f);
-                nvgFillColor(vg, withAlpha(col, 0.14f));
-                nvgFill(vg);
-                nvgBeginPath(vg);
-                nvgRoundedRect(vg, VP_BX0, y, w, 6.f, 1.5f);
-                nvgFillPaint(vg, nvgLinearGradient(vg, VP_BX0, 0, VP_BX0 + VP_BW, 0, withAlpha(col, 0.45f), withAlpha(col, 1.f)));
-                nvgFill(vg);
-                nvgBeginPath(vg);
-                nvgRect(vg, VP_BX0 + w - 1.5f, y, 1.5f, 6.f);
-                nvgFillColor(vg, nvgRGBA(255, 255, 255, 190));
-                nvgFill(vg);
-            }
-            // output peak, a thin line under the bar
-            float pw = std::min(pk[c] / 5.f, 1.f) * VP_BW;
-            if (pw > 0.5f) {
-                nvgBeginPath(vg);
-                nvgRect(vg, VP_BX0, y + 6.5f, pw, 1.5f);
-                nvgFillColor(vg, withAlpha(colViolet(), 0.9f));
-                nvgFill(vg);
-            }
-        }
-
-        // limit markers (per-channel)
-        if (conn) {
-            if (limitCvConn) {
-                // draw per-channel limit markers
-                for (int c = 0; c < n; ++c) {
-                    float y = VP_ROW0 + c * VP_PITCH;
-                    float lx = VP_BX0 + VP_BW * (perChLimit[c] / 2.f);
+            // Voice bars + output peak ticks.
+            for (int c = 0; c < 16; ++c)
+            {
+                float y = VP_ROW0 + (float)c * VP_PITCH;
+                if (c >= n)
+                {
+                    // Inactive voice: small dash.
                     nvgBeginPath(vg);
-                    nvgMoveTo(vg, lx, y - 1.f);
-                    nvgLineTo(vg, lx, y + 7.f);
-                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 180));
-                    nvgStrokeWidth(vg, 1.2f);
-                    nvgStroke(vg);
+                    nvgRect(vg, VP_BX0, y + 2.5f, 3.f, 1.f);
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 40));
+                    nvgFill(vg);
+                    continue;
                 }
-            } else {
-                // single global limit marker
-                float lx = VP_BX0 + VP_BW * (globalLimit / 2.f);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, lx, 16.f);
-                nvgLineTo(vg, lx, VP_ROW0 + 16 * VP_PITCH - 2.f);
-                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 230));
-                nvgStrokeWidth(vg, 1.5f);
-                nvgStroke(vg);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, lx - 3.5f, 14.f);
-                nvgLineTo(vg, lx + 3.5f, 14.f);
-                nvgLineTo(vg, lx, 19.f);
-                nvgClosePath(vg);
-                nvgFillColor(vg, nvgRGB(255, 255, 255));
-                nvgFill(vg);
+                // Gain bar (0..2x scaled to the full width).
+                float w = std::min(std::max(gain[c] / 2.f, 0.f), 1.f) * VP_BW;
+                if (w > 0.5f)
+                {
+                    nvgBeginPath(vg);
+                    nvgRect(vg, VP_BX0, y, w, 6.f);
+                    nvgFillColor(vg, ag::withA(ag::accent(), 0.6f));
+                    nvgFill(vg);
+                    // Bright tip on the leading edge of the bar.
+                    nvgBeginPath(vg);
+                    nvgRect(vg, VP_BX0 + w - 1.5f, y, 1.5f, 6.f);
+                    nvgFillColor(vg, ag::bright());
+                    nvgFill(vg);
+                }
+                // Output peak, a thin violet line under the bar.
+                float pw = std::min(std::max(pk[c] / 5.f, 0.f), 1.f) * VP_BW;
+                if (pw > 0.5f)
+                {
+                    nvgBeginPath(vg);
+                    nvgRect(vg, VP_BX0, y + 6.5f, pw, 1.5f);
+                    nvgFillColor(vg, ag::withA(ag::violet(), 0.9f));
+                    nvgFill(vg);
+                }
             }
-        }
 
-        screenFinish(vg, VP_DW, VP_DH);
+            // Limit markers: per-row if LIMIT CV is patched, otherwise one global line.
+            if (conn)
+            {
+                if (limitCvConn)
+                {
+                    // Per-voice vertical tick at x = limit.
+                    for (int c = 0; c < n; ++c)
+                    {
+                        float y = VP_ROW0 + (float)c * VP_PITCH;
+                        float lx = VP_BX0 + VP_BW * (perChLimit[c] / 2.f);
+                        nvgBeginPath(vg);
+                        nvgMoveTo(vg, lx, y - 1.f);
+                        nvgLineTo(vg, lx, y + 7.f);
+                        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 200));
+                        nvgStrokeWidth(vg, 1.f);
+                        nvgStroke(vg);
+                    }
+                }
+                else
+                {
+                    // One global vertical line + downward triangle at the top.
+                    float lx = VP_BX0 + VP_BW * (globalLimit / 2.f);
+                    nvgBeginPath(vg);
+                    nvgMoveTo(vg, lx, VP_HEAD_LINE + 4.f);
+                    nvgLineTo(vg, lx, VP_ROW0 + 16.f * VP_PITCH - 2.f);
+                    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 230));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                    nvgBeginPath(vg);
+                    nvgMoveTo(vg, lx - 3.5f, VP_HEAD_LINE + 1.5f);
+                    nvgLineTo(vg, lx + 3.5f, VP_HEAD_LINE + 1.5f);
+                    nvgLineTo(vg, lx, VP_HEAD_LINE + 6.f);
+                    nvgClosePath(vg);
+                    nvgFillColor(vg, nvgRGB(255, 255, 255));
+                    nvgFill(vg);
+                }
+            }
 
-        char buf[40];
-        snprintf(buf, sizeof(buf), "GLOBAL %.2fX", globalLimit);
-        drawText(vg, 8.f, VP_DH - 9.f, buf, 7.f, nvgRGBA(0xff, 0xe6, 0x80, 220), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        if (limitCvConn) {
-            snprintf(buf, sizeof(buf), "CH %d LIMIT CV", n);
-            drawText(vg, VP_DW - 8.f, VP_DH - 9.f, buf, 7.f, nvgRGBA(0xff, 0xa0, 0x40, 210), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
-        } else {
-            snprintf(buf, sizeof(buf), conn ? "CH %d" : "CH %d UNITY", n);
-            drawText(vg, VP_DW - 8.f, VP_DH - 9.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            // Footer readouts: GLOBAL x.xxX on the left, status on the right.
+            char buf[40];
+            snprintf(buf, sizeof(buf), "GLOBAL %.2fX", globalLimit);
+            ag::text(vg, 8.f, VP_FOOT_Y, buf, 7.f, ag::textCol(), ag::ALIGN_L, 0.5f);
+            if (limitCvConn)
+            {
+                snprintf(buf, sizeof(buf), "CH %d LIM CV", n);
+                ag::text(vg, VP_DW - 8.f, VP_FOOT_Y, buf, 7.f, ag::warm(), ag::ALIGN_R, 0.5f);
+            }
+            else
+            {
+                snprintf(buf, sizeof(buf), conn ? "CH %d" : "CH %d UNITY", n);
+                ag::text(vg, VP_DW - 8.f, VP_FOOT_Y, buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
+            }
+            Widget::drawLayer(args, layer);
         }
-        Widget::drawLayer(args, layer);
-    }
-};
+    };
 
 } // namespace
 
-struct VCAPolyWidget : ModuleWidget {
-    VCAPolyWidget(VCAPoly* module) {
+// ------------------------------------------------------------
+// VCAPolyWidget — Rack widget.
+//   * panel background, knob arc, screws
+//   * display + GLOBAL LIMIT knob
+//   * four jacks: AUDIO, ENV, LIMIT, OUT
+// ------------------------------------------------------------
+struct VCAPolyWidget : ModuleWidget
+{
+    VCAPolyWidget(VCAPoly *module)
+    {
         setModule(module);
         box.size = Vec(VP_W, VP_H);
 
         addChild(new VPPanel());
+        addChild(new VPKnobArc(module));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
@@ -414,11 +514,12 @@ struct VCAPolyWidget : ModuleWidget {
         addChild(new VPDisplay(module));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(VP_W / 2.f, VP_KNOBY), module, VCAPoly::PARAM_LIMIT));
 
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(0), VP_JY), module, VCAPoly::INPUT_AUDIO));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(1), VP_JY), module, VCAPoly::INPUT_ENV));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(2), VP_JY), module, VCAPoly::INPUT_LIMIT_CV));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vpJx(3), VP_JY), module, VCAPoly::OUTPUT_AUDIO));
+        // Jacks: audio in, env in, limit CV in, audio out.
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(0), VP_JTOP + VP_JDY), module, VCAPoly::INPUT_AUDIO));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(1), VP_JTOP + VP_JDY), module, VCAPoly::INPUT_ENV));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(2), VP_JTOP + VP_JDY), module, VCAPoly::INPUT_LIMIT_CV));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vpJx(3), VP_JTOP + VP_JDY), module, VCAPoly::OUTPUT_AUDIO));
     }
 };
 
-Model* modelVCAPoly = createModel<VCAPoly, VCAPolyWidget>("VCAPoly");
+Model *modelVCAPoly = createModel<VCAPoly, VCAPolyWidget>("VCAPoly");

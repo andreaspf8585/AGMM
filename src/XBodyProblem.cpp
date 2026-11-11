@@ -1,3 +1,23 @@
+// ============================================================================
+// XBodyProblem — N-body gravity LFO (28 HP Rack module)
+// ----------------------------------------------------------------------------
+// Overview:
+//   * Simulates 2..10 point masses in a unit square under mutual gravity.
+//     The simulation is driven as a polyphonic LFO: per-mass X, Y, speed
+//     and wall-event triggers are output as separate poly channels.
+//   * MASSES    number of bodies (2..10)
+//     SPEED     simulation speed multiplier (exp2, +/-4 octaves)
+//     GRAVITY   gravitational constant multiplier (exp2, +/-4 octaves)
+//     RANGE     output voltage mapping (0..1, -1..1, -5..5, 0..10, -10..10)
+//     SOFTEN    softening length (close-encounter smoothing)
+//     TRAIL     trail length in the display (0..1)
+//     WALLS     wrap-around (Pac-Man) or bounce
+//     MASSES    equal masses or random per-body masses
+//   * RESET / KICK buttons (with a RESET jack) restart or randomise
+//     velocities. Simulation state persists through patch reload.
+//   * Big square display shows bodies, velocity vectors, gravity links,
+//     trails, wall style, centre of mass (bounce mode), and readouts.
+// ============================================================================
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
@@ -54,7 +74,15 @@ static inline float xbMap(float v, int range)
 }
 
 // ------------------------------------------------------------
-// Module
+// Module — N-body simulation + polyphonic LFO.
+//
+// All bodies live in a unit square (x,y in [0,1], +y up). Forces come
+// from soft Newtonian gravity: a = G * (m / (r^2 + eps^2)) * unit(r),
+// with the acceleration capped per body to keep close encounters tame.
+//
+// Integration is leapfrog (kick-drift-kick) with up to 16 substeps per
+// sample so `SPEED` can go very high without losing stability. A simple
+// NaN guard resets the system if anything blows up.
 // ------------------------------------------------------------
 struct XBodyProblem : Module
 {
@@ -92,31 +120,45 @@ struct XBodyProblem : Module
 		LIGHTS_LEN
 	};
 
-	// Simulation state (unit square, +y up)
-	float px[XB_MAXN] = {}, py[XB_MAXN] = {};
-	float vx[XB_MAXN] = {}, vy[XB_MAXN] = {};
-	float ax[XB_MAXN] = {}, ay[XB_MAXN] = {};
-	float rm[XB_MAXN] = {}; // random masses
-	int n = 2;
-	bool needAcc = true;
+	// --------------------------------------------------------
+	// Simulation state (unit square, +y up).
+	// --------------------------------------------------------
+	float px[XB_MAXN] = {}, py[XB_MAXN] = {}; // positions
+	float vx[XB_MAXN] = {}, vy[XB_MAXN] = {}; // velocities
+	float ax[XB_MAXN] = {}, ay[XB_MAXN] = {}; // accelerations
+	float rm[XB_MAXN] = {};					  // random masses (used when MASSMODE = random)
+	int n = 2;								  // current number of bodies
+	bool needAcc = true;					  // recompute accelerations on next step
 
-	// Settings (saved)
+	// --------------------------------------------------------
+	// Settings (saved with the patch).
+	// --------------------------------------------------------
 	bool paused = false;
-	bool zeroMomentum = true;
+	bool zeroMomentum = true; // subtract bulk momentum on reset
 
 	dsp::SchmittTrigger resetBtnTrig, resetJackTrig, kickTrig;
 	dsp::PulseGenerator evPulse[XB_MAXN];
 
-	// Display data
-	float trX[XB_MAXN][XB_TN] = {};
+	// --------------------------------------------------------
+	// Display data (written by the audio thread, read by the UI thread;
+	// a torn read is only cosmetic).
+	// --------------------------------------------------------
+	float trX[XB_MAXN][XB_TN] = {}; // trails (unit square)
 	float trY[XB_MAXN][XB_TN] = {};
-	int trHead = 0, trCount = 0;
-	float trTimer = 0.f;
+	int trHead = 0, trCount = 0; // trail ring write head / count
+	float trTimer = 0.f;		 // time since last trail point
+
+	// Last-frame readouts.
 	float vG = 0.05f, vEps = 0.03f, vSpeed = 1.f, vKE = 0.f;
 	bool vWrap = true, vRandMass = false;
 	int vRange = 2;
-	float resetFlash = 0.f, kickFlash = 0.f, eventFlash[XB_MAXN] = {};
 
+	float resetFlash = 0.f, kickFlash = 0.f, eventFlash[XB_MAXN] = {}; // LED / event decays
+
+	// --------------------------------------------------------
+	// Constructor — configure params, inputs, outputs, lights;
+	// then take an initial random start.
+	// --------------------------------------------------------
 	XBodyProblem()
 	{
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -143,10 +185,13 @@ struct XBodyProblem : Module
 		doReset();
 	}
 
+	// Uniform random in [0, 1).
 	static float rnd() { return rack::random::uniform(); }
 
+	// Per-body mass: 1 when equal masses, or the stored random mass.
 	float massOf(int i) const { return vRandMass ? rm[i] : 1.f; }
 
+	// Random position / velocity / mass for body i (keeps clear of the edges).
 	void initBody(int i)
 	{
 		px[i] = 0.1f + 0.8f * rnd();
@@ -156,6 +201,10 @@ struct XBodyProblem : Module
 		rm[i] = 0.4f + 2.f * rnd();
 	}
 
+	// --------------------------------------------------------
+	// Fresh random start. Also (optionally) removes bulk momentum
+	// so the system doesn't drift as a whole, then clears the trail.
+	// --------------------------------------------------------
 	void doReset()
 	{
 		for (int i = 0; i < XB_MAXN; ++i)
@@ -183,6 +232,7 @@ struct XBodyProblem : Module
 		needAcc = true;
 	}
 
+	// Rack reset: unpause and start a new random system.
 	void onReset() override
 	{
 		paused = false;
@@ -190,6 +240,13 @@ struct XBodyProblem : Module
 		doReset();
 	}
 
+	// --------------------------------------------------------
+	// Compute pairwise gravitational accelerations.
+	//   * wrap: use the minimum-image distance (Pac-Man topology)
+	//   * soft: add eps^2 in the denominator to avoid singularities
+	//   * each body's acceleration magnitude is capped at 400 so a
+	//     close encounter can't blow the integrator up
+	// --------------------------------------------------------
 	void computeAcc(bool wrap, float G, float eps2)
 	{
 		for (int i = 0; i < n; ++i)
@@ -201,11 +258,12 @@ struct XBodyProblem : Module
 				float dx = px[j] - px[i], dy = py[j] - py[i];
 				if (wrap)
 				{
+					// Minimum-image: move the pair to the closest copy.
 					dx -= std::round(dx);
 					dy -= std::round(dy);
 				}
 				float r2 = dx * dx + dy * dy + eps2;
-				float f = G / (r2 * std::sqrt(r2));
+				float f = G / (r2 * std::sqrt(r2)); // G / r^3
 				float mi = massOf(i), mj = massOf(j);
 				ax[i] += f * mj * dx;
 				ay[i] += f * mj * dy;
@@ -224,11 +282,17 @@ struct XBodyProblem : Module
 		}
 	}
 
-	// one leapfrog step; flags events in ev[]
+	// --------------------------------------------------------
+	// One leapfrog (kick-drift-kick) step:
+	//   half-kick -> drift -> (recompute acc) -> half-kick
+	// Position updates apply wrap or bounce and set ev[i] when a
+	// wall is hit. Per-body speed is capped at 3 units/sec.
+	// --------------------------------------------------------
 	void physicsStep(float h, bool wrap, float G, float eps2, bool *ev)
 	{
 		for (int i = 0; i < n; ++i)
 		{
+			// First half-kick, speed cap, then drift.
 			vx[i] += ax[i] * 0.5f * h;
 			vy[i] += ay[i] * 0.5f * h;
 			float sp = std::sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
@@ -241,6 +305,7 @@ struct XBodyProblem : Module
 			py[i] += vy[i] * h;
 			if (wrap)
 			{
+				// Wrap: just fold the coordinate back into [0,1).
 				if (px[i] < 0.f || px[i] >= 1.f)
 				{
 					px[i] -= std::floor(px[i]);
@@ -254,6 +319,7 @@ struct XBodyProblem : Module
 			}
 			else
 			{
+				// Bounce: reflect the position and flip the velocity.
 				if (px[i] < 0.f)
 				{
 					px[i] = -px[i];
@@ -278,6 +344,7 @@ struct XBodyProblem : Module
 					vy[i] = -vy[i];
 					ev[i] = true;
 				}
+				// Defensive clamp in case the reflection overshoots.
 				px[i] = rack::math::clamp(px[i], 0.f, 1.f);
 				py[i] = rack::math::clamp(py[i], 0.f, 1.f);
 			}
@@ -285,11 +352,21 @@ struct XBodyProblem : Module
 		computeAcc(wrap, G, eps2);
 		for (int i = 0; i < n; ++i)
 		{
+			// Second half-kick.
 			vx[i] += ax[i] * 0.5f * h;
 			vy[i] += ay[i] * 0.5f * h;
 		}
 	}
 
+	// --------------------------------------------------------
+	// Main per-sample processing:
+	//  1. Read params, adapt the body count if it changed.
+	//  2. Handle RESET (button or jack) and KICK.
+	//  3. Run the physics with substeps (bounded total dt).
+	//  4. NaN guard -> full reset if anything misbehaves.
+	//  5. Emit X / Y / SPEED / EVENT (poly, one channel per body).
+	//  6. Advance display state: trail ring, readouts, LED flashes.
+	// --------------------------------------------------------
 	void process(const ProcessArgs &args) override
 	{
 		const float dt = args.sampleTime;
@@ -298,6 +375,7 @@ struct XBodyProblem : Module
 		int nP = rack::math::clamp((int)std::round(params[MASSES_PARAM].getValue()), 2, XB_MAXN);
 		if (nP != n)
 		{
+			// Seed any newly added bodies.
 			for (int i = n; i < nP; ++i)
 				initBody(i);
 			n = nP;
@@ -321,6 +399,7 @@ struct XBodyProblem : Module
 		}
 		if (kickTrig.process(params[KICK_PARAM].getValue(), 0.1f, 1.f))
 		{
+			// Add a random impulse to every body.
 			for (int i = 0; i < n; ++i)
 			{
 				float a = rnd() * 6.2831853f;
@@ -336,6 +415,7 @@ struct XBodyProblem : Module
 		}
 
 		// ---- physics ----
+		// Substep so the leapfrog integrator stays stable at high SPEED.
 		bool ev[XB_MAXN] = {};
 		if (!paused)
 		{
@@ -345,6 +425,7 @@ struct XBodyProblem : Module
 			for (int s = 0; s < sub; ++s)
 				physicsStep(h, wrap, G, eps2, ev);
 		}
+		// NaN guard: any non-finite state -> wipe and start over.
 		for (int i = 0; i < n; ++i)
 		{
 			if (!std::isfinite(px[i]) || !std::isfinite(py[i]) ||
@@ -356,6 +437,7 @@ struct XBodyProblem : Module
 		}
 
 		// ---- outputs ----
+		// Four poly outputs, one channel per body.
 		outputs[X_OUTPUT].setChannels(n);
 		outputs[Y_OUTPUT].setChannels(n);
 		outputs[VEL_OUTPUT].setChannels(n);
@@ -369,6 +451,7 @@ struct XBodyProblem : Module
 			outputs[VEL_OUTPUT].setVoltage(rack::math::clamp(sp / 1.5f, 0.f, 1.f) * 10.f, i);
 			if (ev[i])
 			{
+				// Trigger the wall-event pulse; also flash the display body.
 				evPulse[i].trigger(1e-3f);
 				eventFlash[i] = 1.f;
 			}
@@ -378,6 +461,7 @@ struct XBodyProblem : Module
 		}
 
 		// ---- display data ----
+		// Snapshot the readouts the UI wants (per-frame, cheap).
 		vG = G;
 		vEps = eps;
 		vSpeed = speed;
@@ -389,13 +473,14 @@ struct XBodyProblem : Module
 		lights[RESET_LIGHT].setBrightness(resetFlash);
 		lights[KICK_LIGHT].setBrightness(kickFlash);
 
+		// Trail commit at XB_TRAIL_HZ.
 		trTimer += dt;
 		const float st = 1.f / XB_TRAIL_HZ;
 		if (trTimer >= st)
 		{
 			trTimer -= st;
 			if (trTimer > st)
-				trTimer = 0.f;
+				trTimer = 0.f; // avoid drift after a long pause
 			for (int i = 0; i < n; ++i)
 			{
 				trX[i][trHead] = px[i];
@@ -407,6 +492,11 @@ struct XBodyProblem : Module
 		}
 	}
 
+	// --------------------------------------------------------
+	// Persist simulation state + settings. The full state (positions,
+	// velocities, masses) is saved so a patch reload continues exactly
+	// where it left off.
+	// --------------------------------------------------------
 	json_t *dataToJson() override
 	{
 		json_t *root = json_object();
@@ -430,6 +520,10 @@ struct XBodyProblem : Module
 		return root;
 	}
 
+	// --------------------------------------------------------
+	// Restore the fields written by dataToJson() (arrays are read
+	// best-effort and clamped by the caller's parameters).
+	// --------------------------------------------------------
 	void dataFromJson(json_t *root) override
 	{
 		json_t *j = json_object_get(root, "paused");
@@ -460,7 +554,7 @@ struct XBodyProblem : Module
 };
 
 // ------------------------------------------------------------
-// Knob table
+// Knob table (positions + tick counts + bipolar flag).
 // ------------------------------------------------------------
 struct XBKnob
 {
@@ -480,7 +574,7 @@ static const XBKnob XB_KNOBS[6] = {
 };
 
 // ------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace)
+// Theme + drawing helpers (anonymous namespace — UI-only)
 // ------------------------------------------------------------
 namespace
 {
@@ -495,6 +589,7 @@ namespace
 
 	NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
 
+	// Per-body display colours (cycled for N > 10).
 	NVGcolor bodyCol(int i)
 	{
 		static const unsigned char c[XB_MAXN][3] = {
@@ -502,6 +597,7 @@ namespace
 		return nvgRGB(c[i % XB_MAXN][0], c[i % XB_MAXN][1], c[i % XB_MAXN][2]);
 	}
 
+	// Cyan LED light template.
 	template <typename TBase = GrayModuleLightWidget>
 	struct TXBCyanLight : TBase
 	{
@@ -509,6 +605,7 @@ namespace
 	};
 	using XBCyanLight = TXBCyanLight<>;
 
+	// Load the shared ShareTechMono font.
 	void setFont(NVGcontext *vg)
 	{
 		std::shared_ptr<window::Font> font =
@@ -517,6 +614,7 @@ namespace
 			nvgFontFaceId(vg, font->handle);
 	}
 
+	// Single-line text renderer.
 	void drawText(NVGcontext *vg, float x, float y, const char *s, float size, NVGcolor col,
 				  int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f)
 	{
@@ -528,6 +626,7 @@ namespace
 		nvgText(vg, x, y, s, NULL);
 	}
 
+	// AGMM logo badge.
 	void drawLogo(NVGcontext *vg, float cx, float cy)
 	{
 		const float w = 64.f, h = 18.f;
@@ -561,6 +660,8 @@ namespace
 				 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
 	}
 
+	// Draw the arc of tick marks around a knob (major ticks on the ends
+	// and on the centre for odd counts).
 	void drawKnobTicks(NVGcontext *vg, float cx, float cy, float r0, float r1, int n = 11)
 	{
 		nvgLineCap(vg, NVG_ROUND);
@@ -579,17 +680,26 @@ namespace
 	}
 
 	// ------------------------------------------------------------
-	// Panel background
+	// XBPanelBackground — static panel chrome:
+	//   * panel base, gradient, scanlines, radial vignette
+	//   * top cyan-violet accent strip
+	//   * AGMM logo + title
+	//   * display bezel
+	//   * 6 knob cells with rings + tick marks
+	//   * CONTROL / I/O section header + 9 labelled cells
+	//   * footer strapline
 	// ------------------------------------------------------------
 	struct XBPanelBackground : TransparentWidget
 	{
 		XBPanelBackground() { box.size = Vec(XB_PANEL_W, XB_PANEL_H); }
 
+		// Centred dim label (used under knobs and inside cells).
 		void label(NVGcontext *vg, float x, float y, const char *txt)
 		{
 			drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
 		}
 
+		// Rounded control plate (single-colour, with a subtle gradient).
 		void plate(NVGcontext *vg, float x, float y, float w, float h)
 		{
 			nvgBeginPath(vg);
@@ -607,6 +717,7 @@ namespace
 			nvgStroke(vg);
 		}
 
+		// Dark radial ring behind a knob.
 		void ring(NVGcontext *vg, float cx, float cy, float r)
 		{
 			nvgBeginPath(vg);
@@ -619,6 +730,7 @@ namespace
 			nvgStroke(vg);
 		}
 
+		// Section header: centred cyan label flanked by fading rules.
 		void section(NVGcontext *vg, float y, const char *txt)
 		{
 			float x1 = 12.f, x2 = XB_PANEL_W - 12.f, cx = XB_PANEL_W / 2.f;
@@ -642,6 +754,7 @@ namespace
 			nvgStroke(vg);
 		}
 
+		// I/O cell: plate + tinted top bar + centred label.
 		// kind: 0 = input (orange), 1 = output (cyan), 2 = control (purple)
 		void cell(NVGcontext *vg, float cx, float cy, const char *txt, int kind)
 		{
@@ -664,11 +777,13 @@ namespace
 		{
 			NVGcontext *vg = args.vg;
 
+			// Background gradient.
 			nvgBeginPath(vg);
 			nvgRect(vg, 0, 0, XB_PANEL_W, XB_PANEL_H);
 			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, XB_PANEL_H, colBgTop(), colBgBottom()));
 			nvgFill(vg);
 
+			// Scanlines.
 			nvgStrokeWidth(vg, 1.f);
 			for (int y = 0; y < (int)XB_PANEL_H; y += 3)
 			{
@@ -679,6 +794,7 @@ namespace
 				nvgStroke(vg);
 			}
 
+			// Radial vignette.
 			nvgBeginPath(vg);
 			nvgRect(vg, 0, 0, XB_PANEL_W, XB_PANEL_H);
 			nvgFillPaint(vg, nvgRadialGradient(vg, XB_PANEL_W / 2.f, XB_PANEL_H * 0.4f,
@@ -686,18 +802,21 @@ namespace
 											   nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
 			nvgFill(vg);
 
+			// Border.
 			nvgBeginPath(vg);
 			nvgRect(vg, 0.5f, 0.5f, XB_PANEL_W - 1.f, XB_PANEL_H - 1.f);
 			nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
 			nvgStrokeWidth(vg, 1.f);
 			nvgStroke(vg);
 
+			// Top accent strip (cyan -> violet).
 			nvgBeginPath(vg);
 			nvgRect(vg, 0, 0, XB_PANEL_W, 2.f);
 			nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, XB_PANEL_W, 0,
 											   nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
 			nvgFill(vg);
 
+			// Logo + title.
 			drawLogo(vg, XB_PANEL_W / 2.f, 15.f);
 			drawText(vg, XB_PANEL_W / 2.f, 32.f, "XBODYPROBLEM", 12.f, colText(),
 					 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
@@ -728,7 +847,7 @@ namespace
 			nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
 			nvgFill(vg);
 
-			// ---- Knobs ----
+			// ---- Knobs: ring + ticks + label ----
 			for (int k = 0; k < 6; ++k)
 			{
 				const XBKnob &kn = XB_KNOBS[k];
@@ -752,7 +871,10 @@ namespace
 	};
 
 	// ------------------------------------------------------------
-	// Live value arcs around the knobs
+	// XBKnobArcs — live value arcs around the 6 knobs.
+	//   * bipolar knobs draw from centre (0) outwards
+	//     (cyan above 0, warm below)
+	//   * unipolar knobs draw from the leftmost position.
 	// ------------------------------------------------------------
 	struct XBKnobArcs : TransparentWidget
 	{
@@ -764,6 +886,7 @@ namespace
 		{
 			NVGcontext *vg = args.vg;
 			const float R = 17.2f;
+			// Arc from ~225° to ~315° (CCW around the knob face).
 			const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
 			const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
 
@@ -771,6 +894,7 @@ namespace
 			{
 				const XBKnob &kn = XB_KNOBS[k];
 
+				// Track.
 				nvgBeginPath(vg);
 				nvgArc(vg, kn.x, kn.y, R, a0, a1, NVG_CW);
 				nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
@@ -778,6 +902,7 @@ namespace
 				nvgLineCap(vg, NVG_ROUND);
 				nvgStroke(vg);
 
+				// Value arc (from centre for bipolar, from left otherwise).
 				if (!module)
 					continue;
 				float v = module->paramQuantities[kn.param]->getScaledValue();
@@ -790,12 +915,14 @@ namespace
 				float e = a0 + (a1 - a0) * hi;
 				NVGcolor col = (kn.bipolar && v < 0.5f) ? colWarm() : colAccent();
 
+				// Soft underglow.
 				nvgBeginPath(vg);
 				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
 				nvgStrokeColor(vg, withA(col, 0.18f));
 				nvgStrokeWidth(vg, 5.f);
 				nvgStroke(vg);
 
+				// Main stroke.
 				nvgBeginPath(vg);
 				nvgArc(vg, kn.x, kn.y, R, s, e, NVG_CW);
 				nvgStrokeColor(vg, withA(col, 0.95f));
@@ -806,7 +933,13 @@ namespace
 	};
 
 	// ------------------------------------------------------------
-	// The big square display
+	// XBDisplayWidget — the live 220x220 square simulation display.
+	//   draw()       : static background (screen fill + grid + edge ticks).
+	//   drawLayer(1) : bodies, gravity links, trails, wall style,
+	//                  centre of mass (bounce mode), readouts,
+	//                  scanlines / vignette / glass.
+	// If module == nullptr (browser preview) a static 4-body demo
+	// is drawn.
 	// ------------------------------------------------------------
 	struct XBDisplayWidget : TransparentWidget
 	{
@@ -824,12 +957,14 @@ namespace
 			NVGcontext *vg = args.vg;
 			const float S = XB_S;
 
+			// Screen radial fill.
 			nvgBeginPath(vg);
 			nvgRoundedRect(vg, 0, 0, S, S, 4.f);
 			nvgFillPaint(vg, nvgRadialGradient(vg, S / 2.f, S / 2.f, 10.f, S * 0.8f,
 											   nvgRGB(0x0d, 0x1a, 0x24), nvgRGB(0x03, 0x06, 0x09)));
 			nvgFill(vg);
 
+			// Tenth grid (mid line brighter).
 			for (int i = 1; i < 10; ++i)
 			{
 				float t = S * (float)i / 10.f;
@@ -843,7 +978,7 @@ namespace
 				nvgStrokeWidth(vg, 1.f);
 				nvgStroke(vg);
 			}
-			// fine ticks every 0.05 on the edges
+			// Fine ticks every 0.05 on the edges.
 			nvgBeginPath(vg);
 			for (int i = 1; i < 20; ++i)
 			{
@@ -864,6 +999,8 @@ namespace
 			Widget::draw(args);
 		}
 
+		// Draw one body: outer glow (grows with `glow`), shaded circle,
+		// outline, and a specular highlight.
 		void drawBody(NVGcontext *vg, float x, float y, float r, NVGcolor col, float glow)
 		{
 			NVGcolor hi = nvgLerpRGBA(col, nvgRGB(255, 255, 255), 0.65f);
@@ -892,6 +1029,7 @@ namespace
 			nvgFill(vg);
 		}
 
+		// ---- live simulation rendering ----
 		void drawLayer(const DrawArgs &args, int layer) override
 		{
 			if (layer != 1)
@@ -902,12 +1040,13 @@ namespace
 			NVGcontext *vg = args.vg;
 			const float S = XB_S;
 
-			// ----- snapshot -----
+			// ----- snapshot (module or demo) -----
 			int n = 4;
 			float px[XB_MAXN], py[XB_MAXN], vx[XB_MAXN], vy[XB_MAXN], mass[XB_MAXN], evf[XB_MAXN];
 			bool wrap = true, paused = false, randMass = false;
 			float G = 0.05f, eps = 0.03f, speed = 1.f, ke = 0.f, trailK = 0.6f;
 			int range = 2, head = 0, count = 0;
+			// Per-draw copy of the trail history (avoids racing the audio thread).
 			static float trX[XB_MAXN][XB_TN], trY[XB_MAXN][XB_TN];
 
 			if (module)
@@ -938,7 +1077,7 @@ namespace
 			}
 			else
 			{
-				// demo for the module browser
+				// demo for the module browser: 4 bodies on a circular orbit
 				for (int i = 0; i < XB_MAXN; ++i)
 				{
 					float a = 6.2831853f * (float)i / 4.f + 0.4f;
@@ -960,6 +1099,7 @@ namespace
 			}
 			n = rack::math::clamp(n, 2, XB_MAXN);
 
+			// Unit-square -> pixel mapping (+y up -> screen -y).
 			auto SX = [&](float x)
 			{ return x * S; };
 			auto SY = [&](float y)
@@ -969,6 +1109,7 @@ namespace
 			nvgScissor(vg, 0, 0, S, S);
 
 			// ================= gravity links =================
+			// Faint line between every pair, alpha/width scale with F.
 			nvgLineCap(vg, NVG_ROUND);
 			for (int i = 0; i < n; ++i)
 			{
@@ -991,6 +1132,7 @@ namespace
 					nvgLineTo(vg, SX(px[i] + dx), SY(py[i] + dy));
 					if (wrap)
 					{
+						// Mirror link (Pac-Man: also draw the wrapped copy).
 						nvgMoveTo(vg, SX(px[j]), SY(py[j]));
 						nvgLineTo(vg, SX(px[j] - dx), SY(py[j] - dy));
 					}
@@ -1001,6 +1143,8 @@ namespace
 			}
 
 			// ================= trails =================
+			// Draw the trail as K-segment chunks with quadratic alpha
+			// (older = dimmer) and a break when the body wrapped.
 			int L = std::min(count, (int)std::round(trailK * (float)XB_TN));
 			if (L >= 2)
 			{
@@ -1020,6 +1164,7 @@ namespace
 						{
 							int ia = ((head - L + k - 1) % XB_TN + XB_TN) % XB_TN;
 							int ib = ((head - L + k) % XB_TN + XB_TN) % XB_TN;
+							// Detect a wrap "jump" and start a new sub-path.
 							bool jump = std::fabs(trX[i][ib] - trX[i][ia]) > 0.5f ||
 										std::fabs(trY[i][ib] - trY[i][ia]) > 0.5f;
 							if (jump)
@@ -1035,6 +1180,8 @@ namespace
 			}
 
 			// ================= centre of mass (bounce mode) =================
+			// A small cross marks the mass-weighted centre; only useful
+			// when the bodies are confined to the box (bounce mode).
 			if (!wrap)
 			{
 				float mx = 0.f, my = 0.f, mt = 0.f;
@@ -1057,6 +1204,8 @@ namespace
 			}
 
 			// ================= bodies (with wrap ghosts near the edges) =================
+			// In wrap mode the same body is drawn up to 9 times (3x3 grid)
+			// so bodies straddling an edge appear on both sides.
 			for (int i = 0; i < n; ++i)
 			{
 				float r = 3.5f + 2.8f * std::cbrt(mass[i]);
@@ -1071,7 +1220,7 @@ namespace
 						if (x < -r * 3.f || x > S + r * 3.f || y < -r * 3.f || y > S + r * 3.f)
 							continue;
 
-						// velocity vector
+						// Velocity vector.
 						nvgBeginPath(vg);
 						nvgMoveTo(vg, x, y);
 						nvgLineTo(vg, x + vx[i] * S * 0.22f, y - vy[i] * S * 0.22f);
@@ -1079,6 +1228,7 @@ namespace
 						nvgStrokeWidth(vg, 1.f);
 						nvgStroke(vg);
 
+						// Body + number.
 						drawBody(vg, x, y, r, col, evf[i]);
 						char b[4];
 						snprintf(b, sizeof(b), "%d", i + 1);
@@ -1091,7 +1241,8 @@ namespace
 			// ================= wall style =================
 			if (wrap)
 			{
-				// dashed cyan frame with small arrows: leaving one side re-enters on the other
+				// Dashed cyan frame with small dashes: leaving one side
+				// re-enters on the other.
 				nvgBeginPath(vg);
 				for (float t = 0.f; t < S; t += 8.f)
 				{
@@ -1111,6 +1262,7 @@ namespace
 			}
 			else
 			{
+				// Warm solid frame + faint halo for bounce mode.
 				nvgBeginPath(vg);
 				nvgRoundedRect(vg, 1.f, 1.f, S - 2.f, S - 2.f, 3.f);
 				nvgStrokeColor(vg, withA(colWarm(), 0.75f));
@@ -1130,18 +1282,23 @@ namespace
 				NVGcolor cm = nvgRGBA(0xff, 0xe6, 0x80, 225);
 				NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 235);
 
+				// Top-left: N, wall style, mass mode.
 				snprintf(buf, sizeof(buf), "N %02d  %s%s", n, wrap ? "WRAP" : "BOUNCE", randMass ? "  RND" : "");
 				drawText(vg, 8.f, 10.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
 
+				// Top-right: X/Y range.
 				snprintf(buf, sizeof(buf), "X/Y %s V", XB_RANGE_NAMES[range]);
 				drawText(vg, S - 8.f, 10.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
 
+				// Bottom-left: speed + gravity multipliers.
 				snprintf(buf, sizeof(buf), "SPD x%.2f  G x%.2f", speed, G / 0.05f);
 				drawText(vg, 8.f, S - 10.f, buf, 6.5f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
 
+				// Bottom-right: kinetic energy.
 				snprintf(buf, sizeof(buf), "KE %.3f", ke);
 				drawText(vg, S - 8.f, S - 10.f, buf, 6.5f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
 
+				// Centre: pause indicator.
 				if (paused)
 					drawText(vg, S / 2.f, 10.f, "PAUSED", 7.f, colWarm(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
 			}
@@ -1174,7 +1331,12 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget
+// XBodyProblemWidget — Rack widget.
+//   * panel background + knob arcs + display + screws
+//   * six knobs (three on each side of the square)
+//   * CONTROL / I/O row: 2 switches, RESET/KICK buttons with LEDs,
+//     1 reset input jack, 4 poly output jacks (X / Y / SPEED / EVENT)
+//   * context menu: pause, zero-momentum-on-reset, new random start
 // ------------------------------------------------------------
 struct XBodyProblemWidget : ModuleWidget
 {
@@ -1193,29 +1355,34 @@ struct XBodyProblemWidget : ModuleWidget
 
 		addChild(new XBDisplayWidget(module));
 
+		// Six knobs (positions from XB_KNOBS).
 		for (int k = 0; k < 6; ++k)
 		{
 			addParam(createParamCentered<RoundSmallBlackKnob>(
 				Vec(XB_KNOBS[k].x, XB_KNOBS[k].y), module, XB_KNOBS[k].param));
 		}
 
-		// control + I/O row
+		// Control + I/O row.
 		addParam(createParamCentered<CKSS>(Vec(xbIoX(0), XB_IO_Y), module, XBodyProblem::WALL_PARAM));
 		addParam(createParamCentered<CKSS>(Vec(xbIoX(1), XB_IO_Y), module, XBodyProblem::MASSMODE_PARAM));
 
+		// RESET button + LED + jack.
 		addParam(createParamCentered<LEDButton>(Vec(xbIoX(2), XB_IO_Y), module, XBodyProblem::RESET_PARAM));
 		addChild(createLightCentered<MediumLight<XBCyanLight>>(Vec(xbIoX(2), XB_IO_Y), module, XBodyProblem::RESET_LIGHT));
 		addInput(createInputCentered<DarkPJ301MPort>(Vec(xbIoX(3), XB_IO_Y), module, XBodyProblem::RESET_INPUT));
 
+		// KICK button + LED.
 		addParam(createParamCentered<LEDButton>(Vec(xbIoX(4), XB_IO_Y), module, XBodyProblem::KICK_PARAM));
 		addChild(createLightCentered<MediumLight<XBCyanLight>>(Vec(xbIoX(4), XB_IO_Y), module, XBodyProblem::KICK_LIGHT));
 
+		// Poly outputs.
 		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(xbIoX(5), XB_IO_Y), module, XBodyProblem::X_OUTPUT));
 		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(xbIoX(6), XB_IO_Y), module, XBodyProblem::Y_OUTPUT));
 		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(xbIoX(7), XB_IO_Y), module, XBodyProblem::VEL_OUTPUT));
 		addOutput(createOutputCentered<DarkPJ301MPort>(Vec(xbIoX(8), XB_IO_Y), module, XBodyProblem::EVENT_OUTPUT));
 	}
 
+	// Context menu: pause, zero-momentum toggle, new random start.
 	void appendContextMenu(ui::Menu *menu) override
 	{
 		XBodyProblem *module = dynamic_cast<XBodyProblem *>(this->module);

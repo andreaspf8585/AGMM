@@ -45,29 +45,41 @@
 static const float LD_PANEL_W = RACK_GRID_WIDTH * 24; // 360
 static const float LD_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Display (320 x 110): header readouts, waveform scope (left), partials (right)
+// Display (320 x 112): header row, two framed plots, footer row. Bezel adds 4 px around it.
 static const float LD_DISP_W = 320.f;
-static const float LD_DISP_H = 110.f;
+static const float LD_DISP_H = 112.f;
 static const float LD_DISP_X = (LD_PANEL_W - LD_DISP_W) / 2.f; // 20
-static const float LD_DISP_Y = 24.f;
+static const float LD_DISP_Y = 26.f;
+static const float LD_HEAD_LINE = 15.5f;                       // hairline under the header row
+static const float LD_PLOT_Y = 20.f, LD_PLOT_H = 72.f;         // both plots share this band
+static const float LD_FOOT_LINE = 96.5f;                       // hairline above the footer row
+static const float LD_FOOT_TXT = LD_DISP_H - 8.f;              // footer text centre line
+static const float LD_SCOPE_X = 8.f,   LD_SCOPE_W = 154.f;     // waveform scope
+static const float LD_SPEC_X  = 168.f, LD_SPEC_W  = 144.f;     // partial spectrum
 
-// Row 1 (FREQ, FINE, WAVE, PULSE) — 4 knobs
+// Control cells: 76 px wide, label centred 10 px below the top edge, control centre 32 px below it
 static const float LD_CELL_W = 76.f;
-static const float LD_CELL_H = 58.f;
-static const float LD_ROW1_TOP = 154.f;
-static const float LD_ROW1_Y = LD_ROW1_TOP + 32.f; // 186
-static const float LD_ROW1_X[4] = {45.f, 135.f, 225.f, 315.f};
+static const float LD_CELL_H = 52.f;
+static const float LD_CTL_DY = 32.f;
 
-// Row 2 (SPEED, OSCS, DIR) — 3 controls
+// Row 1 (FREQ, FINE, WAVE, PULSE)
+static const float LD_VCO_HDR  = 150.f;
+static const float LD_ROW1_TOP = 158.f;
+static const float LD_ROW1_Y   = LD_ROW1_TOP + LD_CTL_DY;
+static const float LD_ROW1_X[4] = {54.f, 138.f, 222.f, 306.f};
+
+// Row 2 (SPEED, OSCS, DIR)
+static const float LD_SHEP_HDR = 220.f;
 static const float LD_ROW2_TOP = 228.f;
-static const float LD_ROW2_Y = LD_ROW2_TOP + 32.f; // 260
-static const float LD_ROW2_X[3] = {90.f, 180.f, 270.f};
+static const float LD_ROW2_Y   = LD_ROW2_TOP + LD_CTL_DY;
+static const float LD_ROW2_X[3] = {96.f, 180.f, 264.f};
 
-// I/O row (V/OCT, L OUT, R OUT) — 3 jacks
-static const float LD_IO_TOP = 304.f;
-static const float LD_IO_H = 46.f;
-static const float LD_IO_Y = LD_IO_TOP + 26.f; // 330
-static const float LD_IO_X[3] = {90.f, 180.f, 270.f};
+// I/O row (V/OCT, OUT L, OUT R): jack centred 30 px below the cell top
+static const float LD_IO_HDR = 290.f;
+static const float LD_IO_TOP = 298.f;
+static const float LD_IO_H   = 50.f;
+static const float LD_IO_Y   = LD_IO_TOP + 30.f;
+static const float LD_IO_X[3] = {96.f, 180.f, 264.f};
 
 // ------------------------------------------------------------
 // Shared helpers
@@ -471,20 +483,17 @@ namespace
             ag::panelBase(vg, LD_PANEL_W, LD_PANEL_H, "LADDER");
             ag::bezel(vg, LD_DISP_X, LD_DISP_Y, LD_DISP_W, LD_DISP_H);
 
-            // VCO section
-            ag::sectionHeader(vg, LD_PANEL_W, 146.f, "VCO", 10.f);
+            ag::sectionHeader(vg, LD_PANEL_W, LD_VCO_HDR, "VCO", 16.f);
             const char *vcoLabels[4] = {"FREQ", "FINE", "WAVE", "PULSE"};
             for (int i = 0; i < 4; ++i)
                 ag::cell(vg, LD_ROW1_X[i], LD_ROW1_TOP, LD_CELL_W, LD_CELL_H, vcoLabels[i]);
 
-            // SHEPARD section
-            //ag::sectionHeader(vg, LD_PANEL_W, 220.f, "SHEPARD", 10.f);
+            ag::sectionHeader(vg, LD_PANEL_W, LD_SHEP_HDR, "SHEPARD", 16.f);
             const char *shepLabels[3] = {"SPEED", "OSCS", "DIR"};
             for (int i = 0; i < 3; ++i)
                 ag::cell(vg, LD_ROW2_X[i], LD_ROW2_TOP, LD_CELL_W, LD_CELL_H, shepLabels[i]);
 
-            // I/O
-            ag::sectionHeader(vg, LD_PANEL_W, 296.f, "I / O", 10.f);
+            ag::sectionHeader(vg, LD_PANEL_W, LD_IO_HDR, "I / O", 16.f);
             ag::cell(vg, LD_IO_X[0], LD_IO_TOP, LD_CELL_W, LD_IO_H, "V/OCT");
             ag::cell(vg, LD_IO_X[1], LD_IO_TOP, LD_CELL_W, LD_IO_H, "OUT L", true);
             ag::cell(vg, LD_IO_X[2], LD_IO_TOP, LD_CELL_W, LD_IO_H, "OUT R", true);
@@ -494,7 +503,13 @@ namespace
     };
 
     // ------------------------------------------------------------
-    // Display: header, live waveform (left), partial bars (right)
+    // Display
+    //   header : pitch | waveform | partial count + direction
+    //   left   : scope of the summed waveform (4 ms window)
+    //   right  : partials on a log-frequency axis. Each stem slides through the fixed
+    //            Gaussian window as the sweep advances; ticks on the baseline are the
+    //            rungs of the ladder at sweep = 0. Stem colour = stereo position.
+    //   footer : scope window | pan legend, sweep position, axis direction
     // ------------------------------------------------------------
     struct LDDisplay : TransparentWidget
     {
@@ -512,15 +527,32 @@ namespace
 
             ag::screen(vg, 0.f, 0.f, LD_DISP_W, LD_DISP_H);
 
+            // separators under the header and above the footer
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 8.f, 15.5f);
-            nvgLineTo(vg, LD_DISP_W - 8.f, 15.5f);
+            nvgMoveTo(vg, 8.f, LD_HEAD_LINE);
+            nvgLineTo(vg, LD_DISP_W - 8.f, LD_HEAD_LINE);
+            nvgMoveTo(vg, 8.f, LD_FOOT_LINE);
+            nvgLineTo(vg, LD_DISP_W - 8.f, LD_FOOT_LINE);
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            ag::plotFrame(vg, 8.f, 20.f, 154.f, 80.f);
-            ag::plotFrame(vg, 168.f, 20.f, LD_DISP_W - 176.f, 80.f);
+            ag::plotFrame(vg, LD_SCOPE_X, LD_PLOT_Y, LD_SCOPE_W, LD_PLOT_H);
+            ag::plotFrame(vg, LD_SPEC_X, LD_PLOT_Y, LD_SPEC_W, LD_PLOT_H);
+
+            // scope graticule: 4 time divisions, zero line
+            nvgBeginPath(vg);
+            for (int k = 1; k < 4; ++k)
+            {
+                float x = LD_SCOPE_X + LD_SCOPE_W * (float)k / 4.f;
+                nvgMoveTo(vg, x, LD_PLOT_Y + 1.f);
+                nvgLineTo(vg, x, LD_PLOT_Y + LD_PLOT_H - 1.f);
+            }
+            nvgMoveTo(vg, LD_SCOPE_X + 1.f, LD_PLOT_Y + LD_PLOT_H / 2.f);
+            nvgLineTo(vg, LD_SCOPE_X + LD_SCOPE_W - 1.f, LD_PLOT_Y + LD_PLOT_H / 2.f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
 
             Widget::draw(args);
         }
@@ -565,6 +597,7 @@ namespace
             }
             else
             {
+                // module browser preview
                 pitchSemis = 0.f;
                 sweep = 3.f;
                 wave = 0;
@@ -589,36 +622,38 @@ namespace
                     pan[i] = std::max(-1.f, std::min(1.f, dist / sigma * 0.55f));
                 }
             }
+            numOscs = std::max(1, std::min(numOscs, (int)Ladder::LD_MAX_PARTIALS));
 
-            float freq = ldSemisToHz(pitchSemis);
+            const float W = LD_DISP_W;
             char buf[64];
-            char note[16];
-            ldFreqToNote(freq, note, sizeof(note));
 
+            // ---- header: pitch | waveform | partials + direction ----
+            float freq = ldSemisToHz(pitchSemis);
             if (mode == Ladder::DISP_HZ)
-            {
                 snprintf(buf, sizeof(buf), "%.2f Hz", freq);
-                ag::text(vg, 8.f, 8.f, buf, 12.f, ag::bright(), ag::ALIGN_L, 0.5f);
-            }
             else
-            {
-                ag::text(vg, 8.f, 8.f, note, 12.f, ag::bright(), ag::ALIGN_L, 0.5f);
-            }
+                ldFreqToNote(freq, buf, sizeof(buf));
+            ag::text(vg, 8.f, 8.f, buf, 12.f, ag::bright(), ag::ALIGN_L, 0.5f);
 
-            snprintf(buf, sizeof(buf), "%d OSC  %s",
-                     numOscs, descending ? "DESC" : "ASC");
-            ag::text(vg, LD_DISP_W - 8.f, 8.f, buf, 7.f,
+            static const char *waveNames[4] = {"SINE", "SAW", "TRIANGLE", "STEP"};
+            if (wave == 3)
+                snprintf(buf, sizeof(buf), "STEP %.0f%%", pw * 100.f);
+            else
+                snprintf(buf, sizeof(buf), "%s", waveNames[std::max(0, std::min(wave, 3))]);
+            ag::text(vg, W / 2.f, 8.f, buf, 7.f, ag::textCol(), ag::ALIGN_C, 1.f);
+
+            snprintf(buf, sizeof(buf), "%d OSC  %s", numOscs, descending ? "DESC" : "ASC");
+            ag::text(vg, W - 8.f, 8.f, buf, 7.f,
                      descending ? ag::warm() : ag::accent(), ag::ALIGN_R, 0.5f);
 
-            // ---- composite waveform (left sub-frame) ----
+            // ---- scope (left plot) ----
             {
                 nvgSave(vg);
-                nvgScissor(vg, 8.f, 20.f, 154.f, 80.f);
+                nvgScissor(vg, LD_SCOPE_X, LD_PLOT_Y, LD_SCOPE_W, LD_PLOT_H);
 
-                const float plotX = 8.f, plotW = 154.f;
-                const float midY = 60.f;
-                const float ampPx = 32.f;
-                const int NP = 110;
+                const float midY = LD_PLOT_Y + LD_PLOT_H / 2.f;
+                const float ampPx = 30.f;
+                const int NP = 154;
                 const float windowSec = 0.004f;
 
                 nvgBeginPath(vg);
@@ -636,7 +671,7 @@ namespace
                         sum += ldWaveSample(ph, wave, pw) * amp[i];
                     }
                     sum *= 0.6f;
-                    float x = plotX + t * plotW;
+                    float x = LD_SCOPE_X + t * LD_SCOPE_W;
                     float y = midY - std::max(-1.f, std::min(1.f, sum)) * ampPx;
                     if (px == 0)
                         nvgMoveTo(vg, x, y);
@@ -644,7 +679,7 @@ namespace
                         nvgLineTo(vg, x, y);
                 }
                 nvgStrokeColor(vg, ag::bright());
-                nvgStrokeWidth(vg, 1.3f);
+                nvgStrokeWidth(vg, 1.5f);
                 nvgLineCap(vg, NVG_ROUND);
                 nvgLineJoin(vg, NVG_ROUND);
                 nvgStroke(vg);
@@ -652,71 +687,114 @@ namespace
                 nvgRestore(vg);
             }
 
-            // ---- partial amplitude bars (right sub-frame) ----
+            // ---- partial spectrum (right plot) ----
             {
                 nvgSave(vg);
-                const float plotX = 168.f;
-                const float plotW = LD_DISP_W - 176.f;
-                const float plotY = 20.f;
-                const float plotH = 80.f;
+                nvgScissor(vg, LD_SPEC_X, LD_PLOT_Y, LD_SPEC_W, LD_PLOT_H);
 
-                nvgScissor(vg, plotX, plotY, plotW, plotH);
+                const float cx = LD_SPEC_X + LD_SPEC_W / 2.f;
+                const float base = LD_PLOT_Y + LD_PLOT_H - 6.f;   // baseline
+                const float maxH = LD_PLOT_H - 16.f;
+                const float halfSpan = (float)(numOscs - 1) * 0.5f;
+                const float sigma = std::max(1.0f, (float)(numOscs - 1) * 0.25f);
+                const float R = halfSpan + 1.25f;                  // octaves from centre to edge
+                const float pxPerOct = (LD_SPEC_W / 2.f - 8.f) / R;
+
+                // Gaussian window (fixed): area + outline
+                const float ex0 = LD_SPEC_X + 2.f, ex1 = LD_SPEC_X + LD_SPEC_W - 2.f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, ex0, base);
+                for (float x = ex0; x <= ex1 + 0.01f; x += 2.f)
+                {
+                    float d = (x - cx) / pxPerOct;
+                    nvgLineTo(vg, x, base - std::exp(-d * d / (2.f * sigma * sigma)) * maxH);
+                }
+                nvgLineTo(vg, ex1, base);
+                nvgClosePath(vg);
+                nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
+                nvgFill(vg);
 
                 nvgBeginPath(vg);
-                nvgMoveTo(vg, plotX + 1.f, plotY + plotH - 1.f);
-                nvgLineTo(vg, plotX + plotW - 1.f, plotY + plotH - 1.f);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+                for (float x = ex0; x <= ex1 + 0.01f; x += 2.f)
+                {
+                    float d = (x - cx) / pxPerOct;
+                    float y = base - std::exp(-d * d / (2.f * sigma * sigma)) * maxH;
+                    if (x == ex0)
+                        nvgMoveTo(vg, x, y);
+                    else
+                        nvgLineTo(vg, x, y);
+                }
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 90));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
-                const float slot = plotW / (float)std::max(numOscs, 1);
-                const float barW = std::max(slot - 2.f, 1.f);
+                // baseline and the rungs at sweep = 0
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, ex0, base + 0.5f);
+                nvgLineTo(vg, ex1, base + 0.5f);
+                for (int i = 0; i < numOscs; ++i)
+                {
+                    float x = cx + ((float)i - halfSpan) * pxPerOct;
+                    nvgMoveTo(vg, x, base);
+                    nvgLineTo(vg, x, base + 3.f);
+                }
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 50));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
 
+                // partials: stem + head, positioned by log-frequency distance from the window centre
                 for (int i = 0; i < numOscs; ++i)
                 {
                     float a = std::max(0.f, std::min(1.f, amp[i]));
-                    float x = plotX + i * slot + 1.f;
-
-                    // Faint marker for partials that are currently silent
-                    // (e.g. clamped to sub-audio or above Nyquist).
-                    if (a < 0.005f)
+                    float d = sweep / 12.f + (float)i - halfSpan;
+                    float x = cx + d * pxPerOct;
+                    float p = std::max(-1.f, std::min(1.f, pan[i]));
+                    NVGcolor c = p < 0.f ? ag::withA(ag::bright(), 0.6f + 0.4f * (-p))
+                                         : ag::withA(ag::violet(), 0.6f + 0.4f * p);
+                    float h = a * maxH;
+                    if (h < 1.f)
                     {
                         nvgBeginPath(vg);
-                        nvgRect(vg, x, plotY + plotH - 3.f, barW, 2.f);
-                        nvgFillColor(vg, nvgRGBA(255, 255, 255, 25));
+                        nvgRect(vg, x - 1.f, base - 2.f, 2.f, 2.f);
+                        nvgFillColor(vg, nvgRGBA(255, 255, 255, 40));
                         nvgFill(vg);
                         continue;
                     }
-
-                    float h = a * (plotH - 4.f);
-
-                    float p = std::max(-1.f, std::min(1.f, pan[i]));
-                    NVGcolor barCol = p < 0.f
-                        ? ag::withA(ag::bright(), 0.55f + 0.45f * (-p))
-                        : ag::withA(ag::violet(), 0.55f + 0.45f * p);
+                    nvgBeginPath(vg);
+                    nvgMoveTo(vg, x, base);
+                    nvgLineTo(vg, x, base - h);
+                    nvgStrokeColor(vg, c);
+                    nvgStrokeWidth(vg, 2.f);
+                    nvgLineCap(vg, NVG_BUTT);
+                    nvgStroke(vg);
 
                     nvgBeginPath(vg);
-                    nvgRect(vg, x, plotY + plotH - 1.f - h, barW, h);
-                    nvgFillColor(vg, barCol);
-                    nvgFill(vg);
-
-                    nvgBeginPath(vg);
-                    nvgRect(vg, x, plotY + plotH - 1.f - h, barW, 1.2f);
-                    nvgFillColor(vg, ag::bright());
+                    nvgCircle(vg, x, base - h, 2.4f);
+                    nvgFillColor(vg, c);
                     nvgFill(vg);
                 }
 
-                // Sweep position marker
-                float sweepX = plotX + plotW * (sweep / 12.f);
-                nvgBeginPath(vg);
-                nvgMoveTo(vg, sweepX, plotY + 1.f);
-                nvgLineTo(vg, sweepX, plotY + plotH - 1.f);
-                nvgStrokeColor(vg, ag::withA(ag::warm(), 0.65f));
-                nvgStrokeWidth(vg, 1.f);
-                nvgStroke(vg);
-
                 nvgRestore(vg);
             }
+
+            // ---- footer ----
+            ag::text(vg, LD_SCOPE_X + 2.f, LD_FOOT_TXT, "SCOPE 4 MS", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+
+            // pan legend: L / R chips
+            nvgBeginPath(vg);
+            nvgRect(vg, LD_SPEC_X + 2.f, LD_FOOT_TXT - 2.5f, 5.f, 5.f);
+            nvgFillColor(vg, ag::bright());
+            nvgFill(vg);
+            ag::text(vg, LD_SPEC_X + 10.f, LD_FOOT_TXT, "L", 7.f, ag::dim(), ag::ALIGN_L, 0.f);
+            nvgBeginPath(vg);
+            nvgRect(vg, LD_SPEC_X + 22.f, LD_FOOT_TXT - 2.5f, 5.f, 5.f);
+            nvgFillColor(vg, ag::violet());
+            nvgFill(vg);
+            ag::text(vg, LD_SPEC_X + 30.f, LD_FOOT_TXT, "R", 7.f, ag::dim(), ag::ALIGN_L, 0.f);
+
+            snprintf(buf, sizeof(buf), "SWEEP %.1f ST", sweep);
+            ag::text(vg, LD_SPEC_X + LD_SPEC_W / 2.f + 6.f, LD_FOOT_TXT, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+            ag::text(vg, LD_SPEC_X + LD_SPEC_W - 2.f, LD_FOOT_TXT, "LOW>HIGH", 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
 
             Widget::drawLayer(args, layer);
         }
@@ -786,18 +864,17 @@ struct LadderWidget : ModuleWidget
 
         addChild(new LDDisplay(module));
 
-        // Row 1: FREQ, FINE, WAVE, PULSE
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LD_ROW1_X[0], LD_ROW1_Y), module, Ladder::FREQ_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW1_X[1], LD_ROW1_Y), module, Ladder::FINE_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LD_ROW1_X[2], LD_ROW1_Y), module, Ladder::WAVE_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW1_X[3], LD_ROW1_Y), module, Ladder::PULSE_WIDTH_PARAM));
+        // Row 1: FREQ, FINE, WAVE, PULSE (all the same knob size, centred in their cells)
+        const int ids1[4] = {Ladder::FREQ_PARAM, Ladder::FINE_PARAM, Ladder::WAVE_PARAM, Ladder::PULSE_WIDTH_PARAM};
+        for (int i = 0; i < 4; ++i)
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW1_X[i], LD_ROW1_Y), module, ids1[i]));
 
         // Row 2: SPEED, OSCS, DIR
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LD_ROW2_X[0], LD_ROW2_Y), module, Ladder::LADDER_SPEED_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(LD_ROW2_X[1], LD_ROW2_Y), module, Ladder::NUM_OSCS_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW2_X[0], LD_ROW2_Y), module, Ladder::LADDER_SPEED_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW2_X[1], LD_ROW2_Y), module, Ladder::NUM_OSCS_PARAM));
         addParam(createParamCentered<CKSS>(Vec(LD_ROW2_X[2], LD_ROW2_Y), module, Ladder::DIRECTION_PARAM));
 
-        // I/O
+        // I/O: input left, outputs right
         addInput(createInputCentered<DarkPJ301MPort>(Vec(LD_IO_X[0], LD_IO_Y), module, Ladder::VOCT_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(LD_IO_X[1], LD_IO_Y), module, Ladder::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(LD_IO_X[2], LD_IO_Y), module, Ladder::OUT_R_OUTPUT));

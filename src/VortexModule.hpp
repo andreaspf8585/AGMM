@@ -24,7 +24,7 @@
 #include <vector>
 #include <algorithm>
 
-namespace Vortex {
+namespace Vortex {   
 
 static constexpr int NUM_CHANNELS = 16;
 static constexpr int NUM_TAPS = 14;               // 7 output taps per side

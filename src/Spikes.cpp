@@ -5,6 +5,42 @@
 #include <cstdio>
 #include <algorithm>
 
+// ============================================================================
+// Spikes
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Spikes is a 16 HP chaotic modulation source that combines two classical
+// strange attractors (Lorenz and Rössler) with a fractal-correlated noise
+// generator. The two attractors are integrated in real time with RK4, blended
+// together per-sample by the BLEND knob, then optionally crossfaded toward a
+// 6-octave fractional Brownian motion noise (FRACTAL knob) before being scaled
+// and written to X / Y / Z / MIX outputs.
+//
+// Controls:
+//   SPEED         Attractor integration rate (with 1 V/oct CV)
+//   BLEND         Lorenz ↔ Rössler crossfade
+//   FRACTAL       Amount of fractal noise mixed in
+//   FRC SPEED     Base frequency of the fractal noise
+//   SCALE         Output voltage scaling (0.1..10 V)
+//   ROTATE        Auto-rotation speed of the 3D display
+//
+// A 200×126 display shows a rotating 3D view of the recent trajectory of the
+// blended attractor. The view can be dragged to rotate by hand and
+// double-clicked to reset. Header/footer rows report speed, blend, fractal
+// amount and the current X/Y/Z/MIX voltages.
+//
+// File structure:
+//   1. Layout constants (16 HP = 240×380 px).
+//   2. Spikes module: attractor states, RNG, fractal octaves, DSP helpers
+//      (Lorenz / Rössler derivative, RK4, computeFractal), and process().
+//   3. Anonymous-namespace UI: blockHeader helper, SPPanel (static art) and
+//      SPDisplay (rotating 3D trail view).
+//   4. SpikesWidget: places knobs, CV inputs and outputs.
+//   5. Model registration.
+// ============================================================================
+
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
@@ -26,334 +62,364 @@ static const float SP_KCELL_H = 54.f;
 static const float SP_IOHDR = 296.f;
 static const float SP_IOTOP = 306.f;
 static const float SP_IOCELL_W = 30.f, SP_IOCELL_H = 50.f;
+// Returns the horizontal centre of jack i (0..2 = CV inputs, 3..6 = outputs).
 static float spJx(int i) { return i < 3 ? 20.f + 31.f * i : 128.f + 31.f * (i - 3); }
 
+// ------------------------------------------------------------
+// Module
+// ------------------------------------------------------------
+// Chaotic modulation source combining Lorenz and Rössler attractors with
+// fractal-correlated noise, plus a rotatable 3D trail view.
 struct Spikes : Module
 {
-	// New items are appended at the end so old patches keep loading.
-	enum ParamId
-	{
-		SPEED_PARAM,
-		BLEND_PARAM,
-		FRACTAL_PARAM,
-		FRACTAL_SPEED_PARAM,
-		SCALE_PARAM,
-		ROTATE_PARAM, // view only: auto-rotation speed of the 3D display
-		PARAMS_LEN
-	};
-	enum InputId
-	{
-		SPEED_INPUT,
-		BLEND_INPUT,
-		FRACTAL_INPUT,
-		INPUTS_LEN
-	};
-	enum OutputId
-	{
-		X_OUTPUT,
-		Y_OUTPUT,
-		Z_OUTPUT,
-		MIX_OUTPUT,
-		OUTPUTS_LEN
-	};
-	enum LightId
-	{
-		LIGHTS_LEN
-	};
+    // New items are appended at the end so old patches keep loading.
+    enum ParamId
+    {
+        SPEED_PARAM,
+        BLEND_PARAM,
+        FRACTAL_PARAM,
+        FRACTAL_SPEED_PARAM,
+        SCALE_PARAM,
+        ROTATE_PARAM, // view only: auto-rotation speed of the 3D display
+        PARAMS_LEN
+    };
+    enum InputId
+    {
+        SPEED_INPUT,
+        BLEND_INPUT,
+        FRACTAL_INPUT,
+        INPUTS_LEN
+    };
+    enum OutputId
+    {
+        X_OUTPUT,
+        Y_OUTPUT,
+        Z_OUTPUT,
+        MIX_OUTPUT,
+        OUTPUTS_LEN
+    };
+    enum LightId
+    {
+        LIGHTS_LEN
+    };
 
-	// ------------------------------------------------------------------
-	// Chaotic attractor states
-	// ------------------------------------------------------------------
-	double lorenzX = 0.1, lorenzY = 0.0, lorenzZ = 0.0;
-	double rosslerX = 1.0, rosslerY = 1.0, rosslerZ = 0.0;
+    // ------------------------------------------------------------------
+    // Chaotic attractor states
+    // ------------------------------------------------------------------
+    double lorenzX = 0.1, lorenzY = 0.0, lorenzZ = 0.0;
+    double rosslerX = 1.0, rosslerY = 1.0, rosslerZ = 0.0;
 
-	// ------------------------------------------------------------------
-	// Fractal correlated randomness (fractional Brownian motion)
-	//   N octaves of smoothly-interpolated random values; amplitudes
-	//   fall off as 2^(-H) per octave. H controls correlation length.
-	// ------------------------------------------------------------------
-	static const int NUM_OCTAVES = 6;
-	static constexpr double HURST = 0.65;
+    // ------------------------------------------------------------------
+    // Fractal correlated randomness (fractional Brownian motion)
+    //   N octaves of smoothly-interpolated random values; amplitudes
+    //   fall off as 2^(-H) per octave. H controls correlation length.
+    // ------------------------------------------------------------------
+    static const int NUM_OCTAVES = 6;
+    static constexpr double HURST = 0.65;
 
-	struct Octave
-	{
-		double current = 0.0;
-		double target = 0.0;
-		double phase = 0.0;
-		bool initialized = false;
-	};
-	Octave octaves[NUM_OCTAVES];
+    // One fractal octave: the current random value, the next target, and a
+    // phase that smoothly advances toward the target.
+    struct Octave
+    {
+        double current = 0.0;
+        double target = 0.0;
+        double phase = 0.0;
+        bool initialized = false;
+    };
+    Octave octaves[NUM_OCTAVES];
 
-	// xorshift32 RNG for cheap, high-quality uniform noise
-	uint32_t rngState = 0x9E3779B9u;
-	inline uint32_t xorshift()
-	{
-		uint32_t x = rngState;
-		x ^= x << 13;
-		x ^= x >> 17;
-		x ^= x << 5;
-		rngState = x;
-		return x;
-	}
-	inline double randUnipolar() { return (xorshift() & 0xFFFFFF) / 16777216.0; }
-	inline double randBipolar() { return randUnipolar() * 2.0 - 1.0; }
+    // xorshift32 RNG for cheap, high-quality uniform noise
+    uint32_t rngState = 0x9E3779B9u;
+    // Advances the xorshift32 generator and returns the next 32-bit value.
+    inline uint32_t xorshift()
+    {
+        uint32_t x = rngState;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        rngState = x;
+        return x;
+    }
+    // Returns a uniform double in [0, 1).
+    inline double randUnipolar() { return (xorshift() & 0xFFFFFF) / 16777216.0; }
+    // Returns a uniform double in [-1, 1).
+    inline double randBipolar() { return randUnipolar() * 2.0 - 1.0; }
 
-	// ------------------------------------------------------------------
-	// Display data (written by the audio thread, read by the UI thread;
-	// a torn read is only cosmetic)
-	// ------------------------------------------------------------------
-	float trailX[SP_TRAIL] = {};
-	float trailY[SP_TRAIL] = {};
-	float trailZ[SP_TRAIL] = {};
-	int trailHead = 0;										// index of the newest point
-	int trailCount = 0;										// valid points (grows until SP_TRAIL)
-	double trailAcc = 0.0;									// attractor time since the last trail point
-	float outX = 0.f, outY = 0.f, outZ = 0.f, outMix = 0.f; // volts
-	float dispSpeed = 1.f, dispBlend = 0.5f, dispFractal = 0.2f;
+    // ------------------------------------------------------------------
+    // Display data (written by the audio thread, read by the UI thread;
+    // a torn read is only cosmetic)
+    // ------------------------------------------------------------------
+    float trailX[SP_TRAIL] = {};
+    float trailY[SP_TRAIL] = {};
+    float trailZ[SP_TRAIL] = {};
+    int trailHead = 0;                                      // index of the newest point
+    int trailCount = 0;                                     // valid points (grows until SP_TRAIL)
+    double trailAcc = 0.0;                                  // attractor time since the last trail point
+    float outX = 0.f, outY = 0.f, outZ = 0.f, outMix = 0.f; // volts
+    float dispSpeed = 1.f, dispBlend = 0.5f, dispFractal = 0.2f;
 
-	Spikes()
-	{
-		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
+    // Constructor: configures the six parameters (with sensible ranges and
+    // units), the three CV inputs and the four outputs.
+    Spikes()
+    {
+        config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-		configParam(SPEED_PARAM, 0.01f, 10.f, 1.f, "Speed", "x");
-		configParam(BLEND_PARAM, 0.f, 1.f, 0.5f, "Lorenz / Rössler Blend", "%", 0.f, 100.f);
-		configParam(FRACTAL_PARAM, 0.f, 1.f, 0.2f, "Fractal Amount", "%", 0.f, 100.f);
-		configParam(FRACTAL_SPEED_PARAM, 0.01f, 50.f, 1.f, "Fractal Speed", " Hz");
-		configParam(SCALE_PARAM, 0.1f, 10.f, 5.f, "Scale", " V");
-		configParam(ROTATE_PARAM, -1.f, 1.f, 0.25f, "Display rotation speed", "%", 0.f, 100.f);
+        configParam(SPEED_PARAM, 0.01f, 10.f, 1.f, "Speed", "x");
+        configParam(BLEND_PARAM, 0.f, 1.f, 0.5f, "Lorenz / Rössler Blend", "%", 0.f, 100.f);
+        configParam(FRACTAL_PARAM, 0.f, 1.f, 0.2f, "Fractal Amount", "%", 0.f, 100.f);
+        configParam(FRACTAL_SPEED_PARAM, 0.01f, 50.f, 1.f, "Fractal Speed", " Hz");
+        configParam(SCALE_PARAM, 0.1f, 10.f, 5.f, "Scale", " V");
+        configParam(ROTATE_PARAM, -1.f, 1.f, 0.25f, "Display rotation speed", "%", 0.f, 100.f);
 
-		configInput(SPEED_INPUT, "Speed CV (1 V/oct)");
-		configInput(BLEND_INPUT, "Blend CV (10 V = 100%)");
-		configInput(FRACTAL_INPUT, "Fractal CV (10 V = 100%)");
+        configInput(SPEED_INPUT, "Speed CV (1 V/oct)");
+        configInput(BLEND_INPUT, "Blend CV (10 V = 100%)");
+        configInput(FRACTAL_INPUT, "Fractal CV (10 V = 100%)");
 
-		configOutput(X_OUTPUT, "X");
-		configOutput(Y_OUTPUT, "Y");
-		configOutput(Z_OUTPUT, "Z");
-		configOutput(MIX_OUTPUT, "Mix");
-	}
+        configOutput(X_OUTPUT, "X");
+        configOutput(Y_OUTPUT, "Y");
+        configOutput(Z_OUTPUT, "Z");
+        configOutput(MIX_OUTPUT, "Mix");
+    }
 
-	void onReset(const ResetEvent &e) override
-	{
-		Module::onReset(e);
-		lorenzX = 0.1;
-		lorenzY = 0.0;
-		lorenzZ = 0.0;
-		rosslerX = 1.0;
-		rosslerY = 1.0;
-		rosslerZ = 0.0;
-		for (int i = 0; i < NUM_OCTAVES; i++)
-			octaves[i] = Octave();
-		trailHead = 0;
-		trailCount = 0;
-		trailAcc = 0.0;
-		for (int i = 0; i < SP_TRAIL; i++)
-			trailX[i] = trailY[i] = trailZ[i] = 0.f;
-	}
+    // Rack reset hook: restores the attractor seeds, clears the fractal
+    // octaves, and empties the trail buffer.
+    void onReset(const ResetEvent &e) override
+    {
+        Module::onReset(e);
+        lorenzX = 0.1;
+        lorenzY = 0.0;
+        lorenzZ = 0.0;
+        rosslerX = 1.0;
+        rosslerY = 1.0;
+        rosslerZ = 0.0;
+        for (int i = 0; i < NUM_OCTAVES; i++)
+            octaves[i] = Octave();
+        trailHead = 0;
+        trailCount = 0;
+        trailAcc = 0.0;
+        for (int i = 0; i < SP_TRAIL; i++)
+            trailX[i] = trailY[i] = trailZ[i] = 0.f;
+    }
 
-	// ------------------------------------------------------------------
-	// Vector fields
-	// ------------------------------------------------------------------
-	static void lorenzDeriv(const double s[3], double d[3])
-	{
-		const double sigma = 10.0, rho = 28.0, beta = 8.0 / 3.0;
-		d[0] = sigma * (s[1] - s[0]);
-		d[1] = s[0] * (rho - s[2]) - s[1];
-		d[2] = s[0] * s[1] - beta * s[2];
-	}
-	static void rosslerDeriv(const double s[3], double d[3])
-	{
-		const double a = 0.2, b = 0.2, c = 5.7;
-		d[0] = -s[1] - s[2];
-		d[1] = s[0] + a * s[1];
-		d[2] = b + s[2] * (s[0] - c);
-	}
+    // ------------------------------------------------------------------
+    // Vector fields
+    // ------------------------------------------------------------------
+    // Writes the Lorenz derivative at state s into d.
+    static void lorenzDeriv(const double s[3], double d[3])
+    {
+        const double sigma = 10.0, rho = 28.0, beta = 8.0 / 3.0;
+        d[0] = sigma * (s[1] - s[0]);
+        d[1] = s[0] * (rho - s[2]) - s[1];
+        d[2] = s[0] * s[1] - beta * s[2];
+    }
+    // Writes the Rössler derivative at state s into d.
+    static void rosslerDeriv(const double s[3], double d[3])
+    {
+        const double a = 0.2, b = 0.2, c = 5.7;
+        d[0] = -s[1] - s[2];
+        d[1] = s[0] + a * s[1];
+        d[2] = b + s[2] * (s[0] - c);
+    }
 
-	// Classical RK4 step
-	static void rk4(double s[3], double dt, void (*deriv)(const double *, double *))
-	{
-		double k1[3], k2[3], k3[3], k4[3], t[3];
-		deriv(s, k1);
-		for (int i = 0; i < 3; i++)
-			t[i] = s[i] + 0.5 * dt * k1[i];
-		deriv(t, k2);
-		for (int i = 0; i < 3; i++)
-			t[i] = s[i] + 0.5 * dt * k2[i];
-		deriv(t, k3);
-		for (int i = 0; i < 3; i++)
-			t[i] = s[i] + dt * k3[i];
-		deriv(t, k4);
-		for (int i = 0; i < 3; i++)
-			s[i] += dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
-	}
+    // Classical RK4 step: advances state s by dt using the given derivative
+    // function.
+    static void rk4(double s[3], double dt, void (*deriv)(const double *, double *))
+    {
+        double k1[3], k2[3], k3[3], k4[3], t[3];
+        deriv(s, k1);
+        for (int i = 0; i < 3; i++)
+            t[i] = s[i] + 0.5 * dt * k1[i];
+        deriv(t, k2);
+        for (int i = 0; i < 3; i++)
+            t[i] = s[i] + 0.5 * dt * k2[i];
+        deriv(t, k3);
+        for (int i = 0; i < 3; i++)
+            t[i] = s[i] + dt * k3[i];
+        deriv(t, k4);
+        for (int i = 0; i < 3; i++)
+            s[i] += dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
+    }
 
-	// ------------------------------------------------------------------
-	// Fractal correlated noise: summed octaves of smoothed random values
-	// ------------------------------------------------------------------
-	double computeFractal(double baseFreq, double sr)
-	{
-		double total = 0.0;
-		double normSq = 0.0;
-		double amp = 1.0;
-		double freq = baseFreq;
+    // ------------------------------------------------------------------
+    // Fractal correlated noise: summed octaves of smoothed random values
+    // ------------------------------------------------------------------
+    // Advances the 6-octave fBm noise by one sample and returns a normalised
+    // bipolar value in roughly [-1, 1]. Each octave uses smoothstep
+    // interpolation between its current and target random values at a
+    // frequency starting at baseFreq and doubling per octave; amplitudes
+    // fall by 2^(-HURST) per octave (giving the classic 1/f^H spectrum).
+    double computeFractal(double baseFreq, double sr)
+    {
+        double total = 0.0;
+        double normSq = 0.0;
+        double amp = 1.0;
+        double freq = baseFreq;
 
-		for (int i = 0; i < NUM_OCTAVES; i++)
-		{
-			Octave &o = octaves[i];
-			if (!o.initialized)
-			{
-				o.current = randBipolar();
-				o.target = randBipolar();
-				o.phase = randUnipolar();
-				o.initialized = true;
-			}
-			double inc = freq / sr;
-			if (inc > 0.45)
-				inc = 0.45; // keep well below Nyquist
-			o.phase += inc;
-			while (o.phase >= 1.0)
-			{
-				o.phase -= 1.0;
-				o.current = o.target;
-				o.target = randBipolar();
-			}
-			// smoothstep interpolation between current and target
-			double t = o.phase;
-			double sm = t * t * (3.0 - 2.0 * t);
-			double v = o.current * (1.0 - sm) + o.target * sm;
+        for (int i = 0; i < NUM_OCTAVES; i++)
+        {
+            Octave &o = octaves[i];
+            if (!o.initialized)
+            {
+                o.current = randBipolar();
+                o.target = randBipolar();
+                o.phase = randUnipolar();
+                o.initialized = true;
+            }
+            double inc = freq / sr;
+            if (inc > 0.45)
+                inc = 0.45; // keep well below Nyquist
+            o.phase += inc;
+            while (o.phase >= 1.0)
+            {
+                o.phase -= 1.0;
+                o.current = o.target;
+                o.target = randBipolar();
+            }
+            // smoothstep interpolation between current and target
+            double t = o.phase;
+            double sm = t * t * (3.0 - 2.0 * t);
+            double v = o.current * (1.0 - sm) + o.target * sm;
 
-			total += v * amp;
-			normSq += amp * amp;
-			amp *= std::pow(0.5, HURST);
-			freq *= 2.0;
-		}
-		return total / std::sqrt(normSq);
-	}
+            total += v * amp;
+            normSq += amp * amp;
+            amp *= std::pow(0.5, HURST);
+            freq *= 2.0;
+        }
+        return total / std::sqrt(normSq);
+    }
 
-	void process(const ProcessArgs &args) override
-	{
-		// ---------------- Parameters & CV ----------------
-		float speed = params[SPEED_PARAM].getValue();
-		if (inputs[SPEED_INPUT].isConnected())
-		{
-			float cv = clamp(inputs[SPEED_INPUT].getVoltage(), -5.f, 5.f);
-			speed *= std::pow(2.f, cv);
-		}
-		speed = clamp(speed, 0.001f, 100.f);
+    // Main audio callback: reads parameters and CVs, integrates both
+    // attractors (with RK4 substepping), computes the fractal noise, blends
+    // and mixes the outputs, and samples the trajectory into the display
+    // trail buffer.
+    void process(const ProcessArgs &args) override
+    {
+        // ---------------- Parameters & CV ----------------
+        float speed = params[SPEED_PARAM].getValue();
+        if (inputs[SPEED_INPUT].isConnected())
+        {
+            float cv = clamp(inputs[SPEED_INPUT].getVoltage(), -5.f, 5.f);
+            speed *= std::pow(2.f, cv);
+        }
+        speed = clamp(speed, 0.001f, 100.f);
 
-		float blend = params[BLEND_PARAM].getValue();
-		if (inputs[BLEND_INPUT].isConnected())
-			blend = clamp(blend + inputs[BLEND_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+        float blend = params[BLEND_PARAM].getValue();
+        if (inputs[BLEND_INPUT].isConnected())
+            blend = clamp(blend + inputs[BLEND_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
 
-		float fractalAmt = params[FRACTAL_PARAM].getValue();
-		if (inputs[FRACTAL_INPUT].isConnected())
-			fractalAmt = clamp(fractalAmt + inputs[FRACTAL_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
+        float fractalAmt = params[FRACTAL_PARAM].getValue();
+        if (inputs[FRACTAL_INPUT].isConnected())
+            fractalAmt = clamp(fractalAmt + inputs[FRACTAL_INPUT].getVoltage() * 0.1f, 0.f, 1.f);
 
-		float fractalSpeed = params[FRACTAL_SPEED_PARAM].getValue();
-		float scale = params[SCALE_PARAM].getValue();
+        float fractalSpeed = params[FRACTAL_SPEED_PARAM].getValue();
+        float scale = params[SCALE_PARAM].getValue();
 
-		dispSpeed = speed;
-		dispBlend = blend;
-		dispFractal = fractalAmt;
+        dispSpeed = speed;
+        dispBlend = blend;
+        dispFractal = fractalAmt;
 
-		// ---------------- Integrate attractors ----------------
-		// speed=1 → roughly one attractor orbit per second at 48 kHz
-		double dt = speed / args.sampleRate;
-		const int substeps = 2;
-		double subdt = dt / substeps;
-		for (int s = 0; s < substeps; s++)
-		{
-			double L[3] = {lorenzX, lorenzY, lorenzZ};
-			rk4(L, subdt, lorenzDeriv);
-			lorenzX = L[0];
-			lorenzY = L[1];
-			lorenzZ = L[2];
+        // ---------------- Integrate attractors ----------------
+        // speed=1 → roughly one attractor orbit per second at 48 kHz
+        double dt = speed / args.sampleRate;
+        const int substeps = 2;
+        double subdt = dt / substeps;
+        for (int s = 0; s < substeps; s++)
+        {
+            double L[3] = {lorenzX, lorenzY, lorenzZ};
+            rk4(L, subdt, lorenzDeriv);
+            lorenzX = L[0];
+            lorenzY = L[1];
+            lorenzZ = L[2];
 
-			double R[3] = {rosslerX, rosslerY, rosslerZ};
-			rk4(R, subdt, rosslerDeriv);
-			rosslerX = R[0];
-			rosslerY = R[1];
-			rosslerZ = R[2];
-		}
+            double R[3] = {rosslerX, rosslerY, rosslerZ};
+            rk4(R, subdt, rosslerDeriv);
+            rosslerX = R[0];
+            rosslerY = R[1];
+            rosslerZ = R[2];
+        }
 
-		// Safety net: re-seed an attractor if it ever leaves the finite range
-		if (!std::isfinite(lorenzX + lorenzY + lorenzZ))
-		{
-			lorenzX = 0.1;
-			lorenzY = 0.0;
-			lorenzZ = 0.0;
-		}
-		if (!std::isfinite(rosslerX + rosslerY + rosslerZ))
-		{
-			rosslerX = 1.0;
-			rosslerY = 1.0;
-			rosslerZ = 0.0;
-		}
+        // Safety net: re-seed an attractor if it ever leaves the finite range
+        if (!std::isfinite(lorenzX + lorenzY + lorenzZ))
+        {
+            lorenzX = 0.1;
+            lorenzY = 0.0;
+            lorenzZ = 0.0;
+        }
+        if (!std::isfinite(rosslerX + rosslerY + rosslerZ))
+        {
+            rosslerX = 1.0;
+            rosslerY = 1.0;
+            rosslerZ = 0.0;
+        }
 
-		// ---------------- Fractal correlated noise ----------------
-		double fractal = computeFractal(fractalSpeed, args.sampleRate);
+        // ---------------- Fractal correlated noise ----------------
+        double fractal = computeFractal(fractalSpeed, args.sampleRate);
 
-		// ---------------- Normalize attractor outputs to ~[-1, 1] -----
-		double lx = lorenzX / 20.0;
-		double ly = lorenzY / 25.0;
-		double lz = (lorenzZ - 25.0) / 25.0;
+        // ---------------- Normalize attractor outputs to ~[-1, 1] -----
+        double lx = lorenzX / 20.0;
+        double ly = lorenzY / 25.0;
+        double lz = (lorenzZ - 25.0) / 25.0;
 
-		double rx = rosslerX / 12.0;
-		double ry = rosslerY / 12.0;
-		double rz = (rosslerZ - 5.0) / 15.0; // Rössler z is spiky
+        double rx = rosslerX / 12.0;
+        double ry = rosslerY / 12.0;
+        double rz = (rosslerZ - 5.0) / 15.0; // Rössler z is spiky
 
-		// ---------------- Blend Lorenz ↔ Rössler ----------------
-		double b = blend;
-		double mx = (1.0 - b) * lx + b * rx;
-		double my = (1.0 - b) * ly + b * ry;
-		double mz = (1.0 - b) * lz + b * rz;
+        // ---------------- Blend Lorenz ↔ Rössler ----------------
+        double b = blend;
+        double mx = (1.0 - b) * lx + b * rx;
+        double my = (1.0 - b) * ly + b * ry;
+        double mz = (1.0 - b) * lz + b * rz;
 
-		// ---------------- Mix in fractal correlated randomness ----------------
-		double f = fractalAmt;
-		mx = mx * (1.0 - f) + fractal * f;
-		my = my * (1.0 - f) + fractal * f;
-		mz = mz * (1.0 - f) + fractal * f;
+        // ---------------- Mix in fractal correlated randomness ----------------
+        double f = fractalAmt;
+        mx = mx * (1.0 - f) + fractal * f;
+        my = my * (1.0 - f) + fractal * f;
+        mz = mz * (1.0 - f) + fractal * f;
 
-		// ---------------- Mix bus ----------------
-		double mix = (mx + my + mz) / 3.0;
+        // ---------------- Mix bus ----------------
+        double mix = (mx + my + mz) / 3.0;
 
-		// ---------------- Output ----------------
-		float vx = clamp((float)(mx * scale), -10.f, 10.f);
-		float vy = clamp((float)(my * scale), -10.f, 10.f);
-		float vz = clamp((float)(mz * scale), -10.f, 10.f);
-		float vmix = clamp((float)(mix * scale), -10.f, 10.f);
-		outputs[X_OUTPUT].setVoltage(vx);
-		outputs[Y_OUTPUT].setVoltage(vy);
-		outputs[Z_OUTPUT].setVoltage(vz);
-		outputs[MIX_OUTPUT].setVoltage(vmix);
+        // ---------------- Output ----------------
+        float vx = clamp((float)(mx * scale), -10.f, 10.f);
+        float vy = clamp((float)(my * scale), -10.f, 10.f);
+        float vz = clamp((float)(mz * scale), -10.f, 10.f);
+        float vmix = clamp((float)(mix * scale), -10.f, 10.f);
+        outputs[X_OUTPUT].setVoltage(vx);
+        outputs[Y_OUTPUT].setVoltage(vy);
+        outputs[Z_OUTPUT].setVoltage(vz);
+        outputs[MIX_OUTPUT].setVoltage(vmix);
 
-		outX = vx;
-		outY = vy;
-		outZ = vz;
-		outMix = vmix;
+        outX = vx;
+        outY = vy;
+        outZ = vz;
+        outMix = vmix;
 
-		// ---------------- 3D trail for the display ----------------
-		// One point per 0.015 units of attractor time, so the trail shape is
-		// independent of the speed setting.
-		trailAcc += dt;
-		if (trailAcc >= 0.015)
-		{
-			trailAcc = std::fmod(trailAcc, 0.015);
-			int h = (trailHead + 1) % SP_TRAIL;
-			trailX[h] = clamp((float)mx, -1.6f, 1.6f);
-			trailY[h] = clamp((float)my, -1.6f, 1.6f);
-			trailZ[h] = clamp((float)mz, -1.6f, 1.6f);
-			trailHead = h;
-			if (trailCount < SP_TRAIL)
-				trailCount++;
-		}
-	}
+        // ---------------- 3D trail for the display ----------------
+        // One point per 0.015 units of attractor time, so the trail shape is
+        // independent of the speed setting.
+        trailAcc += dt;
+        if (trailAcc >= 0.015)
+        {
+            trailAcc = std::fmod(trailAcc, 0.015);
+            int h = (trailHead + 1) % SP_TRAIL;
+            trailX[h] = clamp((float)mx, -1.6f, 1.6f);
+            trailY[h] = clamp((float)my, -1.6f, 1.6f);
+            trailZ[h] = clamp((float)mz, -1.6f, 1.6f);
+            trailHead = h;
+            if (trailCount < SP_TRAIL)
+                trailCount++;
+        }
+    }
 };
 
+// Anonymous namespace: UI helpers and the two widgets.
 namespace
 {
     namespace ag = agmm;
 
     // Block title with hairlines that stop a measured distance from the text
+    // Draws a centred block header whose hairlines span from x1 to x2,
+    // stopping a measured distance from the text.
     void blockHeader(NVGcontext *vg, float x1, float x2, float y, const char *txt, NVGcolor col)
     {
         const float cx = (x1 + x2) / 2.f;
@@ -372,10 +438,15 @@ namespace
     // ------------------------------------------------------------
     // Panel background: title, display frame, one labelled plate per control
     // ------------------------------------------------------------
+    // Static artwork: base panel, display bezel, six labelled knob cells,
+    // the CV IN / OUTPUT block headers and their seven jack cells (outputs
+    // tinted).
     struct SPPanel : TransparentWidget
     {
         SPPanel() { box.size = Vec(SP_W, SP_H); }
 
+        // Draws all static panel art including section headers and cell
+        // plates.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -399,6 +470,10 @@ namespace
 
     // Display: rotating 3D view of the attractor trail.
     // Drag to rotate by hand, double-click to reset the view.
+    // Live display: renders the recent trajectory of the blended attractor
+    // from the module's trail buffer, projected and rotated into a 3D view
+    // with a reference cube, axis markers and voltage readouts. Uses a
+    // synthetic Lorenz preview trail in the module browser.
     struct SPDisplay : TransparentWidget
     {
         Spikes *module = nullptr;
@@ -409,6 +484,8 @@ namespace
         // demo trail for the module browser
         float demoX[SP_TRAIL], demoY[SP_TRAIL], demoZ[SP_TRAIL];
 
+        // Constructor: positions the display widget, and (in the browser)
+        // precomputes a Lorenz preview trail.
         SPDisplay(Spikes *m) : module(m)
         {
             box.pos = Vec(SP_DX, SP_DY);
@@ -432,22 +509,28 @@ namespace
             }
         }
 
+        // Left press is consumed so the subsequent drag moves the view.
         void onButton(const ButtonEvent &e) override
         {
             if (e.button == GLFW_MOUSE_BUTTON_LEFT && e.action == GLFW_PRESS)
                 e.consume(this);
         }
+        // Dragging rotates the view: horizontal for yaw, vertical for pitch
+        // (with pitch clamped to avoid flipping).
         void onDragMove(const DragMoveEvent &e) override
         {
             yaw += e.mouseDelta.x * 0.012f;
             pitch = clamp(pitch + e.mouseDelta.y * 0.012f, -1.45f, 1.45f);
         }
+        // Double-click resets the yaw/pitch to their defaults.
         void onDoubleClick(const DoubleClickEvent &e) override
         {
             yaw = 0.6f;
             pitch = 0.5f;
         }
 
+        // Static layer: fills the screen, draws header/footer hairlines, and
+        // the framed 3D view area.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -467,6 +550,10 @@ namespace
             Widget::draw(args);
         }
 
+        // Layer-1 overlay: advances the auto-rotation, projects the trail
+        // into 3D, draws the reference cube, axes, trail (with an aged
+        // gradient from violet to cyan), head marker, and the header/footer
+        // readouts.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -534,6 +621,8 @@ namespace
             const float cp = std::cos(pitch), sp = std::sin(pitch);
 
             // attractor (x, y, z) -> world (x, -z up, y depth), yaw about the vertical axis, then pitch
+            // Projects an attractor-space point (x, y, z) into display
+            // coordinates (px, py) and a perspective scale factor k.
             auto proj = [&](float x, float y, float z, float &px, float &py, float &k)
             {
                 float wx = x, wy = -z, wz = y;
@@ -687,8 +776,15 @@ namespace
 
 } // namespace
 
+// ------------------------------------------------------------
+// Module widget
+// ------------------------------------------------------------
+// Places the static panel, screws, live 3D display, the six knobs, three CV
+// inputs and four outputs.
 struct SpikesWidget : ModuleWidget
 {
+    // Builds the widget tree: static panel, screws, 3D display, the 3×2 knob
+    // grid, and the CV input / output jack row.
     SpikesWidget(Spikes *module)
     {
         setModule(module);

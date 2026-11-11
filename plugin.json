@@ -435,6 +435,24 @@
       "tags": [
         "VCO"
       ]
+    },
+    {
+      "slug": "TritoneParadox",
+      "name": "TritoneParadox",
+      "description": "Tritone Paradox illusion",
+      "tags": [
+        "VCO",
+        "illusion"
+      ]
+    },
+    {
+      "slug": "AMB",
+      "name": "AMB",
+      "description": "Ambient machine",
+      "tags": [
+        "generative",
+        "ambient"
+      ]
     }
   ]
 }

@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -11,34 +12,121 @@
 #include <random>
 #include "dsp/minblep.hpp"
 
+// ============================================================================
+// Stagger2
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Stagger2 is a 28 HP expanded version of the Stagger VCO, adding a per-voice
+// modulated stereo delay, an 8-line FDN reverb, a trigger/gate envelope, a
+// master gain stage and a built-in compressor. The core stereo VCO uses the
+// same "chaos drift" concept as Stagger (independent filtered random pitch
+// drift on the left and right channels for a wide, unstable tone), but the
+// oscillator is now fed through a full space FX chain, and the output is
+// available both as a mono-summed stereo pair (FX L/R) and as a polyphonic
+// VCO+FX output (one voice per 1 V/oct channel).
+//
+// Controls:
+//   FREQ         Base frequency (10 Hz .. 6 kHz, logarithmic)
+//   CHAOS        Depth of the random pitch drift
+//   WAVE         Waveform (sine / triangle / saw / square)
+//   PW           Pulse width of the square wave
+//   MULT         Chaos multiplier (x1, x2, x3, x5, x10)
+//   V/OCT        1 V/oct pitch input (polyphonic)
+//   RESET        Resets the chaos drift to zero on a rising edge
+//   DLY TIME     Delay time (20 ms .. 1.5 s, logarithmic)
+//   DLY FB       Delay feedback
+//   DLY MOD      Delay/reverb modulation depth
+//   DLY MIX      Delay dry/wet mix
+//   PING-PONG    Delay feedback routing (normal / ping-pong)
+//   RV SIZE      Reverb size
+//   RV TIME      Reverb RT60 (0.3 .. 12 s)
+//   RV MIX       Reverb dry/wet mix
+//   TRIG IN      Trigger or gate input
+//   ENV DECAY    Trigger envelope decay (300 ms / 1 s / 4 s / 12 s)
+//   TRIG/GATE    Trigger mode (one-shot trig or sustained gate)
+//   GAIN         Master output gain
+//   COMP         Compressor amount (1:1 .. 10:1)
+//   CV RANGE     CV input range (+-5 V or +-10 V)
+//
+// Outputs:
+//   VCO OUT      Polyphonic VCO + FX (one voice per input channel)
+//   FX L / FX R  Mono-summed stereo FX output
+//
+// The display shows a scaled waveform scope, an envelope / L / R meter column,
+// and a readout box with the current delay time, feedback, reverb decay and
+// trigger state. Header/footer rows show frequency, waveform, poly count and
+// master gain.
+//
+// File structure:
+//   1. Layout constants and shared display settings.
+//   2. Custom ParamQuantity subclasses (frequency, delay time, reverb decay,
+//      envelope decay).
+//   3. DSP building blocks: S2ModDelay (modulated delay line), S2Comp (peak
+//      compressor), S2Fdn (8-line FDN reverb).
+//   4. Stagger2 module: Voice struct, config, DSP, per-voice FX, master
+//      compressor, display data.
+//   5. Anonymous-namespace UI helpers: s2Wave, S2Panel, S2Display.
+//   6. Stagger2Widget: places all knobs, jacks, switches, lights and display.
+//   7. Model registration.
+// ============================================================================
+
+// ---- panel layout (28 HP = 420 px wide) ----
 static const float S2_W = RACK_GRID_WIDTH * 28;   // 420
 static const float S2_H = RACK_GRID_HEIGHT;       // 380
-static const float S2_DX = 40.f, S2_DY = 46.f, S2_DW = 340.f, S2_DH = 62.f;
-static float s2Col(int i) { return 35.f + 70.f * i; }
-// Row tops (cells are 64 wide)
-static const float S2_T1 = 126.f, S2_H1 = 70.f;
+
+// Display (340 x 80): header row, plots, footer row. Bezel adds 4 px around it.
+static const float S2_DX = 40.f, S2_DY = 26.f, S2_DW = 340.f, S2_DH = 80.f;
+static const float S2_HEAD_LINE = 15.5f;                  // hairline under the header row
+static const float S2_PLOT_Y = 20.f, S2_PLOT_H = 40.f;    // all plots share this band
+static const float S2_FOOT_LINE = 64.5f;                  // hairline above the footer row
+static const float S2_FOOT_TXT = S2_DH - 8.f;             // footer text centre line
+static const float S2_SC_X = 8.f,  S2_SC_W = 150.f;       // waveform scope
+static const float S2_MT_X = 170.f, S2_MT_DX = 16.f, S2_MT_W = 10.f;   // ENV, L, R meters
+static const float S2_RO_X = 222.f, S2_RO_W = 110.f;      // readout box
+
+// Cells are 60 px wide on a 66 px pitch (six columns, 15 px side margins)
+static const float S2_CW = 60.f;
+// Returns the horizontal centre of control column i (0..5).
+static float s2Col(int i) { return 45.f + 66.f * (float)i; }
+
+// Row 1: knob at +30, "CV" / "ATT" captions at +50, jack and trimpot at +65
+static const float S2_T1 = 114.f, S2_H1 = 80.f;
+static const float S2_R1_KNOB = S2_T1 + 30.f, S2_R1_CAP = S2_T1 + 50.f, S2_R1_JACK = S2_T1 + 65.f;
+// Rows 2-4: control centred 30 px below the cell top
 static const float S2_T2 = 200.f, S2_T3 = 254.f, S2_T4 = 308.f, S2_HK = 50.f;
+static const float S2_CTL_DY = 30.f;
 
 // -----------------------------------------------------------------------------
 // Custom ParamQuantity for the frequency knob (10 Hz - 6000 Hz, logarithmic)
 // -----------------------------------------------------------------------------
+// ParamQuantity that maps the raw knob (0..1) to a frequency on a logarithmic
+// curve, and parses the editable display string as either Hz, a note name, or
+// a semitone offset from C4.
 struct S2FreqQ : rack::engine::ParamQuantity {
+    // Converts a normalised knob value (0..1) to Hz on a 10 Hz..6 kHz log curve.
     static float mapToFreq(float v) {
         return 10.0f * std::pow(600.0f, v);
     }
+    // Inverse of mapToFreq: converts a frequency in Hz back to a normalised
+    // knob value, clamped to the 10 Hz..6 kHz range.
     static float mapFromFreq(float f) {
         f = math::clamp(f, 10.0f, 6000.0f);
         return std::log(f / 10.0f) / std::log(600.0f);
     }
 
+    // Returns the effective display value: the knob mapped to Hz.
     float getDisplayValue() override {
         return mapToFreq(getValue());
     }
 
+    // Accepts a display value (Hz) and converts it back to a knob position.
     void setDisplayValue(float displayValue) override {
         setValue(mapFromFreq(displayValue));
     }
 
+    // Returns the display string for the current value, e.g. "261.6 Hz".
     std::string getDisplayValueString() override {
         float freq = getDisplayValue();
         char buf[32];
@@ -46,10 +134,17 @@ struct S2FreqQ : rack::engine::ParamQuantity {
         return std::string(buf);
     }
 
+    // Parses an editable string. Accepts:
+    //   - a raw frequency ("440", "261.63")
+    //   - a note name with octave ("A4", "C#3", "Bb2")
+    //   - a semitone offset from C4 ("+12", "-5")
+    // Whitespace is ignored; unknown input falls back to the base class.
     void setDisplayValueString(std::string s) override {
         s.erase(std::remove_if(s.begin(), s.end(), ::isspace), s.end());
         if (s.empty()) return;
 
+        // Parses a note name like "A4", "C#3", "Bb2" into a frequency in Hz.
+        // Returns -1 if the string is not a valid note name.
         auto parseNote = [](const std::string& note) -> float {
             static const std::map<std::string, int> noteMap = {
                 {"C", 0}, {"C#", 1}, {"Db", 1}, {"D", 2}, {"D#", 3}, {"Eb", 3},
@@ -71,6 +166,7 @@ struct S2FreqQ : rack::engine::ParamQuantity {
             return -1.0f;
         };
 
+        // Try a plain frequency first
         try {
             size_t pos;
             float freq = std::stof(s, &pos);
@@ -80,12 +176,14 @@ struct S2FreqQ : rack::engine::ParamQuantity {
             }
         } catch (...) {}
 
+        // Then try a note name
         float noteFreq = parseNote(s);
         if (noteFreq > 0) {
             setDisplayValue(noteFreq);
             return;
         }
 
+        // Then try a signed semitone offset from C4
         if (s[0] == '+' || s[0] == '-') {
             try {
                 int semitones = std::stoi(s);
@@ -102,12 +200,16 @@ struct S2FreqQ : rack::engine::ParamQuantity {
 // -----------------------------------------------------------------------------
 // ParamQuantity subclasses (display of delay time, reverb decay, envelope decay)
 // -----------------------------------------------------------------------------
+// ParamQuantity for the delay-time knob: maps 0..1 to 20 ms .. 1.5 s on a
+// logarithmic curve, and accepts an editable "ms" string.
 struct S2DelayTimeQ : rack::engine::ParamQuantity {
+    // Returns the display string (e.g. "320 ms") for the current knob value.
     std::string getDisplayValueString() override {
         char buf[32];
         snprintf(buf, sizeof(buf), "%.0f ms", 20.0f * std::pow(75.0f, getValue()));
         return std::string(buf);
     }
+    // Parses a "ms" string back to a knob value on the same log curve.
     void setDisplayValueString(std::string s) override {
         try {
             size_t pos;
@@ -121,12 +223,16 @@ struct S2DelayTimeQ : rack::engine::ParamQuantity {
     }
 };
 
+// ParamQuantity for the reverb-decay knob: maps 0..1 to 0.3 s .. 12 s on a
+// logarithmic curve, and accepts an editable "s" string.
 struct S2RevDecayQ : rack::engine::ParamQuantity {
+    // Returns the display string (e.g. "2.40 s") for the current knob value.
     std::string getDisplayValueString() override {
         char buf[32];
         snprintf(buf, sizeof(buf), "%.2f s", 0.3f * std::pow(40.0f, getValue()));
         return std::string(buf);
     }
+    // Parses an "s" string back to a knob value on the same log curve.
     void setDisplayValueString(std::string s) override {
         try {
             size_t pos;
@@ -140,7 +246,11 @@ struct S2RevDecayQ : rack::engine::ParamQuantity {
     }
 };
 
+// ParamQuantity for the trigger-envelope decay knob: a 4-position snap
+// selector showing the four decay times.
 struct S2EnvDecayQ : rack::engine::ParamQuantity {
+    // Returns the display string ("300 ms" / "1 s" / "4 s" / "12 s") based
+    // on which of the four discrete positions the knob is nearest to.
     std::string getDisplayValueString() override {
         static const char* names[4] = {"300 ms", "1 s", "4 s", "12 s"};
         int i = (int)std::nearbyint(getValue());
@@ -154,6 +264,8 @@ struct S2EnvDecayQ : rack::engine::ParamQuantity {
 // Modulated dual delay line: normal or ping-pong feedback, damped repeats,
 // slow sine modulation of the read position (chorus / spacey wobble).
 // -----------------------------------------------------------------------------
+// A stereo delay line with interpolated fractional reads, one-pole damping
+// in the feedback path and slowly-modulated read positions for chorus/wobble.
 struct S2ModDelay {
     static constexpr int MAX_DELAY = 72008; // ~1.5 s at 48 kHz
     std::vector<float> bufL, bufR;
@@ -161,6 +273,7 @@ struct S2ModDelay {
     int writeIdx = 0;
     float lpL = 0.f, lpR = 0.f;
 
+    // Allocates the buffers once; further calls are no-ops.
     void setSampleRate(float sr) {
         (void)sr;
         if (bufL.empty()) {
@@ -171,6 +284,8 @@ struct S2ModDelay {
         }
     }
 
+    // Reads a buffer at a fractional position (in samples) with linear
+    // interpolation and wrap-around.
     inline float readFrac(const std::vector<float>& buf, float pos) const {
         int i0 = (int)pos;
         float frac = pos - (float)i0;
@@ -181,12 +296,16 @@ struct S2ModDelay {
         return a + (b - a) * frac;
     }
 
+    // Zeroes both delay buffers and resets the damping state.
     void clear() {
         std::fill(bufL.begin(), bufL.end(), 0.f);
         std::fill(bufR.begin(), bufR.end(), 0.f);
         lpL = lpR = 0.f;
     }
 
+    // Processes one stereo sample through the delay. Reads with LFO-modulated
+    // positions, damps the feedback, applies normal or ping-pong feedback,
+    // writes to the buffer, and updates ioL/ioR to the (dry + wet) output.
     void process(float& ioL, float& ioR, float delaySec, float fb, float modDepth,
                  float lfoA01, float lfoB01, float dampCoef, int mode, float sr) {
         if (size == 0) return;
@@ -221,9 +340,14 @@ struct S2ModDelay {
 // Simple peak compressor. The threshold is fixed at 3 V, amount scales the
 // ratio from 1:1 (off) to 10:1.
 // -----------------------------------------------------------------------------
+// A simple feed-forward peak compressor: `amount` controls the ratio, with a
+// fixed 3 V threshold and asymmetric attack/release on the envelope follower.
 struct S2Comp {
     float env = 0.f;
 
+    // Processes one sample: tracks the peak envelope and applies gain
+    // reduction above the 3 V threshold. Returns the (possibly) compressed
+    // sample. `amount` <= 0.001 bypasses entirely.
     float process(float x, float amount, float sr) {
         if (amount < 0.001f) return x;
 
@@ -247,6 +371,9 @@ struct S2Comp {
 // FDN reverb: 8 mutually-prime comb filters in parallel + 4 series allpass
 // filters, with cross-feed and polarity decorrelation for a wide tail.
 // -----------------------------------------------------------------------------
+// An 8-line feedback delay network reverb: 8 prime-length damped combs in
+// parallel, followed by 4 series Schroeder allpasses. Cross-feed between the
+// two allpass outputs produces a decorrelated stereo tail.
 struct S2Fdn {
     static constexpr int NUM_COMBS = 8;
     static constexpr int NUM_ALLPASS = 4;
@@ -267,11 +394,14 @@ struct S2Fdn {
     float crossL = 0.f, crossR = 0.f;
     float lastSize = -1.f, lastRt = -1.f;
 
+    // Returns the i-th prime multiplier used to make the comb lengths
+    // mutually prime (so their modal frequencies don't line up).
     static int primeMult(int i) {
         static const int m[NUM_COMBS] = {101, 113, 127, 139, 149, 163, 173, 181};
         return m[i];
     }
 
+    // Allocates the comb/allpass buffers once; further calls are no-ops.
     void setSampleRate(float sr) {
         if (!combBuf[0].empty()) return;
         for (int i = 0; i < NUM_COMBS; i++) {
@@ -284,6 +414,9 @@ struct S2Fdn {
         (void)sr;
     }
 
+    // Recomputes per-comb delay lengths and feedback gains from `sizeParam`
+    // and `rt60`. Each line's decay factor is set so the reverb loses 60 dB
+    // over rt60 seconds; feedback is capped at 0.995 for stability.
     void setParams(float sr, float sizeParam, float rt60) {
         for (int i = 0; i < NUM_COMBS; i++) {
             int len = (int)(primeMult(i) * 10.0f * (0.28f + 0.72f * sizeParam));
@@ -301,6 +434,8 @@ struct S2Fdn {
         }
     }
 
+    // Reads a buffer at a fractional delay `pos` behind the write head `wr`
+    // with linear interpolation and wrap-around.
     inline float readFrac(const std::vector<float>& buf, int wr, float pos) const {
         int sz = (int)buf.size();
         int i0 = wr - (int)pos;
@@ -313,6 +448,8 @@ struct S2Fdn {
         return a + (b - a) * frac;
     }
 
+    // Runs one sample through all-pass filter i at length `len` and gain `g`,
+    // returning its output. Used by process() for each of the 4 stages.
     inline float allpassUpdate(int i, float x, float len, float g) {
         std::vector<float>& b = apBuf[i];
         int sz = (int)b.size();
@@ -323,6 +460,7 @@ struct S2Fdn {
         return y * g + x;
     }
 
+    // Clears all comb/allpass buffers, damping state and cross-feed state.
     void clear() {
         for (int i = 0; i < NUM_COMBS; i++) {
             std::fill(combBuf[i].begin(), combBuf[i].end(), 0.f);
@@ -334,6 +472,10 @@ struct S2Fdn {
         crossL = crossR = 0.f;
     }
 
+    // Processes one stereo sample through the reverb. The mono difference of
+    // the inputs drives the 8 parallel combs, whose sum is diffused by the 4
+    // series allpasses (with LFO-modulated lengths), then split into L/R with
+    // cross-feed for a wide tail.
     void process(float inL, float inR, float& outL, float& outR,
                  float sizeParam, float rt60, float mod,
                  float lfoA01, float lfoB01, float dampCoef, float sr) {
@@ -374,6 +516,11 @@ struct S2Fdn {
     }
 };
 
+// ============================================================================
+// Module
+// ============================================================================
+// Polyphonic stereo VCO (chaos-drifted) feeding a per-voice modulated delay
+// and FDN reverb, with a trigger/gate envelope, master gain and compressor.
 struct Stagger2 : Module {
     enum ParamId {
         PITCH_PARAM,
@@ -422,6 +569,8 @@ struct Stagger2 : Module {
         LIGHTS_LEN
     };
 
+    // Per-voice state: minBLEP oscillator, its own delay and reverb, its own
+    // compressor and its own trigger envelope.
     struct Voice {
         float phase = 0.0f;
         float lastPhase = 0.0f;
@@ -448,6 +597,7 @@ struct Stagger2 : Module {
     float lfoPhaseA = 0.0f;
     float lfoPhaseB = 0.0f;
 
+    // Predefined chaos multipliers and envelope decay times exposed via switches.
     static constexpr float multTable[5] = {1.0f, 2.0f, 3.0f, 5.0f, 10.0f};
     static constexpr float envDecayTable[4] = {0.3f, 1.0f, 4.0f, 12.0f};
     bool cvRangeTenVolt = false;
@@ -461,6 +611,9 @@ struct Stagger2 : Module {
     bool dispTrigConn = false;
     float meterL = 0.f, meterR = 0.f;
 
+    // Constructor: configures every parameter, input, output and light,
+    // including the three custom ParamQuantity types (frequency, delay time,
+    // reverb decay, envelope decay), and seeds the RNG.
     Stagger2() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
@@ -513,7 +666,10 @@ struct Stagger2 : Module {
         rng.seed(rd());
     }
 
-    void onReset() override {
+    // Rack reset hook: clears the chaos drift, per-voice FX/envelope state
+    // and the master compressors.
+    void onReset(const ResetEvent& e) override {
+        Module::onReset(e);
         chaosDrift = 0.0f;
         for (auto& v : voices) {
             v.delay.clear();
@@ -525,10 +681,16 @@ struct Stagger2 : Module {
         compR.env = 0.f;
     }
 
+    // Rack sample-rate-change hook: buffers are already sized for the worst
+    // case, so no reallocation is required.
     void onSampleRateChange() override {
         // Buffers are sized for the worst case; nothing to reallocate.
     }
 
+    // Main audio callback: reads parameters and CVs, updates the chaos drift
+    // and shared LFOs, renders each active voice through the oscillator,
+    // envelope and FX chain, sums the stereo FX outputs and compresses them,
+    // and updates the display data and lights.
     void process(const ProcessArgs& args) override {
         float freqKnob = S2FreqQ::mapToFreq(params[PITCH_PARAM].getValue());
         float basePitchVoltage = std::log2(freqKnob / dsp::FREQ_C4);
@@ -548,12 +710,14 @@ struct Stagger2 : Module {
         cvRangeTenVolt = (params[CV_RANGE_PARAM].getValue() > 0.5f);
         float cvVoltageScale = cvRangeTenVolt ? 0.5f : 1.0f;
 
+        // Chaos reset on a rising edge of the reset input
         float resetVoltage = inputs[CHAOS_RESET_INPUT].getVoltage();
         if (resetVoltage > 1.0f && lastResetVoltage <= 1.0f) {
             chaosDrift = 0.0f;
         }
         lastResetVoltage = resetVoltage;
 
+        // Filtered white noise -> slowly drifting chaos voltage
         float whiteNoise = dist(rng);
         float cutoffHz = 1.5f;
         float alpha = 2.0f * M_PI * cutoffHz * args.sampleTime;
@@ -581,7 +745,7 @@ struct Stagger2 : Module {
         float gain = params[GAIN_PARAM].getValue();
         float compAmount = params[COMP_PARAM].getValue();
 
-        // Shared slow LFOs
+        // Shared slow LFOs used by both the delay and the reverb for modulation
         lfoPhaseA += args.sampleTime * 0.23f;
         if (lfoPhaseA >= 1.0f) lfoPhaseA -= 1.0f;
         lfoPhaseB += args.sampleTime * 0.17f;
@@ -589,6 +753,7 @@ struct Stagger2 : Module {
         float lfoA01 = 0.5f * (std::sin(2.0f * M_PI * lfoPhaseA) + 1.0f);
         float lfoB01 = 0.5f * (std::sin(2.0f * M_PI * lfoPhaseB) + 1.0f);
 
+        // Grow the voice count to match the polyphonic input's channel count
         int channels = std::max(1, inputs[CV_INPUT].getChannels());
         outputs[VCO_OUTPUT].setChannels(channels);
         outputs[FX_L_OUTPUT].setChannels(1);
@@ -598,6 +763,8 @@ struct Stagger2 : Module {
         }
         dispChannels = channels;
 
+        // Fast 2^x approximation (bit-twiddling exp2, accurate enough for
+        // pitch conversion at ~1e-3 relative error).
         auto fastExp2 = [](float x) {
             if (x == 0.0f) return 1.0f;
             union { float f; uint32_t i; } u;
@@ -632,10 +799,12 @@ struct Stagger2 : Module {
 
             float deltaPhase = freq * args.sampleTime;
 
+            // Waveform select (quantized to the 4 discrete waves)
             float waveSelect = waveKnob + (modulatedWaveCV / 5.0f) * 2.0f;
             waveSelect = math::clamp(waveSelect, 0.0f, 3.0f);
             int waveIndex = (int)std::nearbyint(waveSelect);
 
+            // Pulse width (clamped to avoid degenerate pulse edges)
             float pwValue = pwKnob + (modulatedPwCV / 10.0f);
             pwValue = math::clamp(pwValue, 0.01f, 0.99f);
 
@@ -650,6 +819,8 @@ struct Stagger2 : Module {
                 phase -= 1.0f;
             }
 
+            // Per-waveform oscillator with minBLEP anti-aliasing on the
+            // saw and square edges.
             switch (waveIndex) {
                 case 0:
                     out = std::sin(2.0f * M_PI * phase);
@@ -684,6 +855,7 @@ struct Stagger2 : Module {
             voice.lastPhase = phase;
             out *= 5.0f;
 
+            // Lazy buffer allocation on the first sample
             if (voice.delay.bufL.empty()) {
                 voice.delay.setSampleRate(args.sampleRate);
                 voice.reverb.setSampleRate(args.sampleRate);
@@ -695,15 +867,18 @@ struct Stagger2 : Module {
             float decayCoef = args.sampleTime / (0.001f + envDecaySec);
             if (trigConnected) {
                 if (trigMode == 0) {
+                    // Trig mode: rising edge fires a one-shot, then decay
                     if (trigVoltage > 1.0f && voice.lastTrig <= 1.0f) env = 1.0f;
                     env *= (1.0f - decayCoef);
                 } else {
+                    // Gate mode: high level sustains, low level decays
                     if (trigVoltage > 1.0f) voice.gateHigh = true;
                     else if (trigVoltage < 0.1f) voice.gateHigh = false;
                     if (voice.gateHigh) env += attackCoef * (1.0f - env);
                     else env *= (1.0f - decayCoef);
                 }
             } else {
+                // No trigger patched: envelope is fully open
                 env = 1.0f;
             }
             env = math::clamp(env, 0.0f, 1.0f);
@@ -718,6 +893,7 @@ struct Stagger2 : Module {
                                 lfoA01, lfoB01, 0.35f, delayMode, args.sampleRate);
             float delayWetL = dl, delayWetR = dr;
 
+            // Feed the reverb from the dry signal plus the delay output
             float revInL = sig * 0.5f + delayWetL;
             float revInR = sig * 0.5f + delayWetR;
             float revOutL = 0.f, revOutR = 0.f;
@@ -727,6 +903,7 @@ struct Stagger2 : Module {
             float wetL = delayMix * delayWetL + revMix * revOutL;
             float wetR = delayMix * delayWetR + revMix * revOutR;
 
+            // Level-normalised dry/wet mix
             float norm = 2.0f / (1.0f + delayMix + revMix);
             float mixedL = (sig + 0.8f * wetL) * norm;
             float mixedR = (sig + 0.8f * wetR) * norm;
@@ -767,144 +944,13 @@ struct Stagger2 : Module {
 constexpr float Stagger2::multTable[5];
 constexpr float Stagger2::envDecayTable[4];
 
+// Anonymous namespace: UI helpers and the two panel widgets.
 namespace {
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colViolet()   { return nvgRGB(0xb0, 0x5a, 0xff); }
-NVGcolor withAlpha(NVGcolor c, float a) { c.a = a; return c; }
+namespace ag = agmm;
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-template <typename TBase = GrayModuleLightWidget>
-struct TS2CyanLight : TBase {
-    TS2CyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using S2CyanLight = TS2CyanLight<>;
-
-template <typename TBase = GrayModuleLightWidget>
-struct TS2VioletLight : TBase {
-    TS2VioletLight() { this->addBaseColor(nvgRGB(0xb0, 0x5a, 0xff)); }
-};
-using S2VioletLight = TS2VioletLight<>;
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-        nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
-
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 55));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void label(NVGcontext* vg, float x, float y, const char* t) {
-    drawText(vg, x, y, t, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenFinish(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
+// Evaluates the selected waveform at normalized phase p (0..1), using pw
+// for the pulse width of the square wave. Matches the DSP waveforms.
 float s2Wave(float p, int wave, float pw) {
     switch (wave) {
         case 1:  return (p < 0.5f) ? (4.f * p - 1.f) : (3.f - 4.f * p);
@@ -914,102 +960,100 @@ float s2Wave(float p, int wave, float pw) {
     }
 }
 
-// Cell helpers: all plates are 64 wide
-void kCell(NVGcontext* vg, int col, float top, const char* t, bool withRing) {
-    float cx = s2Col(col);
-    plate(vg, cx - 32.f, top, 64.f, S2_HK);
-    if (withRing) ring(vg, cx, top + 19.f, 16.f);
-    label(vg, cx, top + 42.f, t);
-}
-
+// ------------------------------------------------------------
+// Panel background: title, display frame, one labelled cell per control
+// ------------------------------------------------------------
+// Static artwork: base panel, display bezel, LED captions, row 1 with its
+// four knob cells (plus CV/ATT captions) and two jack cells, and rows 2-4
+// with six labelled cells each (row 4's outputs are tinted).
 struct S2Panel : TransparentWidget {
     S2Panel() { box.size = Vec(S2_W, S2_H); }
+    // Draws all static panel art including section headers and cell plates.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
-        drawPanelBase(vg, S2_W, S2_H, "STAGGER2");
-        drawBezel(vg, S2_DX, S2_DY, S2_DW, S2_DH);
+        ag::panelBase(vg, S2_W, S2_H, "STAGGER2");
+        ag::bezel(vg, S2_DX, S2_DY, S2_DW, S2_DH);
 
         // LED captions beside the title
-        drawText(vg, 52.f, 18.f, "CHAOS", 7.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        drawText(vg, S2_W - 52.f, 18.f, "ENV", 7.f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        ag::text(vg, 54.f, 15.f, "CHAOS", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+        ag::text(vg, S2_W - 54.f, 15.f, "ENV", 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
 
-        // row 1: four knobs with CV jack + attenuverter, then V/OCT and RESET
+        // row 1: four knobs with CV jack + attenuverter, then V/OCT and RESET inputs
         const char* a[4] = {"FREQ", "CHAOS", "WAVE", "PW"};
         for (int i = 0; i < 4; ++i) {
             float cx = s2Col(i);
-            plate(vg, cx - 32.f, S2_T1, 64.f, S2_H1);
-            ring(vg, cx, S2_T1 + 17.f, 15.f);
-            label(vg, cx, S2_T1 + 38.f, a[i]);
+            ag::cell(vg, cx, S2_T1, S2_CW, S2_H1, a[i]);
+            ag::text(vg, cx - 14.f, S2_R1_CAP, "CV", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+            ag::text(vg, cx + 14.f, S2_R1_CAP, "ATT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
         }
-        {
-            const char* j[2] = {"V/OCT", "RESET"};
-            for (int i = 0; i < 2; ++i) {
-                float cx = s2Col(4 + i);
-                plate(vg, cx - 32.f, S2_T1, 64.f, S2_H1);
-                label(vg, cx, S2_T1 + 9.f, j[i]);
-            }
+        ag::cell(vg, s2Col(4), S2_T1, S2_CW, S2_H1, "V/OCT");
+        ag::cell(vg, s2Col(5), S2_T1, S2_CW, S2_H1, "RESET");
+
+        // rows 2-4: one cell per control, outputs tinted
+        const char* r2[6] = {"MULT", "DLY TIME", "DLY FB", "DLY MOD", "DLY MIX", "PING-PONG"};
+        const char* r3[6] = {"RV SIZE", "RV TIME", "RV MIX", "TRIG IN", "ENV DECAY", "TRIG/GATE"};
+        const char* r4[6] = {"GAIN", "COMP", "CV RANGE", "FX L", "FX R", "VCO OUT"};
+        for (int i = 0; i < 6; ++i) {
+            ag::cell(vg, s2Col(i), S2_T2, S2_CW, S2_HK, r2[i]);
+            ag::cell(vg, s2Col(i), S2_T3, S2_CW, S2_HK, r3[i]);
+            ag::cell(vg, s2Col(i), S2_T4, S2_CW, S2_HK, r4[i], i >= 3);
         }
-
-        // row 2: MULT, delay, ping-pong
-        kCell(vg, 0, S2_T2, "MULT", true);
-        kCell(vg, 1, S2_T2, "DLY TIME", true);
-        kCell(vg, 2, S2_T2, "DLY FB", true);
-        kCell(vg, 3, S2_T2, "DLY MOD", true);
-        kCell(vg, 4, S2_T2, "DLY MIX", true);
-        kCell(vg, 5, S2_T2, "PING-PONG", false);
-
-        // row 3: reverb, trigger
-        kCell(vg, 0, S2_T3, "RV SIZE", true);
-        kCell(vg, 1, S2_T3, "RV TIME", true);
-        kCell(vg, 2, S2_T3, "RV MIX", true);
-        kCell(vg, 3, S2_T3, "TRIG IN", false);
-        kCell(vg, 4, S2_T3, "ENV DECAY", true);
-        kCell(vg, 5, S2_T3, "TRIG/GATE", false);
-
-        // row 4: output stage
-        kCell(vg, 0, S2_T4, "GAIN", true);
-        kCell(vg, 1, S2_T4, "COMP", true);
-        kCell(vg, 2, S2_T4, "CV RANGE", false);
-        kCell(vg, 3, S2_T4, "FX L", false);
-        kCell(vg, 4, S2_T4, "FX R", false);
-        kCell(vg, 5, S2_T4, "VCO OUT", false);
         Widget::draw(args);
     }
 };
 
-// Display: waveform preview with live phase, FX readouts and output meters
+// ------------------------------------------------------------
+// Display: waveform scope, envelope + output meters, FX readout box
+// ------------------------------------------------------------
+// Live display: draws the waveform scope (two cycles, scaled by the trigger
+// envelope), three vertical meters (ENV, L, R), a four-row FX readout box,
+// and the header/footer text. Uses demo data in the module browser.
 struct S2Display : TransparentWidget {
     Stagger2* module = nullptr;
+    // Constructor: positions the display widget under its bezel.
     S2Display(Stagger2* m) : module(m) {
         box.pos = Vec(S2_DX, S2_DY);
         box.size = Vec(S2_DW, S2_DH);
     }
 
-    static constexpr float SX0 = 8.f, SY0 = 14.f, SW = 190.f, SH = 36.f;
-
+    // Static layer: fills the screen, draws the header/footer hairlines, the
+    // scope and readout frames and the scope zero line.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
-        screenBase(vg, S2_DW, S2_DH);
+        ag::screen(vg, 0.f, 0.f, S2_DW, S2_DH);
+
+        // separators under the header and above the footer
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, SX0 - 1.f, SY0 - 1.f, SW + 2.f, SH + 2.f, 2.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-        nvgFill(vg);
+        nvgMoveTo(vg, 8.f, S2_HEAD_LINE);
+        nvgLineTo(vg, S2_DW - 8.f, S2_HEAD_LINE);
+        nvgMoveTo(vg, 8.f, S2_FOOT_LINE);
+        nvgLineTo(vg, S2_DW - 8.f, S2_FOOT_LINE);
         nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, SX0, SY0 + SH / 2.f + 0.5f);
-        nvgLineTo(vg, SX0 + SW, SY0 + SH / 2.f + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
+
+        ag::plotFrame(vg, S2_SC_X, S2_PLOT_Y, S2_SC_W, S2_PLOT_H);
+        ag::plotFrame(vg, S2_RO_X, S2_PLOT_Y, S2_RO_W, S2_PLOT_H);
+
+        nvgBeginPath(vg);   // scope zero line
+        nvgMoveTo(vg, S2_SC_X + 1.f, S2_PLOT_Y + S2_PLOT_H / 2.f);
+        nvgLineTo(vg, S2_SC_X + S2_SC_W - 1.f, S2_PLOT_Y + S2_PLOT_H / 2.f);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
+        nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
+
         Widget::draw(args);
     }
 
+    // Layer-1 overlay: draws the waveform (with a phase marker), three
+    // vertical meters, the four-row FX readout box, and the header/footer
+    // readouts.
     void drawLayer(const DrawArgs& args, int layer) override {
         if (layer != 1) { Widget::drawLayer(args, layer); return; }
         NVGcontext* vg = args.vg;
-        const float W = S2_DW, H = S2_DH;
+        const float W = S2_DW;
 
+        // Snapshot (or demo values in the module browser)
         float freq = 261.6f, pw = 0.5f, phase = 0.3f, env = 1.f, mL = 2.5f, mR = 2.1f;
         float dTime = 0.35f, dFb = 0.65f, rt = 3.2f, gain = 0.7f;
         int wave = 0, ch = 1, mode = 1, tmode = 0;
@@ -1027,101 +1071,106 @@ struct S2Display : TransparentWidget {
             gain = module->params[Stagger2::GAIN_PARAM].getValue();
         }
         wave = std::min(std::max(wave, 0), 3);
+        env = std::min(std::max(env, 0.f), 1.f);
 
-        // waveform, two cycles
-        const float mid = SY0 + SH / 2.f, amp = SH / 2.f - 3.f;
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            const int N = 190;
-            for (int i = 0; i <= N; ++i) {
-                float t = 2.f * (float) i / N;
-                float p = t - std::floor(t);
-                float v = s2Wave(p, wave, pw) * (0.25f + 0.75f * env);
-                float x = SX0 + SW * (float) i / N, y = mid - v * amp;
-                if (i == 0) nvgMoveTo(vg, x, y);
-                else nvgLineTo(vg, x, y);
-            }
-            nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 50) : nvgRGB(0x8a, 0xee, 0xff));
-            nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
-            nvgLineJoin(vg, NVG_ROUND);
-            nvgStroke(vg);
+        // ---- scope: two cycles, scaled by the trigger envelope ----
+        const float mid = S2_PLOT_Y + S2_PLOT_H / 2.f, amp = S2_PLOT_H / 2.f - 4.f;
+        const float envScale = 0.25f + 0.75f * env;
+        nvgBeginPath(vg);
+        const int N = 150;
+        for (int i = 0; i <= N; ++i) {
+            float t = 2.f * (float) i / N;
+            float p = t - std::floor(t);
+            float v = s2Wave(p, wave, pw) * envScale;
+            float x = S2_SC_X + S2_SC_W * (float) i / N, y = mid - v * amp;
+            if (i == 0) nvgMoveTo(vg, x, y);
+            else nvgLineTo(vg, x, y);
         }
-        {
-            float x = SX0 + SW * 0.5f * phase, y = mid - s2Wave(phase, wave, pw) * (0.25f + 0.75f * env) * amp;
+        nvgStrokeColor(vg, ag::bright());
+        nvgStrokeWidth(vg, 1.5f);
+        nvgLineJoin(vg, NVG_ROUND);
+        nvgStroke(vg);
+
+        {   // phase marker: hairline and dot
+            float x = S2_SC_X + S2_SC_W * 0.5f * phase;
+            float y = mid - s2Wave(phase, wave, pw) * envScale * amp;
             nvgBeginPath(vg);
-            nvgMoveTo(vg, x, SY0);
-            nvgLineTo(vg, x, SY0 + SH);
-            nvgStrokeColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 90));
+            nvgMoveTo(vg, x, S2_PLOT_Y + 1.f);
+            nvgLineTo(vg, x, S2_PLOT_Y + S2_PLOT_H - 1.f);
+            nvgStrokeColor(vg, ag::withA(ag::violet(), 0.5f));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
             nvgBeginPath(vg);
-            nvgCircle(vg, x, y, 4.f);
-            nvgFillColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 70));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgCircle(vg, x, y, 1.8f);
-            nvgFillColor(vg, nvgRGB(0xf0, 0xe0, 0xff));
+            nvgCircle(vg, x, y, 2.f);
+            nvgFillColor(vg, ag::violet());
             nvgFill(vg);
         }
 
-        // envelope bar (shows the trigger envelope)
+        // ---- meters: ENV (violet), L, R ----
+        const float my = S2_PLOT_Y + 2.f, mh = S2_PLOT_H - 4.f;
         {
+            float x = S2_MT_X;
             nvgBeginPath(vg);
-            nvgRect(vg, SX0 + SW + 8.f, SY0, 5.f, SH);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
+            nvgRect(vg, x, my, S2_MT_W, mh);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, 14));
             nvgFill(vg);
-            float h = std::min(std::max(env, 0.f), 1.f) * SH;
+            float h = env * mh;
             if (h > 0.5f) {
                 nvgBeginPath(vg);
-                nvgRect(vg, SX0 + SW + 8.f, SY0 + SH - h, 5.f, h);
-                nvgFillColor(vg, withAlpha(colViolet(), 0.9f));
+                nvgRect(vg, x, my + mh - h, S2_MT_W, h);
+                nvgFillColor(vg, ag::violet());
                 nvgFill(vg);
             }
         }
+        ag::meter(vg, S2_MT_X + S2_MT_DX,       my, S2_MT_W, mh, mL / 5.f);
+        ag::meter(vg, S2_MT_X + 2.f * S2_MT_DX, my, S2_MT_W, mh, mR / 5.f);
 
-        // readouts column
+        // ---- readout box: label left, value right ----
         char buf[48];
-        const float rx = 226.f;
-        snprintf(buf, sizeof(buf), "DLY %.0fMS", dTime * 1000.f);
-        drawText(vg, rx, 18.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "%s FB%.0f%%", mode == 1 ? "PP" : "NRM", dFb * 100.f);
-        drawText(vg, rx, 29.f, buf, 7.f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "RV %.1fS", rt);
-        drawText(vg, rx, 40.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
-        snprintf(buf, sizeof(buf), "%s", trig ? (tmode == 1 ? "GATE ENV" : "TRIG ENV") : "NO TRIG");
-        drawText(vg, rx, 51.f, buf, 7.f, trig ? nvgRGBA(0xd8, 0xb0, 0xff, 230) : colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        const float lx = S2_RO_X + 6.f, rx = S2_RO_X + S2_RO_W - 6.f;
+        const float ly[4] = {S2_PLOT_Y + 6.f, S2_PLOT_Y + 16.f, S2_PLOT_Y + 26.f, S2_PLOT_Y + 36.f};
+        const char* names[4] = {"DELAY", mode == 1 ? "PING-PONG" : "NORMAL", "REVERB", "TRIGGER"};
+        for (int k = 0; k < 4; ++k)
+            ag::text(vg, lx, ly[k], names[k], 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+        snprintf(buf, sizeof(buf), "%.0f MS", dTime * 1000.f);
+        ag::text(vg, rx, ly[0], buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
+        snprintf(buf, sizeof(buf), "FB %.0f%%", dFb * 100.f);
+        ag::text(vg, rx, ly[1], buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
+        snprintf(buf, sizeof(buf), "%.1f S", rt);
+        ag::text(vg, rx, ly[2], buf, 7.f, ag::accent(), ag::ALIGN_R, 0.5f);
+        ag::text(vg, rx, ly[3], trig ? (tmode == 1 ? "GATE" : "TRIG") : "OFF", 7.f,
+                 trig ? ag::violet() : ag::dim(), ag::ALIGN_R, 0.5f);
 
-        // output meters
-        for (int k = 0; k < 2; ++k) {
-            float lv = std::min((k == 0 ? mL : mR) / 5.f, 1.f);
-            float x = 318.f + k * 7.f;
-            nvgBeginPath(vg);
-            nvgRect(vg, x, 14.f, 5.f, 36.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 12));
-            nvgFill(vg);
-            if (lv > 0.01f) {
-                float h = lv * 36.f;
-                nvgBeginPath(vg);
-                nvgRect(vg, x, 50.f - h, 5.f, h);
-                nvgFillPaint(vg, nvgLinearGradient(vg, 0, 50.f, 0, 14.f, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-                nvgFill(vg);
-            }
-        }
-
-        screenFinish(vg, W, H);
-
+        // ---- header and footer ----
         static const char* wn[4] = {"SINE", "TRI", "SAW", "SQR"};
-        snprintf(buf, sizeof(buf), "%.1fHZ  %s%s", freq, wn[wave], ch > 1 ? "  POLY" : "");
-        drawText(vg, 8.f, 7.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        snprintf(buf, sizeof(buf), "%.1f HZ  %s%s", freq, wn[wave], ch > 1 ? "  POLY" : "");
+        ag::text(vg, 8.f, 8.f, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
         snprintf(buf, sizeof(buf), "GAIN %.0f%%", gain * 100.f);
-        drawText(vg, W - 8.f, 7.f, buf, 7.f, nvgRGBA(0xff, 0xe6, 0x80, 220), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        ag::text(vg, W - 8.f, 8.f, buf, 7.f, ag::warm(), ag::ALIGN_R, 0.5f);
+
+        if (wave == 3) snprintf(buf, sizeof(buf), "PW %.0f%%", pw * 100.f);
+        else snprintf(buf, sizeof(buf), "2 CYCLES");
+        ag::text(vg, S2_SC_X + 2.f, S2_FOOT_TXT, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
+        ag::text(vg, S2_MT_X + S2_MT_W / 2.f,                  S2_FOOT_TXT, "ENV", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+        ag::text(vg, S2_MT_X + S2_MT_DX + S2_MT_W / 2.f,       S2_FOOT_TXT, "L",   7.f, ag::dim(), ag::ALIGN_C, 0.f);
+        ag::text(vg, S2_MT_X + 2.f * S2_MT_DX + S2_MT_W / 2.f, S2_FOOT_TXT, "R",   7.f, ag::dim(), ag::ALIGN_C, 0.f);
+        ag::text(vg, S2_RO_X + S2_RO_W - 2.f, S2_FOOT_TXT, "FX", 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
+
         Widget::drawLayer(args, layer);
     }
 };
 
 } // namespace
 
+// ------------------------------------------------------------
+// Module widget
+// ------------------------------------------------------------
+// Places the static panel, screws, live display, the two status LEDs, and
+// the four rows of controls (VCO, delay, reverb/trigger, output stage).
 struct Stagger2Widget : ModuleWidget {
+    // Builds the widget tree: static panel, screws, display, LEDs, row 1
+    // (knob + CV + attenuverter + V/OCT + RESET), row 2 (mult + delay), row 3
+    // (reverb + trigger), row 4 (gain + comp + CV range + outputs).
     Stagger2Widget(Stagger2* module) {
         setModule(module);
         box.size = Vec(S2_W, S2_H);
@@ -1135,24 +1184,24 @@ struct Stagger2Widget : ModuleWidget {
         addChild(new S2Display(module));
 
         // LEDs beside the title
-        addChild(createLightCentered<SmallLight<S2CyanLight>>(Vec(40.f, 18.f), module, Stagger2::CHAOS_LIGHT));
-        addChild(createLightCentered<SmallLight<S2VioletLight>>(Vec(S2_W - 40.f, 18.f), module, Stagger2::ENV_LIGHT));
+        addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(44.f, 15.f), module, Stagger2::CHAOS_LIGHT));
+        addChild(createLightCentered<SmallLight<ag::VioletLight>>(Vec(S2_W - 44.f, 15.f), module, Stagger2::ENV_LIGHT));
 
-        // ---- row 1: knob on top, CV jack and attenuverter below; V/OCT and RESET jacks ----
+        // ---- row 1: knob on top, CV jack and attenuverter below; V/OCT and RESET inputs ----
         const int knob[4] = {Stagger2::PITCH_PARAM, Stagger2::CHAOS_PARAM, Stagger2::WAVE_PARAM, Stagger2::PW_PARAM};
         const int att[4] = {Stagger2::PITCH_ATTEN_PARAM, Stagger2::CHAOS_ATTEN_PARAM, Stagger2::WAVE_ATTEN_PARAM, Stagger2::PW_ATTEN_PARAM};
         const int cv[4] = {Stagger2::PITCH_CV_INPUT, Stagger2::CHAOS_CV_INPUT, Stagger2::WAVE_CV_INPUT, Stagger2::PW_CV_INPUT};
         for (int i = 0; i < 4; ++i) {
             float cx = s2Col(i);
-            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, S2_T1 + 17.f), module, knob[i]));
-            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 15.f, S2_T1 + 53.f), module, cv[i]));
-            addParam(createParamCentered<Trimpot>(Vec(cx + 15.f, S2_T1 + 53.f), module, att[i]));
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, S2_R1_KNOB), module, knob[i]));
+            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 14.f, S2_R1_JACK), module, cv[i]));
+            addParam(createParamCentered<Trimpot>(Vec(cx + 14.f, S2_R1_JACK), module, att[i]));
         }
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(s2Col(4), S2_T1 + 40.f), module, Stagger2::CV_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(s2Col(5), S2_T1 + 40.f), module, Stagger2::CHAOS_RESET_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(s2Col(4), S2_T1 + 46.f), module, Stagger2::CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(s2Col(5), S2_T1 + 46.f), module, Stagger2::CHAOS_RESET_INPUT));
 
         // ---- row 2 ----
-        const float y2 = S2_T2 + 19.f;
+        const float y2 = S2_T2 + S2_CTL_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(0), y2), module, Stagger2::CHAOS_MULT_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(1), y2), module, Stagger2::DELAY_TIME_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(2), y2), module, Stagger2::DELAY_FB_PARAM));
@@ -1161,7 +1210,7 @@ struct Stagger2Widget : ModuleWidget {
         addParam(createParamCentered<CKSS>(Vec(s2Col(5), y2), module, Stagger2::DELAY_MODE_PARAM));
 
         // ---- row 3 ----
-        const float y3 = S2_T3 + 19.f;
+        const float y3 = S2_T3 + S2_CTL_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(0), y3), module, Stagger2::REV_SIZE_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(1), y3), module, Stagger2::REV_DECAY_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(2), y3), module, Stagger2::REV_MIX_PARAM));
@@ -1169,8 +1218,8 @@ struct Stagger2Widget : ModuleWidget {
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(4), y3), module, Stagger2::ENV_DECAY_PARAM));
         addParam(createParamCentered<CKSS>(Vec(s2Col(5), y3), module, Stagger2::TRIG_MODE_PARAM));
 
-        // ---- row 4 ----
-        const float y4 = S2_T4 + 19.f;
+        // ---- row 4: output stage ----
+        const float y4 = S2_T4 + S2_CTL_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(0), y4), module, Stagger2::GAIN_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(1), y4), module, Stagger2::COMP_PARAM));
         addParam(createParamCentered<CKSS>(Vec(s2Col(2), y4), module, Stagger2::CV_RANGE_PARAM));

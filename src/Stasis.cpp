@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -6,8 +7,47 @@
 #include <algorithm>
 #include <memory>
 
+// ============================================================================
+// Stasis
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Stasis is a 24 HP 8-stage clocked sample-and-hold "shift register" with
+// probability and slew. On each clock edge every stage samples a new value:
+//   - Stage 1 takes its input from a patched jack, or (if unpatched) either
+//     an internal white-noise source or, with LOOP on, the last active
+//     stage's previous value (a feedback loop).
+//   - Stages 2..8 take the previous stage's previous value (a shift register).
+//   - A patched input at stage i breaks the chain at that point.
+//   - With PROB below 100%, each stage independently decides whether to
+//     sample or hold (and flashes a skipped outline).
+//
+// Outputs are per-stage jacks plus an 8-channel polyphonic output. A SLEW
+// control smooths the outputs (1 ms .. 2 s time constant), and LEVEL scales
+// all outputs from -100% to +100% (bipolar, so it can invert).
+//
+// Displays:
+//   - Live bars per stage (violet for negative, cyan for positive), with a
+//     tip cap, a flash overlay when a new value was sampled, a skipped
+//     outline, and a slewed-output pointer beside each bar.
+//   - Stage numbers with chain arrows, a LOOP bus when looping is on, and
+//     stage 1 / last stage highlights.
+//   - A 24-column history heat map (one row per stage) whose colour shows the
+//     polarity and whose left edge marks the samples that actually landed.
+//
+// File structure:
+//   1. Layout constants (24 HP = 360×380 px).
+//   2. Stasis module: register state, clock/probability/slew logic, loop,
+//      JSON persistence.
+//   3. Anonymous-namespace UI: STPanelBackground, STKnobArcs, and
+//      STDisplayWidget (bars + chain + history heat map).
+//   4. StasisWidget: places knobs, buttons, jacks, LEDs and the display.
+//   5. Model registration.
+// ============================================================================
+
 // ------------------------------------------------------------
-// Layout constants
+// Layout constants (24 HP = 360 px wide)
 // ------------------------------------------------------------
 static const int   ST_N  = 8;     // channels / register stages
 static const int   ST_HN = 24;    // history columns
@@ -15,43 +55,53 @@ static const int   ST_HN = 24;    // history columns
 static const float ST_PANEL_W = RACK_GRID_WIDTH * 24;   // 360
 static const float ST_PANEL_H = RACK_GRID_HEIGHT;       // 380
 
-// Display
-static const float ST_DISP_W = 228.f;
-static const float ST_DISP_H = 140.f;
-static const float ST_DISP_X = (ST_PANEL_W - ST_DISP_W) / 2.f;   // 66
-static const float ST_DISP_Y = 44.f;
+// Display (224 x 152): header row, bars, chain, heat map, footer row. Bezel adds 4 px around it.
+static const float ST_DISP_W = 224.f;
+static const float ST_DISP_H = 152.f;
+static const float ST_DISP_X = (ST_PANEL_W - ST_DISP_W) / 2.f;   // 68
+static const float ST_DISP_Y = 26.f;
 
 // Plot geometry inside the display (display-local coordinates)
-static const float ST_PX0     = 20.f;     // left edge of bars / heat map
-static const float ST_PITCH   = 25.f;     // column pitch (8 x 25 = 200)
-static const float ST_BAR_CY  = 41.f;     // zero line of the bars
-static const float ST_BAR_H   = 24.f;     // half height (10 V)
+static const float ST_HEAD_LINE = 15.5f;  // hairline under the header row
+static const float ST_PX0     = 22.f;     // left edge of bars / heat map
+static const float ST_PITCH   = 24.f;     // column pitch (8 x 24 = 192)
+static const float ST_BAR_CY  = 42.f;     // zero line of the bars
+static const float ST_BAR_H   = 22.f;     // half height (10 V)
 static const float ST_BAR_W   = 14.f;
 static const float ST_LBL_Y   = 72.f;     // stage numbers + chain arrows
 static const float ST_LOOP_Y  = 81.f;     // loop bus
 static const float ST_HEAT_Y  = 85.f;     // heat map top
-static const float ST_ROW_H   = 5.75f;
-static const float ST_CAP_Y   = 136.5f;   // bottom caption
+static const float ST_ROW_H   = 6.f;      // 8 rows -> 48 px
+static const float ST_FOOT_LINE = 136.5f; // hairline above the footer row
+static const float ST_CAP_Y   = 144.f;    // footer text centre line
 
-// Side knobs: SLEW, PROB (left) / LENGTH, LEVEL (right)
-static const float ST_KNOB_X[4] = {28.f, 28.f, 332.f, 332.f};
-static const float ST_KNOB_Y[4] = {84.f, 150.f, 84.f, 150.f};
+// Side knob cells: SLEW, PROB (left) / LENGTH, LEVEL (right). 50 x 52, label at +10, knob at +32
+static const float ST_SIDE_W = 50.f, ST_SIDE_H = 52.f, ST_SIDE_DY = 32.f;
+static const float ST_SIDE_X[4]   = {34.f, 34.f, 326.f, 326.f};
+static const float ST_SIDE_TOP[4] = {40.f, 112.f, 40.f, 112.f};
+static const float ST_KNOB_X[4]   = {34.f, 34.f, 326.f, 326.f};
+static const float ST_KNOB_Y[4]   = {72.f, 144.f, 72.f, 144.f};   // SIDE_TOP + SIDE_DY
 
-// Control row
-static const float ST_CTRL_SEC_Y = 204.f;
-static const float ST_CTRL_Y     = 240.f;
-static const float ST_CTRL_X[5]  = {60.f, 120.f, 180.f, 240.f, 300.f};
+// Control row: five 52 x 48 cells, control at +29
+static const float ST_CTRL_HDR = 192.f;
+static const float ST_CTRL_TOP = 200.f;
+static const float ST_CTRL_W = 52.f, ST_CTRL_H = 48.f;
+static const float ST_CTRL_Y = ST_CTRL_TOP + 29.f;
+static const float ST_CTRL_X[5] = {60.f, 120.f, 180.f, 240.f, 300.f};
 
-// Channel rows
-static const float ST_CH_SEC_Y = 268.f;
-static const float ST_IN_Y     = 300.f;
-static const float ST_OUT_Y    = 342.f;
-static const float ST_CH_X0    = 47.f;
-static const float ST_CH_DX    = 38.f;
+// Channel rows: eight 36 x 42 cells per row, jack at +28
+static const float ST_CH_HDR = 258.f;
+static const float ST_IN_TOP = 266.f;
+static const float ST_OUT_TOP = 312.f;
+static const float ST_CH_W = 36.f, ST_CH_H = 42.f, ST_CH_JACK_DY = 28.f;
+static const float ST_CH_X0 = 40.f;
+static const float ST_CH_DX = 40.f;
 
 // ------------------------------------------------------------
 // Module
 // ------------------------------------------------------------
+// 8-stage clocked sample-and-hold shift register with probability, slew,
+// loop-back and stereo/poly output.
 struct Stasis : Module {
     enum ParamId {
         SLEW_PARAM,
@@ -101,6 +151,9 @@ struct Stasis : Module {
 
     dsp::SchmittTrigger clockTrig, stepTrig, resetTrig, loopTrig;
 
+    // Constructor: configures all six parameters (with LENGTH snapped to
+    // integer steps), the clock/reset inputs, the eight per-stage inputs and
+    // outputs, the poly output, and initialises the register to silence.
     Stasis() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         configParam(SLEW_PARAM, 0.f, 1.f, 0.f, "Slew", "%", 0.f, 100.f);
@@ -125,6 +178,7 @@ struct Stasis : Module {
         doReset();
     }
 
+    // Clears the register, all flash/skip/history state and the step counter.
     void doReset() {
         std::memset(held, 0, sizeof(held));
         std::memset(flash, 0, sizeof(flash));
@@ -136,11 +190,17 @@ struct Stasis : Module {
         stepCount = 0;
     }
 
-    void onReset() override {
+    // Rack reset hook: clears the register state and disables looping.
+    void onReset(const ResetEvent& e) override {
+        Module::onReset(e);
         doReset();
         loopOn = false;
     }
 
+    // Performs one clock step over the first `len` stages: each stage samples
+    // (with probability `prob`) either its patched input, a noise source (stage
+    // 1 when loop is off), or the previous stage's previous value. The sampled
+    // or skipped state is recorded in the history and flash arrays.
     void doClock(int len, float prob) {
         float old[ST_N];
         for (int i = 0; i < ST_N; ++i) old[i] = held[i];
@@ -177,6 +237,10 @@ struct Stasis : Module {
         clockFlash = 1.f;
     }
 
+    // Main audio callback: reads controls, handles loop/reset/clock/step,
+    // performs a clock step if triggered, applies slew to each stage's
+    // output, writes the eight jacks and the poly output, and decays the
+    // flash/skip timers for the display.
     void process(const ProcessArgs& args) override {
         const float dt = args.sampleTime;
 
@@ -219,12 +283,14 @@ struct Stasis : Module {
         vTau = tau;
     }
 
+    // Serialises the loop on/off state so a patch reopens with the same mode.
     json_t* dataToJson() override {
         json_t* root = json_object();
         json_object_set_new(root, "loop", json_boolean(loopOn));
         return root;
     }
 
+    // Restores the loop on/off state from a saved patch.
     void dataFromJson(json_t* root) override {
         json_t* j = json_object_get(root, "loop");
         if (j) loopOn = json_is_true(j);
@@ -232,266 +298,50 @@ struct Stasis : Module {
 };
 
 // ------------------------------------------------------------
-// Theme + drawing helpers (anonymous namespace)
+// Drawing helpers (anonymous namespace)
 // ------------------------------------------------------------
 namespace {
 
-NVGcolor colBgTop()    { return nvgRGB(0x25, 0x28, 0x30); }
-NVGcolor colBgBottom() { return nvgRGB(0x13, 0x15, 0x19); }
-NVGcolor colText()     { return nvgRGB(0xd6, 0xdc, 0xe6); }
-NVGcolor colDim()      { return nvgRGB(0x8a, 0x95, 0xa5); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
-NVGcolor colBright()   { return nvgRGB(0x7a, 0xec, 0xff); }
-NVGcolor colWarm()     { return nvgRGB(0xff, 0x9c, 0x6a); }
-//NVGcolor colPurple()   { return nvgRGB(0xb0, 0x5a, 0xff); }
+namespace ag = agmm;
 
-NVGcolor withA(NVGcolor c, float a) { return nvgRGBAf(c.r, c.g, c.b, a); }
-
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-// Custom light for the button LEDs
-template <typename TBase = GrayModuleLightWidget>
-struct TSTCyanLight : TBase {
-    TSTCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using STCyanLight = TSTCyanLight<>;
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                       nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y,
-                                         nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s,       ty,            s, s);
-    nvgRect(vg, tx,           ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(),
-             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-// Tick arc around a knob (n ticks across the 270 degree sweep)
-void drawKnobTicks(NVGcontext* vg, float cx, float cy, float r0, float r1, int n = 11) {
-    nvgLineCap(vg, NVG_ROUND);
-    for (int i = 0; i < n; ++i) {
-        float a = (-0.75f + 1.5f * (float)i / (float)(n - 1)) * (float)M_PI;
-        bool major = (i == 0 || i == n - 1 || (n % 2 == 1 && i == (n - 1) / 2));
-        float ra = major ? r0 - 1.5f : r0;
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + std::sin(a) * ra, cy - std::cos(a) * ra);
-        nvgLineTo(vg, cx + std::sin(a) * r1, cy - std::cos(a) * r1);
-        nvgStrokeColor(vg, major ? nvgRGBA(0x3d, 0xe0, 0xff, 150) : nvgRGBA(255, 255, 255, 60));
-        nvgStrokeWidth(vg, major ? 1.2f : 0.9f);
-        nvgStroke(vg);
-    }
-}
-
+// Returns the x centre of stage column i in display-local coordinates.
 float colX(int i) { return ST_PX0 + ST_PITCH * ((float)i + 0.5f); }
 
 // ------------------------------------------------------------
-// Panel background
+// Panel background: title, display frame, one labelled cell per control
 // ------------------------------------------------------------
+// Static artwork: base panel, display bezel, the four side knob cells, the
+// CONTROL row (clock/reset/loop/step/poly), and the CHANNELS rows (inputs on
+// the upper row, tinted outputs on the lower row).
 struct STPanelBackground : TransparentWidget {
     STPanelBackground() { box.size = Vec(ST_PANEL_W, ST_PANEL_H); }
 
-    void label(NVGcontext* vg, float x, float y, const char* txt) {
-        drawText(vg, x, y, txt, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.0f);
-    }
-
-    void plate(NVGcontext* vg, float x, float y, float w, float h) {
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x - 1.f, y - 1.f, w + 2.f, h + 3.f, 7.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 40));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x, y, w, h, 6.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h,
-                                           nvgRGBA(0, 0, 0, 105), nvgRGBA(0, 0, 0, 60)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void ring(NVGcontext* vg, float cx, float cy, float r) {
-        nvgBeginPath(vg);
-        nvgCircle(vg, cx, cy, r);
-        nvgFillPaint(vg, nvgRadialGradient(vg, cx, cy, r * 0.3f, r,
-                                           nvgRGBA(0, 0, 0, 40), nvgRGBA(0, 0, 0, 110)));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    void section(NVGcontext* vg, float y, const char* txt) {
-        float x1 = 12.f, x2 = ST_PANEL_W - 12.f, cx = ST_PANEL_W / 2.f;
-        float w = 14.f + (float) strlen(txt) * 7.f;
-        drawText(vg, cx, y, txt, 8.f, colAccent(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 2.f);
-
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, x1, y);
-        nvgLineTo(vg, cx - w / 2.f, y);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, x1, y, cx - w / 2.f, y,
-                                             nvgRGBA(0x3d, 0xe0, 0xff, 0), nvgRGBA(0x3d, 0xe0, 0xff, 100)));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, cx + w / 2.f, y);
-        nvgLineTo(vg, x2, y);
-        nvgStrokePaint(vg, nvgLinearGradient(vg, cx + w / 2.f, y, x2, y,
-                                             nvgRGBA(0x3d, 0xe0, 0xff, 100), nvgRGBA(0x3d, 0xe0, 0xff, 0)));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-    }
-
-    // kind: 0 = input (orange), 1 = output (cyan), 2 = control (purple)
-    void cell(NVGcontext* vg, float cx, float cy, float w, float top, float h, float labelDy,
-              const char* txt, int kind) {
-        float x = cx - w / 2.f, y = cy + top;
-        plate(vg, x, y, w, h);
-
-        NVGcolor c = (kind == 0) ? nvgRGBA(0xff, 0x9c, 0x6a, 170)
-                   : (kind == 1) ? nvgRGBA(0x3d, 0xe0, 0xff, 170)
-                                 : nvgRGBA(0xb0, 0x5a, 0xff, 170);
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, x + 6.f, y + 1.5f, w - 12.f, 1.8f, 0.9f);
-        nvgFillColor(vg, c);
-        nvgFill(vg);
-
-        label(vg, cx, cy + labelDy, txt);
-    }
-
+    // Draws all static panel art including section headers and cell plates.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
+        ag::panelBase(vg, ST_PANEL_W, ST_PANEL_H, "STASIS");
+        ag::bezel(vg, ST_DISP_X, ST_DISP_Y, ST_DISP_W, ST_DISP_H);
 
-        // Base gradient
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, ST_PANEL_W, ST_PANEL_H);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, ST_PANEL_H, colBgTop(), colBgBottom()));
-        nvgFill(vg);
-
-        // Brushed texture
-        nvgStrokeWidth(vg, 1.f);
-        for (int y = 0; y < (int) ST_PANEL_H; y += 3) {
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, y + 0.5f);
-            nvgLineTo(vg, ST_PANEL_W, y + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-            nvgStroke(vg);
-        }
-
-        // Corner vignette
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, ST_PANEL_W, ST_PANEL_H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, ST_PANEL_W / 2.f, ST_PANEL_H * 0.4f,
-                                           ST_PANEL_H * 0.35f, ST_PANEL_H * 0.85f,
-                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 90)));
-        nvgFill(vg);
-
-        // Edge highlight
-        nvgBeginPath(vg);
-        nvgRect(vg, 0.5f, 0.5f, ST_PANEL_W - 1.f, ST_PANEL_H - 1.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        // Top accent line
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, ST_PANEL_W, 2.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, ST_PANEL_W, 0,
-                                           nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-        nvgFill(vg);
-
-        // Logo + title
-        drawLogo(vg, ST_PANEL_W / 2.f, 15.f);
-        drawText(vg, ST_PANEL_W / 2.f, 32.f, "STASIS", 12.f, colText(),
-                 NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-
-        // ---- Display bezel (metallic, recessed) ----
-        float bx = ST_DISP_X - 5.f, by = ST_DISP_Y - 5.f;
-        float bw = ST_DISP_W + 10.f, bh = ST_DISP_H + 10.f;
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 4.f, by - 3.f, bw + 8.f, bh + 9.f, 10.f);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 90));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh,
-                                           nvgRGB(0x4a, 0x50, 0x5a), nvgRGB(0x14, 0x16, 0x1a)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx - 2.f, by - 2.f, bw + 4.f, bh + 4.f, 7.f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 36));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
-
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-        nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-        nvgFill(vg);
-
-        // ---- Side knobs ----
+        // Side knob cells
         const char* knobL[4] = {"SLEW", "PROB", "LENGTH", "LEVEL"};
-        for (int k = 0; k < 4; ++k) {
-            ring(vg, ST_KNOB_X[k], ST_KNOB_Y[k], 17.f);
-            drawKnobTicks(vg, ST_KNOB_X[k], ST_KNOB_Y[k], 21.f, 24.f, (k == 2) ? 8 : 11);
-            label(vg, ST_KNOB_X[k], ST_KNOB_Y[k] + 29.f, knobL[k]);
-        }
+        for (int k = 0; k < 4; ++k)
+            ag::cell(vg, ST_SIDE_X[k], ST_SIDE_TOP[k], ST_SIDE_W, ST_SIDE_H, knobL[k]);
 
-        // ---- Control row ----
-        section(vg, ST_CTRL_SEC_Y, "CONTROL");
+        // Control row: inputs left, output right (tinted)
+        ag::sectionHeader(vg, ST_PANEL_W, ST_CTRL_HDR, "CONTROL");
         const char* ctl[5] = {"CLOCK", "RESET", "LOOP", "STEP", "POLY"};
-        const int   ctlKind[5] = {0, 0, 2, 2, 1};
         for (int i = 0; i < 5; ++i)
-            cell(vg, ST_CTRL_X[i], ST_CTRL_Y, 30.f, -27.f, 44.f, -19.f, ctl[i], ctlKind[i]);
+            ag::cell(vg, ST_CTRL_X[i], ST_CTRL_TOP, ST_CTRL_W, ST_CTRL_H, ctl[i], i == 4);
 
-        // ---- Channels ----
-        section(vg, ST_CH_SEC_Y, "CHANNELS");
+        // Channels: inputs on the upper row, outputs (tinted) on the lower row
+        ag::sectionHeader(vg, ST_PANEL_W, ST_CH_HDR, "CHANNELS");
         for (int i = 0; i < ST_N; ++i) {
             char buf[8];
             float cx = ST_CH_X0 + ST_CH_DX * (float)i;
             snprintf(buf, sizeof(buf), "IN %d", i + 1);
-            cell(vg, cx, ST_IN_Y, 33.f, -21.f, 38.f, -14.f, buf, 0);
+            ag::cell(vg, cx, ST_IN_TOP, ST_CH_W, ST_CH_H, buf);
             snprintf(buf, sizeof(buf), "OUT %d", i + 1);
-            cell(vg, cx, ST_OUT_Y, 33.f, -21.f, 38.f, -14.f, buf, 1);
+            ag::cell(vg, cx, ST_OUT_TOP, ST_CH_W, ST_CH_H, buf, true);
         }
 
         Widget::draw(args);
@@ -499,16 +349,20 @@ struct STPanelBackground : TransparentWidget {
 };
 
 // ------------------------------------------------------------
-// Live value arcs around the knobs
+// Live value arcs around the knobs (track + one value arc)
 // ------------------------------------------------------------
+// Draws the four side-knob value arcs, with the bipolar LEVEL knob drawing
+// its arc from the centre and using the warm colour when negative.
 struct STKnobArcs : TransparentWidget {
     Stasis* module = nullptr;
 
+    // Constructor: positions the widget over the whole panel.
     STKnobArcs(Stasis* m) : module(m) { box.size = Vec(ST_PANEL_W, ST_PANEL_H); }
 
+    // Draws the track and value arcs for all four knobs.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
-        const float R = 17.2f;
+        const float R = 16.f;
         const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
         const float a1 =  0.75f * (float)M_PI - (float)M_PI / 2.f;
 
@@ -531,17 +385,11 @@ struct STKnobArcs : TransparentWidget {
 
             float s = a0 + (a1 - a0) * lo;
             float e = a0 + (a1 - a0) * hi;
-            NVGcolor col = (bipolar && v < 0.5f) ? colWarm() : colAccent();
+            NVGcolor col = (bipolar && v < 0.5f) ? ag::warm() : ag::accent();
 
             nvgBeginPath(vg);
             nvgArc(vg, cx, cy, R, s, e, NVG_CW);
-            nvgStrokeColor(vg, withA(col, 0.18f));
-            nvgStrokeWidth(vg, 5.f);
-            nvgStroke(vg);
-
-            nvgBeginPath(vg);
-            nvgArc(vg, cx, cy, R, s, e, NVG_CW);
-            nvgStrokeColor(vg, withA(col, 0.95f));
+            nvgStrokeColor(vg, col);
             nvgStrokeWidth(vg, 2.f);
             nvgStroke(vg);
         }
@@ -551,27 +399,32 @@ struct STKnobArcs : TransparentWidget {
 // ------------------------------------------------------------
 // Register display: bars + chain + loop bus + history heat map
 // ------------------------------------------------------------
+// Live register display: draws the per-stage bars, chain arrows, loop bus,
+// history heat map and readouts. Uses demo values in the module browser.
 struct STDisplayWidget : TransparentWidget {
     Stasis* module = nullptr;
 
+    // Constructor: positions the display widget under its bezel.
     STDisplayWidget(Stasis* m) : module(m) {
         box.pos = Vec(ST_DISP_X, ST_DISP_Y);
         box.size = Vec(ST_DISP_W, ST_DISP_H);
     }
 
     // ---- static background ----
+    // Draws the display screen, header/footer hairlines, empty bar slots, the
+    // voltage grid with labels, the heat map frame and its stage-number labels.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
         const float plotW = ST_PITCH * ST_N;
 
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, 0, 0, ST_DISP_W, ST_DISP_H, 4.f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, ST_DISP_H,
-                                           nvgRGB(0x0a, 0x16, 0x1f), nvgRGB(0x03, 0x06, 0x09)));
-        nvgFill(vg);
+        ag::screen(vg, 0.f, 0.f, ST_DISP_W, ST_DISP_H);
 
+        // separators under the header and above the footer
         nvgBeginPath(vg);
-        nvgRoundedRect(vg, 0.5f, 0.5f, ST_DISP_W - 1.f, ST_DISP_H - 1.f, 4.f);
+        nvgMoveTo(vg, 8.f, ST_HEAD_LINE);
+        nvgLineTo(vg, ST_DISP_W - 8.f, ST_HEAD_LINE);
+        nvgMoveTo(vg, 8.f, ST_FOOT_LINE);
+        nvgLineTo(vg, ST_DISP_W - 8.f, ST_FOOT_LINE);
         nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
         nvgStrokeWidth(vg, 1.f);
         nvgStroke(vg);
@@ -579,9 +432,9 @@ struct STDisplayWidget : TransparentWidget {
         // Bar slots
         for (int i = 0; i < ST_N; ++i) {
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, colX(i) - ST_BAR_W / 2.f - 1.f, ST_BAR_CY - ST_BAR_H,
-                           ST_BAR_W + 2.f, 2.f * ST_BAR_H, 2.f);
-            nvgFillColor(vg, nvgRGBA(255, 255, 255, 6));
+            nvgRect(vg, colX(i) - ST_BAR_W / 2.f - 1.f, ST_BAR_CY - ST_BAR_H,
+                    ST_BAR_W + 2.f, 2.f * ST_BAR_H);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, 8));
             nvgFill(vg);
         }
 
@@ -596,30 +449,26 @@ struct STDisplayWidget : TransparentWidget {
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
         }
-        NVGcolor gl = nvgRGBA(0x8a, 0x95, 0xa5, 170);
-        drawText(vg, ST_PX0 - 4.f, ST_BAR_CY - ST_BAR_H, "+10", 6.f, gl, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-        drawText(vg, ST_PX0 - 4.f, ST_BAR_CY,            "0",   6.f, gl, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
-        drawText(vg, ST_PX0 - 4.f, ST_BAR_CY + ST_BAR_H, "-10", 6.f, gl, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.5f);
+        ag::text(vg, ST_PX0 - 4.f, ST_BAR_CY - ST_BAR_H, "+10", 7.f, ag::dim(), ag::ALIGN_R, 0.f);
+        ag::text(vg, ST_PX0 - 4.f, ST_BAR_CY,            "0",   7.f, ag::dim(), ag::ALIGN_R, 0.f);
+        ag::text(vg, ST_PX0 - 4.f, ST_BAR_CY + ST_BAR_H, "-10", 7.f, ag::dim(), ag::ALIGN_R, 0.f);
 
         // Heat map frame + row labels
-        nvgBeginPath(vg);
-        nvgRoundedRect(vg, ST_PX0 - 1.f, ST_HEAT_Y - 1.f, plotW + 2.f, ST_ROW_H * ST_N + 2.f, 2.f);
-        nvgFillColor(vg, nvgRGBA(255, 255, 255, 5));
-        nvgFill(vg);
-        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 26));
-        nvgStrokeWidth(vg, 1.f);
-        nvgStroke(vg);
+        ag::plotFrame(vg, ST_PX0 - 1.f, ST_HEAT_Y - 1.f, plotW + 2.f, ST_ROW_H * ST_N + 2.f);
         for (int r = 0; r < ST_N; ++r) {
             char b[4];
             snprintf(b, sizeof(b), "%d", r + 1);
-            drawText(vg, ST_PX0 - 4.f, ST_HEAT_Y + ((float)r + 0.5f) * ST_ROW_H, b, 5.5f, gl,
-                     NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.f);
+            ag::text(vg, ST_PX0 - 5.f, ST_HEAT_Y + ((float)r + 0.5f) * ST_ROW_H, b, 7.f, ag::dim(),
+                     ag::ALIGN_R, 0.f);
         }
 
         Widget::draw(args);
     }
 
     // ---- live content ----
+    // Layer-1 overlay: draws per-stage bars with flash/skip indicators and
+    // slewed-output pointers, chain arrows, the loop bus, the history heat
+    // map, and the header/footer readouts.
     void drawLayer(const DrawArgs& args, int layer) override {
         if (layer != 1) {
             Widget::drawLayer(args, layer);
@@ -628,6 +477,7 @@ struct STDisplayWidget : TransparentWidget {
         NVGcontext* vg = args.vg;
         const float plotW = ST_PITCH * ST_N;
 
+        // Snapshot module state (or demo values in the module browser)
         float held[ST_N], outv[ST_N], flash[ST_N], skip[ST_N];
         bool  linked[ST_N];
         float hist[ST_N][ST_HN];
@@ -685,54 +535,49 @@ struct STDisplayWidget : TransparentWidget {
         nvgScissor(vg, 0, 0, ST_DISP_W, ST_DISP_H);
 
         // ================= bars =================
+        // One bar per stage: filled in the polarity colour, with a flash
+        // overlay when this clock sampled, a bright tip cap, an orange outline
+        // when skipped, and a white pointer beside the bar for the slewed
+        // output value.
         for (int i = 0; i < ST_N; ++i) {
             float cx = colX(i);
             float t = rack::math::clamp(held[i] / 10.f, -1.f, 1.f);
             float h = t * ST_BAR_H;
             bool pos = (t >= 0.f);
-            NVGcolor col = pos ? colAccent() : colWarm();
-            NVGcolor hi  = pos ? colBright() : nvgRGB(0xff, 0xc8, 0xa8);
+            NVGcolor col = pos ? ag::accent() : ag::warm();
+            NVGcolor hi  = pos ? ag::bright() : nvgRGB(0xff, 0xc8, 0xa8);
             float dim = (loopOn && i >= len) ? 0.45f : 1.f;
 
-            float yTip = ST_BAR_CY - h;
             float bh = std::max(std::fabs(h), 1.f);
             float y0 = pos ? (ST_BAR_CY - bh) : ST_BAR_CY;
-            if (pos) yTip = y0;
-            else     yTip = y0 + bh;
+            float yTip = pos ? y0 : y0 + bh;
 
-            // glow
+            // body (flat)
             nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - ST_BAR_W / 2.f - 2.f, y0 - 2.f, ST_BAR_W + 4.f, bh + 4.f, 3.f);
-            nvgFillColor(vg, withA(col, (0.10f + 0.25f * flash[i]) * dim));
-            nvgFill(vg);
-
-            // body
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, cx - ST_BAR_W / 2.f, y0, ST_BAR_W, bh, 2.f);
-            nvgFillPaint(vg, nvgLinearGradient(vg, 0, ST_BAR_CY, 0, yTip,
-                                               withA(col, 0.22f * dim), withA(col, 0.95f * dim)));
+            nvgRect(vg, cx - ST_BAR_W / 2.f, y0, ST_BAR_W, bh);
+            nvgFillColor(vg, ag::withA(col, 0.6f * dim));
             nvgFill(vg);
 
             // flash overlay
             if (flash[i] > 0.01f) {
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, cx - ST_BAR_W / 2.f, y0, ST_BAR_W, bh, 2.f);
-                nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, flash[i] * 0.55f));
+                nvgRect(vg, cx - ST_BAR_W / 2.f, y0, ST_BAR_W, bh);
+                nvgFillColor(vg, nvgRGBAf(1.f, 1.f, 1.f, flash[i] * 0.5f));
                 nvgFill(vg);
             }
 
             // tip cap
             nvgBeginPath(vg);
-            nvgRect(vg, cx - ST_BAR_W / 2.f - 1.f, yTip - 0.75f, ST_BAR_W + 2.f, 1.5f);
-            nvgFillColor(vg, withA(hi, 0.95f * dim));
+            nvgRect(vg, cx - ST_BAR_W / 2.f, yTip - 0.75f, ST_BAR_W, 1.5f);
+            nvgFillColor(vg, ag::withA(hi, dim));
             nvgFill(vg);
 
             // skipped-by-probability outline
             if (skip[i] > 0.01f) {
                 nvgBeginPath(vg);
-                nvgRoundedRect(vg, cx - ST_BAR_W / 2.f - 1.5f, ST_BAR_CY - ST_BAR_H - 0.5f,
-                               ST_BAR_W + 3.f, 2.f * ST_BAR_H + 1.f, 2.f);
-                nvgStrokeColor(vg, withA(colWarm(), skip[i] * 0.85f));
+                nvgRect(vg, cx - ST_BAR_W / 2.f - 1.5f, ST_BAR_CY - ST_BAR_H - 0.5f,
+                        ST_BAR_W + 3.f, 2.f * ST_BAR_H + 1.f);
+                nvgStrokeColor(vg, ag::withA(ag::warm(), skip[i] * 0.85f));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
             }
@@ -750,6 +595,10 @@ struct STDisplayWidget : TransparentWidget {
         }
 
         // ================= stage numbers, chain arrows, loop bus =================
+        // Numbers under each stage, with chain arrows between them (cyan when
+        // normalled, orange when broken by a patched input). When loop is on,
+        // the last active stage's number is boxed and a bus returns it to
+        // stage 1.
         for (int i = 0; i < ST_N; ++i) {
             char b[4];
             snprintf(b, sizeof(b), "%d", i + 1);
@@ -763,9 +612,7 @@ struct STDisplayWidget : TransparentWidget {
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
             }
-            drawText(vg, cx, ST_LBL_Y, b, 7.f,
-                     special ? colBright() : nvgRGBA(0x8a, 0x95, 0xa5, 220),
-                     NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.f);
+            ag::text(vg, cx, ST_LBL_Y, b, 7.f, special ? ag::bright() : ag::dim(), ag::ALIGN_C, 0.f);
 
             // link between stage i and i+1
             if (i < ST_N - 1) {
@@ -778,8 +625,8 @@ struct STDisplayWidget : TransparentWidget {
                     nvgLineTo(vg, ax - 1.8f, ST_LBL_Y + 2.6f);
                     nvgLineCap(vg, NVG_ROUND);
                     nvgLineJoin(vg, NVG_ROUND);
-                    nvgStrokeColor(vg, withA(colAccent(), a));
-                    nvgStrokeWidth(vg, 1.2f);
+                    nvgStrokeColor(vg, ag::withA(ag::accent(), a));
+                    nvgStrokeWidth(vg, 1.f);
                     nvgStroke(vg);
                 } else {
                     // chain broken by a patched input
@@ -805,15 +652,7 @@ struct STDisplayWidget : TransparentWidget {
             nvgLineTo(vg, xh, yTop + 3.f);
             nvgLineCap(vg, NVG_ROUND);
             nvgLineJoin(vg, NVG_ROUND);
-            nvgStrokeColor(vg, withA(colAccent(), 0.18f + 0.3f * clockFlash));
-            nvgStrokeWidth(vg, 3.5f);
-            nvgStroke(vg);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, xt, yTop);
-            nvgLineTo(vg, xt, ST_LOOP_Y);
-            nvgLineTo(vg, xh, ST_LOOP_Y);
-            nvgLineTo(vg, xh, yTop + 3.f);
-            nvgStrokeColor(vg, withA(colBright(), 0.85f));
+            nvgStrokeColor(vg, ag::withA(ag::bright(), 0.6f + 0.4f * clockFlash));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
@@ -823,11 +662,14 @@ struct STDisplayWidget : TransparentWidget {
             nvgLineTo(vg, xh - 2.3f, yTop + 3.4f);
             nvgLineTo(vg, xh + 2.3f, yTop + 3.4f);
             nvgClosePath(vg);
-            nvgFillColor(vg, withA(colBright(), 0.95f));
+            nvgFillColor(vg, ag::bright());
             nvgFill(vg);
         }
 
         // ================= history heat map =================
+        // One column per clock step (oldest on the left, newest on the right),
+        // one row per stage. Colour shows polarity, alpha scales with
+        // magnitude, and the white left edge marks the samples that landed.
         const float cw = plotW / (float)ST_HN;
         for (int c = 0; c < ST_HN; ++c) {
             if (c < ST_HN - count) continue;
@@ -837,12 +679,12 @@ struct STDisplayWidget : TransparentWidget {
                 float v = hist[r][idx];
                 float t = rack::math::clamp(v / 10.f, -1.f, 1.f);
                 float m = std::pow(std::fabs(t), 0.8f);
-                NVGcolor col = (t >= 0.f) ? colAccent() : colWarm();
+                NVGcolor col = (t >= 0.f) ? ag::accent() : ag::warm();
                 float y = ST_HEAT_Y + (float)r * ST_ROW_H;
 
                 nvgBeginPath(vg);
                 nvgRect(vg, x + 0.5f, y + 0.5f, cw - 1.f, ST_ROW_H - 1.f);
-                nvgFillColor(vg, withA(col, 0.10f + 0.85f * m));
+                nvgFillColor(vg, ag::withA(col, 0.10f + 0.85f * m));
                 nvgFill(vg);
 
                 if (upd[r][idx]) {
@@ -858,64 +700,39 @@ struct STDisplayWidget : TransparentWidget {
             float x = ST_PX0 + (float)(ST_HN - 1) * cw;
             nvgBeginPath(vg);
             nvgRect(vg, x, ST_HEAT_Y - 0.5f, cw, ST_ROW_H * ST_N + 1.f);
-            nvgStrokeColor(vg, withA(colBright(), 0.25f + 0.65f * clockFlash));
+            nvgStrokeColor(vg, ag::withA(ag::bright(), 0.25f + 0.65f * clockFlash));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
         }
 
-        // ================= readouts =================
+        // ================= header and footer readouts =================
+        // Header: clock lamp, LEN/PROB, LOOP/SHIFT state, SLEW. Footer: OLD/
+        // NEW markers and the step counter.
         {
             char buf[48];
-            NVGcolor c1 = nvgRGBA(0x3d, 0xe0, 0xff, 220);
-            NVGcolor cm = nvgRGBA(0xff, 0x9c, 0x6a, 230);
-            NVGcolor cd = nvgRGBA(0x8a, 0x95, 0xa5, 230);
 
             // clock lamp
             nvgBeginPath(vg);
-            nvgCircle(vg, 8.f, 7.f, 5.f);
-            nvgFillColor(vg, withA(colAccent(), 0.20f * clockFlash));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgCircle(vg, 8.f, 7.f, 2.2f);
-            nvgFillColor(vg, withA(colAccent(), 0.25f + 0.75f * clockFlash));
+            nvgCircle(vg, 8.f, 8.f, 2.5f);
+            nvgFillColor(vg, ag::withA(ag::accent(), 0.25f + 0.75f * clockFlash));
             nvgFill(vg);
 
             snprintf(buf, sizeof(buf), "LEN %d  PROB %.0f%%", len, prob * 100.f);
-            drawText(vg, 15.f, 7.f, buf, 7.f, c1, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, 15.f, 8.f, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
 
-            drawText(vg, ST_DISP_W / 2.f + 14.f, 7.f, loopOn ? "LOOP" : "SHIFT", 7.f,
-                     loopOn ? colBright() : cd, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, ST_DISP_W / 2.f + 14.f, 8.f, loopOn ? "LOOP" : "SHIFT", 7.f,
+                     loopOn ? ag::bright() : ag::dim(), ag::ALIGN_C, 0.5f);
 
             if (tau <= 0.f)       snprintf(buf, sizeof(buf), "SLEW OFF");
-            else if (tau < 1.f)   snprintf(buf, sizeof(buf), "SLEW %.0fms", tau * 1000.f);
-            else                  snprintf(buf, sizeof(buf), "SLEW %.1fs", tau);
-            drawText(vg, ST_DISP_W - 5.f, 7.f, buf, 7.f, cm, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            else if (tau < 1.f)   snprintf(buf, sizeof(buf), "SLEW %.0fMS", tau * 1000.f);
+            else                  snprintf(buf, sizeof(buf), "SLEW %.1fS", tau);
+            ag::text(vg, ST_DISP_W - 6.f, 8.f, buf, 7.f, ag::warm(), ag::ALIGN_R, 0.5f);
 
-            drawText(vg, ST_PX0, ST_CAP_Y, "OLD", 6.f, cd, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, ST_PX0, ST_CAP_Y, "OLD", 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "STEP %u", (unsigned) steps);
-            drawText(vg, ST_DISP_W / 2.f, ST_CAP_Y, buf, 6.f, c1, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 1.f);
-            drawText(vg, ST_PX0 + plotW, ST_CAP_Y, "NEW", 6.f, cd, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+            ag::text(vg, ST_DISP_W / 2.f, ST_CAP_Y, buf, 7.f, ag::accent(), ag::ALIGN_C, 0.5f);
+            ag::text(vg, ST_PX0 + plotW, ST_CAP_Y, "NEW", 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
         }
-
-        // ================= scanlines, vignette, glass =================
-        nvgBeginPath(vg);
-        for (int y = 0; y < (int) ST_DISP_H; y += 3)
-            nvgRect(vg, 0, y + 1, ST_DISP_W, 1);
-        nvgFillColor(vg, nvgRGBA(0, 0, 0, 20));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, ST_DISP_W, ST_DISP_H);
-        nvgFillPaint(vg, nvgRadialGradient(vg, ST_DISP_W / 2.f, ST_DISP_H / 2.f,
-                                           ST_DISP_W * 0.45f, ST_DISP_W * 0.85f,
-                                           nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 120)));
-        nvgFill(vg);
-
-        nvgBeginPath(vg);
-        nvgRect(vg, 0, 0, ST_DISP_W, ST_DISP_H * 0.30f);
-        nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, ST_DISP_H * 0.30f,
-                                           nvgRGBA(255, 255, 255, 16), nvgRGBA(255, 255, 255, 0)));
-        nvgFill(vg);
 
         nvgRestore(vg);
 
@@ -928,7 +745,11 @@ struct STDisplayWidget : TransparentWidget {
 // ------------------------------------------------------------
 // Module widget
 // ------------------------------------------------------------
+// Places the static panel, screws, live knob arcs, live display, the four
+// side knobs, the CONTROL row (clock/reset inputs + loop/step buttons with
+// LEDs + poly output) and the eight IN/OUT jack pairs.
 struct StasisWidget : ModuleWidget {
+    // Builds the widget tree.
     StasisWidget(Stasis* module) {
         setModule(module);
         box.size = Vec(ST_PANEL_W, ST_PANEL_H);
@@ -941,7 +762,7 @@ struct StasisWidget : ModuleWidget {
         addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
         addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
-        addChild(new STDisplayWidget(module));
+        addChild(new STDisplayWidget(module));  
 
         // Side knobs: SLEW, PROB, LENGTH, LEVEL
         for (int k = 0; k < 4; ++k) {
@@ -949,7 +770,7 @@ struct StasisWidget : ModuleWidget {
                 Vec(ST_KNOB_X[k], ST_KNOB_Y[k]), module, k));
         }
 
-        // Control row
+        // Control row: inputs, buttons, output
         addInput(createInputCentered<DarkPJ301MPort>(
             Vec(ST_CTRL_X[0], ST_CTRL_Y), module, Stasis::CLOCK_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(
@@ -957,24 +778,24 @@ struct StasisWidget : ModuleWidget {
 
         addParam(createParamCentered<LEDButton>(
             Vec(ST_CTRL_X[2], ST_CTRL_Y), module, Stasis::LOOP_PARAM));
-        addChild(createLightCentered<MediumLight<STCyanLight>>(
+        addChild(createLightCentered<MediumLight<ag::CyanLight>>(
             Vec(ST_CTRL_X[2], ST_CTRL_Y), module, Stasis::LOOP_LIGHT));
 
         addParam(createParamCentered<LEDButton>(
             Vec(ST_CTRL_X[3], ST_CTRL_Y), module, Stasis::STEP_PARAM));
-        addChild(createLightCentered<MediumLight<STCyanLight>>(
+        addChild(createLightCentered<MediumLight<ag::CyanLight>>(
             Vec(ST_CTRL_X[3], ST_CTRL_Y), module, Stasis::STEP_LIGHT));
 
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(ST_CTRL_X[4], ST_CTRL_Y), module, Stasis::POLY_OUTPUT));
 
-        // Channel inputs (top row) and outputs (bottom row)
+        // Channel inputs (upper row) and outputs (lower row)
         for (int i = 0; i < ST_N; ++i) {
             float cx = ST_CH_X0 + ST_CH_DX * (float)i;
             addInput(createInputCentered<DarkPJ301MPort>(
-                Vec(cx, ST_IN_Y + 3.f), module, Stasis::CH_INPUT + i));
+                Vec(cx, ST_IN_TOP + ST_CH_JACK_DY), module, Stasis::CH_INPUT + i));
             addOutput(createOutputCentered<DarkPJ301MPort>(
-                Vec(cx, ST_OUT_Y + 3.f), module, Stasis::CH_OUTPUT + i));
+                Vec(cx, ST_OUT_TOP + ST_CH_JACK_DY), module, Stasis::CH_OUTPUT + i));
         }
     }
 };

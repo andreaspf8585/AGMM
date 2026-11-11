@@ -59,3 +59,5 @@ extern Model* modelMagicBox;
 extern Model* modelOscillator;
 extern Model* modelXBodyProblem;
 extern Model* modelLadder;  
+extern Model* modelTritoneParadox;
+extern Model* modelAMB;

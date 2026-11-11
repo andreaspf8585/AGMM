@@ -1,4 +1,5 @@
 #include "plugin.hpp"
+#include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -11,37 +12,113 @@
 #include <random>
 #include "dsp/minblep.hpp"
 
+// ============================================================================
+// Stagger
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// Stagger is a 20 HP polyphonic VCO with a stereo "chaos" pitch drift. Each
+// voice runs two independent oscillators (L and R) whose pitch is the base
+// pitch plus a slow, filtered random drift — so the two channels slowly
+// detune against each other, giving a wide, unstable, "staggering" tone.
+//
+// Controls:
+//   FREQ         Base frequency (10 Hz .. 6 kHz, logarithmic)
+//   CHAOS        Depth of the random pitch drift
+//   WAVE         Waveform (sine / triangle / saw / square)
+//   PW           Pulse width of the square wave
+//   MULT         Chaos multiplier (x1, x2, x3, x5, x10)
+//   RANGE        CV input range (+-5 V or +-10 V)
+//   RESET        Resets the chaos drift to zero on a rising edge
+//   V/OCT        1 V/oct pitch input (polyphonic)
+//
+// Each of the four knob rows also has a dedicated CV input and attenuverter,
+// so chaos depth, waveform, and pulse width can all be modulated.
+//
+// Outputs:
+//   OUT L, OUT R   Polyphonic VCOs, one voice per channel of the 1 V/oct input.
+//                  The two channels drift independently for stereo width.
+//
+// The display shows the current waveform (two cycles) with a phase marker,
+// plus a scrolling history of the chaos drift and its depth. The FREQ
+// parameter is a custom ParamQuantity that accepts both frequency values
+// ("440") and note names ("A4", "C#3") in its editable field.
+//
+// File structure:
+//   1. Layout constants and shared display settings.
+//   2. StFreqQ custom ParamQuantity for the frequency knob.
+//   3. Stagger module: Voice struct, config, DSP, drift, per-voice outputs.
+//   4. Anonymous-namespace UI helpers: stWave, STPanel, STDisplay.
+//   5. StaggerWidget: places all knobs, jacks, switches and the display.
+//   6. Model registration.
+// ============================================================================
+
 static const int   ST_DRIFT_N = 128;                 // more history points -> more spikes
 static const float ST_CHAOS_DISP_GAIN = 100.f;       // bring the tiny drift into view
 static const float ST_CHAOS_LED_GAIN  = 160.f;       // make the LED clearly bright
+
+// ---- panel layout (20 HP = 300 px wide) ----
 static const float ST_W = RACK_GRID_WIDTH * 20;   // 300
 static const float ST_H = RACK_GRID_HEIGHT;       // 380
-static const float ST_DX = 30.f, ST_DY = 46.f, ST_DW = 240.f, ST_DH = 62.f;
-static const float ST_RA = 170.f;     // row A knob centre (4 CV cells)
-static const float ST_RB = 250.f;     // row B control centre
-static const float ST_IOY = 338.f;
-static float stCol(int i) { return 37.5f + 75.f * i; }
+
+// Display (240 x 80): header row, two framed plots, footer row. Bezel adds 4 px around it.
+static const float ST_DX = 30.f, ST_DY = 26.f, ST_DW = 240.f, ST_DH = 80.f;
+static const float ST_HEAD_LINE = 15.5f;                  // hairline under the header row
+static const float ST_PLOT_Y = 20.f, ST_PLOT_H = 40.f;    // both plots share this band
+static const float ST_FOOT_LINE = 64.5f;                  // hairline above the footer row
+static const float ST_FOOT_TXT = ST_DH - 8.f;             // footer text centre line
+static const float ST_SC_X = 8.f,   ST_SC_W = 150.f;      // waveform plot
+static const float ST_DR_X = 170.f, ST_DR_W = 62.f;       // chaos drift plot
+
+// Cells are 64 px wide on a 72 px pitch: label centred 10 px below the top edge
+static const float ST_CW = 64.f;
+// Returns the horizontal centre of control column i (0..3).
+static float stCol(int i) { return 42.f + 72.f * (float)i; }
+
+// Row A: FREQ, CHAOS, WAVE, PW. Knob at +30, "CV" / "ATT" captions at +50, jack and trimpot at +67
+static const float ST_HDR_A = 122.f, ST_TOP_A = 130.f, ST_H_A = 84.f;
+static const float ST_A_KNOB = ST_TOP_A + 30.f, ST_A_CAP = ST_TOP_A + 50.f, ST_A_JACK = ST_TOP_A + 67.f;
+
+// Row B: MULT, RANGE, RESET, V/OCT. Control at +30
+static const float ST_HDR_B = 224.f, ST_TOP_B = 232.f, ST_H_B = 50.f;
+static const float ST_B_Y = ST_TOP_B + 30.f;
+
+// Row C: CHAOS light, OUT L, OUT R. Control at +30
+static const float ST_HDR_C = 292.f, ST_TOP_C = 300.f, ST_H_C = 50.f;
+static const float ST_C_Y = ST_TOP_C + 30.f;
+// Returns the horizontal centre of the bottom-row cell i (0..2).
+static float stColC(int i) { return 78.f + 72.f * (float)i; }
 
 // -----------------------------------------------------------------------------
 // Custom ParamQuantity for the frequency knob (10 Hz - 6000 Hz, logarithmic)
 // -----------------------------------------------------------------------------
+// ParamQuantity that maps the raw knob (0..1) to a frequency on a logarithmic
+// curve, and parses the editable display string as either Hz, a note name, or
+// a semitone offset from C4.
 struct StFreqQ : rack::engine::ParamQuantity {
+    // Converts a normalised knob value (0..1) to Hz on a 10 Hz..6 kHz log curve.
     static float mapToFreq(float v) {
         return 10.0f * std::pow(600.0f, v);
     }
+    // Inverse of mapToFreq: converts a frequency in Hz back to a normalised
+    // knob value, clamped to the 10 Hz..6 kHz range.
     static float mapFromFreq(float f) {
         f = math::clamp(f, 10.0f, 6000.0f);
         return std::log(f / 10.0f) / std::log(600.0f);
     }
 
+    // Returns the effective display value: the knob mapped to Hz.
     float getDisplayValue() override {
         return mapToFreq(getValue());
     }
 
+    // Accepts a display value (Hz) and converts it back to a knob position.
     void setDisplayValue(float displayValue) override {
         setValue(mapFromFreq(displayValue));
     }
 
+    // Returns the display string for the current value, e.g. "261.6 Hz".
     std::string getDisplayValueString() override {
         float freq = getDisplayValue();
         char buf[32];
@@ -49,10 +126,17 @@ struct StFreqQ : rack::engine::ParamQuantity {
         return std::string(buf);
     }
 
+    // Parses an editable string. Accepts:
+    //   - a raw frequency ("440", "261.63")
+    //   - a note name with octave ("A4", "C#3", "Bb2")
+    //   - a semitone offset from C4 ("+12", "-5")
+    // Whitespace is ignored; unknown input falls back to the base class.
     void setDisplayValueString(std::string s) override {
         s.erase(std::remove_if(s.begin(), s.end(), ::isspace), s.end());
         if (s.empty()) return;
 
+        // Parses a note name like "A4", "C#3", "Bb2" into a frequency in Hz.
+        // Returns -1 if the string is not a valid note name.
         auto parseNote = [](const std::string& note) -> float {
             static const std::map<std::string, int> noteMap = {
                 {"C", 0}, {"C#", 1}, {"Db", 1}, {"D", 2}, {"D#", 3}, {"Eb", 3},
@@ -74,6 +158,7 @@ struct StFreqQ : rack::engine::ParamQuantity {
             return -1.0f;
         };
 
+        // Try a plain frequency first
         try {
             size_t pos;
             float freq = std::stof(s, &pos);
@@ -83,12 +168,14 @@ struct StFreqQ : rack::engine::ParamQuantity {
             }
         } catch (...) {}
 
+        // Then try a note name
         float noteFreq = parseNote(s);
         if (noteFreq > 0) {
             setDisplayValue(noteFreq);
             return;
         }
 
+        // Then try a signed semitone offset from C4
         if (s[0] == '+' || s[0] == '-') {
             try {
                 int semitones = std::stoi(s);
@@ -102,6 +189,12 @@ struct StFreqQ : rack::engine::ParamQuantity {
     }
 };
 
+// ============================================================================
+// Module
+// ============================================================================
+// Polyphonic stereo VCO with two independent filtered-random pitch drifts
+// (one per channel), configurable waveforms, and CV control over pitch,
+// chaos depth, waveform and pulse width.
 struct Stagger : Module {
     enum ParamId {
         PITCH_PARAM,
@@ -135,6 +228,8 @@ struct Stagger : Module {
         LIGHTS_LEN
     };
 
+    // Per-voice oscillator state: separate phase and minBLEP generators for
+    // the left and right channels, so their drifts decouple cleanly.
     struct Voice {
         // Left channel
         float phase = 0.0f;
@@ -157,6 +252,7 @@ struct Stagger : Module {
     std::mt19937 rng;
     std::uniform_real_distribution<float> dist{-1.0f, 1.0f};
 
+    // Predefined chaos multipliers exposed on the MULT switch.
     static constexpr float multTable[5] = {1.0f, 2.0f, 3.0f, 5.0f, 10.0f};
     bool cvRangeTenVolt = false;
     float lastResetVoltage = 0.0f;
@@ -170,6 +266,8 @@ struct Stagger : Module {
     float driftTimer = 0.f;
     float driftPeak = 0.f;   // per-frame peak-hold (signed) for a spikier trace
 
+    // Constructor: configures every parameter (with custom ParamQuantity for
+    // FREQ), input, output and light, and seeds the RNG.
     Stagger() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
@@ -199,7 +297,10 @@ struct Stagger : Module {
         rng.seed(rd());
     }
 
-    void onReset() override {
+    // Rack reset hook: clears both chaos drifts and the history buffer, and
+    // drops all voices so they get recreated on the next process().
+    void onReset(const ResetEvent& e) override {
+        Module::onReset(e);
         chaosDrift = 0.0f;
         chaosDriftR = 0.0f;
         driftPeak = 0.f;
@@ -207,6 +308,10 @@ struct Stagger : Module {
         voices.clear();
     }
 
+    // Main audio callback: reads parameters and CVs, updates both chaos
+    // drift filters, renders every active voice's left/right oscillators
+    // with minBLEP-corrected waveforms, writes the outputs and updates the
+    // LED and display history.
     void process(const ProcessArgs& args) override {
         float freqKnob = StFreqQ::mapToFreq(params[PITCH_PARAM].getValue());
         float basePitchVoltage = std::log2(freqKnob / dsp::FREQ_C4);
@@ -226,6 +331,7 @@ struct Stagger : Module {
         cvRangeTenVolt = (params[CV_RANGE_PARAM].getValue() > 0.5f);
         float cvVoltageScale = cvRangeTenVolt ? 0.5f : 1.0f;
 
+        // Chaos reset on a rising edge of the reset input
         float resetVoltage = inputs[CHAOS_RESET_INPUT].getVoltage();
         if (resetVoltage > 1.0f && lastResetVoltage <= 1.0f) {
             chaosDrift = 0.0f;
@@ -242,6 +348,7 @@ struct Stagger : Module {
         chaosDrift  = (1.0f - alpha) * chaosDrift  + alpha * whiteNoiseL;
         chaosDriftR = (1.0f - alpha) * chaosDriftR + alpha * whiteNoiseR;
 
+        // Grow the voice count to match the polyphonic input's channel count
         int channels = std::max(1, inputs[CV_INPUT].getChannels());
         outputs[VCO_L_OUTPUT].setChannels(channels);
         outputs[VCO_R_OUTPUT].setChannels(channels);
@@ -250,6 +357,8 @@ struct Stagger : Module {
         }
         dispChannels = channels;
 
+        // Fast 2^x approximation (bit-twiddling exp2, accurate enough for
+        // pitch conversion at ~1e-3 relative error).
         auto fastExp2 = [](float x) {
             if (x == 0.0f) return 1.0f;
             union { float f; uint32_t i; } u;
@@ -257,6 +366,9 @@ struct Stagger : Module {
             return u.f;
         };
 
+        // Renders one channel of the chosen waveform for a voice, with
+        // minBLEP corrections on the saw/square discontinuities. Returns the
+        // waveform sample in [-1, 1].
         auto genWave = [&](float& phase, float& lastPhase, int waveIdx, float pw,
                            dsp::MinBlepGenerator<16,16>& bRise,
                            dsp::MinBlepGenerator<16,16>& bFall,
@@ -332,10 +444,12 @@ struct Stagger : Module {
             freqR = math::clamp(freqR, 10.0f, 6000.0f);
             float deltaPhaseR = freqR * args.sampleTime;
 
+            // Waveform select (quantized to the 4 discrete waves)
             float waveSelect = waveKnob + (modulatedWaveCV / 5.0f) * 2.0f;
             waveSelect = math::clamp(waveSelect, 0.0f, 3.0f);
             int waveIndex = (int)std::nearbyint(waveSelect);
 
+            // Pulse width (clamped to avoid degenerate pulse edges)
             float pwValue = pwKnob + (modulatedPwCV / 10.0f);
             pwValue = math::clamp(pwValue, 0.01f, 0.99f);
 
@@ -380,136 +494,13 @@ struct Stagger : Module {
 
 constexpr float Stagger::multTable[5];
 
+// Anonymous namespace: UI helpers and the two panel widgets.
 namespace {
 
-NVGcolor colBgTop()    { return nvgRGB(0x23, 0x26, 0x2d); }
-NVGcolor colBgBottom() { return nvgRGB(0x14, 0x16, 0x1a); }
-NVGcolor colText()     { return nvgRGB(0xc9, 0xd1, 0xdc); }
-NVGcolor colDim()      { return nvgRGB(0x7a, 0x85, 0x94); }
-NVGcolor colAccent()   { return nvgRGB(0x3d, 0xe0, 0xff); }
+namespace ag = agmm;
 
-void setFont(NVGcontext* vg) {
-    std::shared_ptr<window::Font> font =
-        APP->window->loadFont(asset::system("res/fonts/ShareTechMono-Regular.ttf"));
-    if (font) nvgFontFaceId(vg, font->handle);
-}
-
-void drawText(NVGcontext* vg, float x, float y, const char* s, float size, NVGcolor col,
-              int align = NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, float spacing = 1.f) {
-    setFont(vg);
-    nvgFontSize(vg, size);
-    nvgTextLetterSpacing(vg, spacing);
-    nvgTextAlign(vg, align);
-    nvgFillColor(vg, col);
-    nvgText(vg, x, y, s, NULL);
-}
-
-template <typename TBase = GrayModuleLightWidget>
-struct TSTCyanLight : TBase {
-    TSTCyanLight() { this->addBaseColor(nvgRGB(0x3d, 0xe0, 0xff)); }
-};
-using STCyanLight = TSTCyanLight<>;
-
-void drawLogo(NVGcontext* vg, float cx, float cy) {
-    const float w = 64.f, h = 18.f;
-    float x = cx - w / 2.f, y = cy - h / 2.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x - 2.f, y - 2.f, w + 4.f, h + 4.f, 9.f);
-    nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 7.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, x, y, x, y + h, nvgRGB(0x0b, 0x0d, 0x11), nvgRGB(0x1c, 0x20, 0x27)));
-    nvgFill(vg);
-    nvgStrokePaint(vg, nvgLinearGradient(vg, x, y, x + w, y, nvgRGB(0x3d, 0xe0, 0xff), nvgRGB(0xb0, 0x5a, 0xff)));
-    nvgStrokeWidth(vg, 1.2f);
-    nvgStroke(vg);
-    const float s = 2.2f;
-    float tx = x + 7.f, ty = y + h / 2.f - 3.f;
-    nvgBeginPath(vg);
-    nvgRect(vg, tx + s, ty, s, s);
-    nvgRect(vg, tx, ty + s * 1.4f, s, s);
-    nvgRect(vg, tx + s * 2.f, ty + s * 1.4f, s, s);
-    nvgFillColor(vg, colAccent());
-    nvgFill(vg);
-    drawText(vg, cx + 5.f, cy + 0.5f, "AGMM", 11.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 3.f);
-}
-
-void drawPanelBase(NVGcontext* vg, float W, float H, const char* title) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H, colBgTop(), colBgBottom()));
-    nvgFill(vg);
-    nvgStrokeWidth(vg, 1.f);
-    for (int y = 0; y < (int) H; y += 3) {
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, 0, y + 0.5f);
-        nvgLineTo(vg, W, y + 0.5f);
-        nvgStrokeColor(vg, nvgRGBA(255, 255, 255, (y % 6 == 0) ? 5 : 2));
-        nvgStroke(vg);
-    }
-    nvgBeginPath(vg);
-    nvgRect(vg, 0.5f, 0.5f, W - 1.f, H - 1.f);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
-    nvgStroke(vg);
-    drawLogo(vg, W / 2.f, 13.f);
-    drawText(vg, W / 2.f, 31.f, title, 13.f, colText(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 4.f);
-}
-
-void drawBezel(NVGcontext* vg, float x, float y, float w, float h) {
-    float bx = x - 5.f, by = y - 5.f, bw = w + 10.f, bh = h + 10.f;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx - 3.f, by - 3.f, bw + 6.f, bh + 6.f, 8.f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, bx, by, bx, by + bh, nvgRGB(0x0b, 0x0c, 0x0e), nvgRGB(0x2c, 0x30, 0x38)));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, bx, by, bw, bh, 6.f);
-    nvgFillColor(vg, nvgRGB(0x05, 0x07, 0x0a));
-    nvgFill(vg);
-}
-
-void plate(NVGcontext* vg, float x, float y, float w, float h) {
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, x, y, w, h, 6.f);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 55));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void ring(NVGcontext* vg, float cx, float cy, float r) {
-    nvgBeginPath(vg);
-    nvgCircle(vg, cx, cy, r);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 60));
-    nvgFill(vg);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
-    nvgStrokeWidth(vg, 1.f);
-    nvgStroke(vg);
-}
-
-void label(NVGcontext* vg, float x, float y, const char* t) {
-    drawText(vg, x, y, t, 7.f, colDim(), NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, 0.5f);
-}
-
-void screenBase(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H);
-    nvgFillPaint(vg, nvgRadialGradient(vg, W / 2.f, H / 2.f, 20.f, W * 0.75f, nvgRGB(0x08, 0x10, 0x16), nvgRGB(0x02, 0x04, 0x06)));
-    nvgFill(vg);
-}
-
-void screenFinish(NVGcontext* vg, float W, float H) {
-    nvgBeginPath(vg);
-    for (int y = 0; y < (int) H; y += 3) nvgRect(vg, 0, y + 1, W, 1);
-    nvgFillColor(vg, nvgRGBA(0, 0, 0, 22));
-    nvgFill(vg);
-    nvgBeginPath(vg);
-    nvgRect(vg, 0, 0, W, H * 0.3f);
-    nvgFillPaint(vg, nvgLinearGradient(vg, 0, 0, 0, H * 0.3f, nvgRGBA(255, 255, 255, 14), nvgRGBA(255, 255, 255, 0)));
-    nvgFill(vg);
-}
-
+// Evaluates the selected waveform at normalized phase p (0..1), using pw
+// for the pulse width of the square wave. Matches the DSP waveforms.
 float stWave(float p, int wave, float pw) {
     switch (wave) {
         case 1:  return (p < 0.5f) ? (4.f * p - 1.f) : (3.f - 4.f * p);
@@ -519,78 +510,95 @@ float stWave(float p, int wave, float pw) {
     }
 }
 
+// ------------------------------------------------------------
+// Panel background: title, display frame, one labelled cell per control
+// ------------------------------------------------------------
+// Static artwork: base panel, display bezel, the VCO section with its four
+// knob cells and CV/ATT captions, the CONTROL section with four cells, and
+// the OUTPUT section with its three cells.
 struct STPanel : TransparentWidget {
     STPanel() { box.size = Vec(ST_W, ST_H); }
+    // Draws all static panel art including section headers and cell plates.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
-        drawPanelBase(vg, ST_W, ST_H, "STAGGER");
-        drawBezel(vg, ST_DX, ST_DY, ST_DW, ST_DH);
+        ag::panelBase(vg, ST_W, ST_H, "STAGGER");
+        ag::bezel(vg, ST_DX, ST_DY, ST_DW, ST_DH);
 
+        ag::sectionHeader(vg, ST_W, ST_HDR_A, "VCO", 10.f);
         const char* a[4] = {"FREQ", "CHAOS", "WAVE", "PW"};
         for (int i = 0; i < 4; ++i) {
             float cx = stCol(i);
-            plate(vg, cx - 33.f, ST_RA - 17.f, 66.f, 70.f);
-            label(vg, cx, ST_RA + 21.f, a[i]);
-            ring(vg, cx, ST_RA, 17.f);
-            label(vg, cx - 16.f, ST_RA + 58.f, "CV");
-            label(vg, cx + 16.f, ST_RA + 58.f, "ATT");
+            ag::cell(vg, cx, ST_TOP_A, ST_CW, ST_H_A, a[i]);
+            ag::text(vg, cx - 16.f, ST_A_CAP, "CV", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+            ag::text(vg, cx + 16.f, ST_A_CAP, "ATT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
         }
 
+        ag::sectionHeader(vg, ST_W, ST_HDR_B, "CONTROL", 10.f);
         const char* b[4] = {"MULT", "RANGE", "RESET", "V/OCT"};
-        for (int i = 0; i < 4; ++i) {
-            float cx = stCol(i);
-            plate(vg, cx - 33.f, ST_RB - 17.f, 66.f, 52.f);
-            label(vg, cx, ST_RB + 25.f, b[i]);
-        }
-        ring(vg, stCol(0), ST_RB, 17.f);
+        for (int i = 0; i < 4; ++i)
+            ag::cell(vg, stCol(i), ST_TOP_B, ST_CW, ST_H_B, b[i]);
 
-        // row C: CHAOS light | OUT L | OUT R
-        plate(vg, stCol(0) - 33.f, ST_IOY - 27.f, 66.f, 44.f);
-        label(vg, stCol(0), ST_IOY - 19.f, "CHAOS");
-        plate(vg, stCol(2) - 33.f, ST_IOY - 27.f, 66.f, 44.f);
-        label(vg, stCol(2), ST_IOY - 19.f, "OUT L");
-        plate(vg, stCol(3) - 33.f, ST_IOY - 27.f, 66.f, 44.f);
-        label(vg, stCol(3), ST_IOY - 19.f, "OUT R");
+        ag::sectionHeader(vg, ST_W, ST_HDR_C, "OUTPUT", 10.f);
+        ag::cell(vg, stColC(0), ST_TOP_C, ST_CW, ST_H_C, "CHAOS");
+        ag::cell(vg, stColC(1), ST_TOP_C, ST_CW, ST_H_C, "OUT L", true);
+        ag::cell(vg, stColC(2), ST_TOP_C, ST_CW, ST_H_C, "OUT R", true);
+
         Widget::draw(args);
     }
 };
 
+// ------------------------------------------------------------
+// Display: waveform (two cycles, phase marker) and chaos drift history
+// ------------------------------------------------------------
+// Live display: draws the current waveform (two cycles) with a moving phase
+// marker, the scrolling chaos drift history, header readouts (frequency,
+// waveform, poly channel count) and footer readouts (pulse width or cycle
+// count, chaos depth). Uses demo data in the module browser.
 struct STDisplay : TransparentWidget {
     Stagger* module = nullptr;
+    // Constructor: positions the display widget under its bezel.
     STDisplay(Stagger* m) : module(m) {
         box.pos = Vec(ST_DX, ST_DY);
         box.size = Vec(ST_DW, ST_DH);
     }
 
-    static constexpr float SX0 = 8.f, SY0 = 14.f, SW = 150.f, SH = 36.f;
-    static constexpr float DX0 = 170.f, DY0 = 14.f, DW0 = 64.f, DH0 = 36.f;
-
+    // Static layer: fills the screen, draws the header/footer hairlines, the
+    // two plot frames and their zero lines.
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
-        screenBase(vg, ST_DW, ST_DH);
-        const float xs[2] = {SX0, DX0}, ys[2] = {SY0, DY0}, ws[2] = {SW, DW0}, hs[2] = {SH, DH0};
+        ag::screen(vg, 0.f, 0.f, ST_DW, ST_DH);
+
+        // separators under the header and above the footer
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, 8.f, ST_HEAD_LINE);
+        nvgLineTo(vg, ST_DW - 8.f, ST_HEAD_LINE);
+        nvgMoveTo(vg, 8.f, ST_FOOT_LINE);
+        nvgLineTo(vg, ST_DW - 8.f, ST_FOOT_LINE);
+        nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+        nvgStrokeWidth(vg, 1.f);
+        nvgStroke(vg);
+
+        const float xs[2] = {ST_SC_X, ST_DR_X}, ws[2] = {ST_SC_W, ST_DR_W};
         for (int k = 0; k < 2; ++k) {
-            nvgBeginPath(vg);
-            nvgRoundedRect(vg, xs[k] - 1.f, ys[k] - 1.f, ws[k] + 2.f, hs[k] + 2.f, 2.f);
-            nvgFillColor(vg, nvgRGBA(0, 0, 0, 110));
-            nvgFill(vg);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            ag::plotFrame(vg, xs[k], ST_PLOT_Y, ws[k], ST_PLOT_H);
+            nvgBeginPath(vg);   // zero line
+            nvgMoveTo(vg, xs[k] + 1.f, ST_PLOT_Y + ST_PLOT_H / 2.f);
+            nvgLineTo(vg, xs[k] + ws[k] - 1.f, ST_PLOT_Y + ST_PLOT_H / 2.f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 22));
             nvgStrokeWidth(vg, 1.f);
-            nvgStroke(vg);
-            nvgBeginPath(vg);
-            nvgMoveTo(vg, xs[k], ys[k] + hs[k] / 2.f + 0.5f);
-            nvgLineTo(vg, xs[k] + ws[k], ys[k] + hs[k] / 2.f + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 30));
             nvgStroke(vg);
         }
         Widget::draw(args);
     }
 
+    // Layer-1 overlay: draws the waveform (two cycles) with a phase marker,
+    // the chaos drift history trace, and the header/footer readouts.
     void drawLayer(const DrawArgs& args, int layer) override {
         if (layer != 1) { Widget::drawLayer(args, layer); return; }
         NVGcontext* vg = args.vg;
-        const float W = ST_DW, H = ST_DH;
+        const float W = ST_DW;
 
+        // Snapshot (or demo values in the module browser)
         float freq = 261.6f, pw = 0.5f, phase = 0.3f, depth = 0.4f;
         int wave = 0, ch = 1;
         float hist[ST_DRIFT_N];
@@ -601,7 +609,7 @@ struct STDisplay : TransparentWidget {
             for (int i = 0; i < ST_DRIFT_N; ++i)
                 hist[i] = module->driftHist[(module->driftHead + i) % ST_DRIFT_N];
         } else {
-            // Demo trace: keep the same visual density for any ST_DRIFT_N
+            // Demo trace: same visual density for any ST_DRIFT_N
             for (int i = 0; i < ST_DRIFT_N; ++i) {
                 float t = (float) i / (ST_DRIFT_N - 1);
                 hist[i] = 0.45f * std::sin(t * 12.f) + 0.25f * std::sin(t * 34.f + 1.f);
@@ -609,82 +617,86 @@ struct STDisplay : TransparentWidget {
         }
         wave = std::min(std::max(wave, 0), 3);
 
-        const float mid = SY0 + SH / 2.f, amp = SH / 2.f - 3.f;
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            const int N = 150;
-            for (int i = 0; i <= N; ++i) {
-                float t = 2.f * (float) i / N;
-                float p = t - std::floor(t);
-                float v = stWave(p, wave, pw);
-                float x = SX0 + SW * (float) i / N, y = mid - v * amp;
-                if (i == 0) nvgMoveTo(vg, x, y);
-                else nvgLineTo(vg, x, y);
-            }
-            nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0x3d, 0xe0, 0xff, 50) : nvgRGB(0x8a, 0xee, 0xff));
-            nvgStrokeWidth(vg, pass == 0 ? 4.f : 1.3f);
-            nvgLineJoin(vg, NVG_ROUND);
-            nvgStroke(vg);
+        // ---- waveform plot ----
+        const float mid = ST_PLOT_Y + ST_PLOT_H / 2.f, amp = ST_PLOT_H / 2.f - 4.f;
+        nvgBeginPath(vg);
+        const int N = 150;
+        for (int i = 0; i <= N; ++i) {
+            float t = 2.f * (float) i / N;
+            float p = t - std::floor(t);
+            float v = stWave(p, wave, pw);
+            float x = ST_SC_X + ST_SC_W * (float) i / N, y = mid - v * amp;
+            if (i == 0) nvgMoveTo(vg, x, y);
+            else nvgLineTo(vg, x, y);
         }
+        nvgStrokeColor(vg, ag::bright());
+        nvgStrokeWidth(vg, 1.5f);
+        nvgLineJoin(vg, NVG_ROUND);
+        nvgStroke(vg);
+
+        // phase marker: hairline and dot
         {
-            float x = SX0 + SW * 0.5f * phase, y = mid - stWave(phase, wave, pw) * amp;
+            float x = ST_SC_X + ST_SC_W * 0.5f * phase, y = mid - stWave(phase, wave, pw) * amp;
             nvgBeginPath(vg);
-            nvgMoveTo(vg, x, SY0);
-            nvgLineTo(vg, x, SY0 + SH);
-            nvgStrokeColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 90));
+            nvgMoveTo(vg, x, ST_PLOT_Y + 1.f);
+            nvgLineTo(vg, x, ST_PLOT_Y + ST_PLOT_H - 1.f);
+            nvgStrokeColor(vg, ag::withA(ag::violet(), 0.5f));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
             nvgBeginPath(vg);
-            nvgCircle(vg, x, y, 4.f);
-            nvgFillColor(vg, nvgRGBA(0xb0, 0x5a, 0xff, 70));
-            nvgFill(vg);
-            nvgBeginPath(vg);
-            nvgCircle(vg, x, y, 1.8f);
-            nvgFillColor(vg, nvgRGB(0xf0, 0xe0, 0xff));
+            nvgCircle(vg, x, y, 2.f);
+            nvgFillColor(vg, ag::violet());
             nvgFill(vg);
         }
 
+        // ---- chaos drift plot (128 history points span the plot width) ----
         nvgSave(vg);
-        nvgScissor(vg, DX0, DY0, DW0, DH0);
-        const float dm = DY0 + DH0 / 2.f, da = DH0 / 2.f - 2.f;
-        // 128 history points must span the 64 px wide field
-        const float xStep = (DW0 - 1.f) / (ST_DRIFT_N - 1);
-        for (int pass = 0; pass < 2; ++pass) {
-            nvgBeginPath(vg);
-            for (int i = 0; i < ST_DRIFT_N; ++i) {
-                float v = std::min(std::max(hist[i], -1.f), 1.f);
-                float x = DX0 + (float) i * xStep, y = dm - v * da;
-                if (i == 0) nvgMoveTo(vg, x, y);
-                else nvgLineTo(vg, x, y);
-            }
-            nvgStrokeColor(vg, pass == 0 ? nvgRGBA(0xb0, 0x5a, 0xff, 60) : nvgRGB(0xd8, 0xb0, 0xff));
-            nvgStrokeWidth(vg, pass == 0 ? 3.5f : 1.2f);
-            nvgLineJoin(vg, NVG_ROUND);
-            nvgStroke(vg);
+        nvgScissor(vg, ST_DR_X, ST_PLOT_Y, ST_DR_W, ST_PLOT_H);
+        const float dm = ST_PLOT_Y + ST_PLOT_H / 2.f, da = ST_PLOT_H / 2.f - 3.f;
+        const float xStep = (ST_DR_W - 2.f) / (ST_DRIFT_N - 1);
+        nvgBeginPath(vg);
+        for (int i = 0; i < ST_DRIFT_N; ++i) {
+            float v = std::min(std::max(hist[i], -1.f), 1.f);
+            float x = ST_DR_X + 1.f + (float) i * xStep, y = dm - v * da;
+            if (i == 0) nvgMoveTo(vg, x, y);
+            else nvgLineTo(vg, x, y);
         }
-        nvgResetScissor(vg);
+        nvgStrokeColor(vg, ag::violet());
+        nvgStrokeWidth(vg, 1.2f);
+        nvgLineJoin(vg, NVG_ROUND);
+        nvgStroke(vg);
         nvgRestore(vg);
 
-        screenFinish(vg, W, H);
-
+        // ---- header / footer readouts ----
         static const char* wn[4] = {"SINE", "TRI", "SAW", "SQR"};
         char buf[48];
-        snprintf(buf, sizeof(buf), "%.1fHZ", freq);
-        drawText(vg, 8.f, 7.f, buf, 7.f, nvgRGBA(0x3d, 0xe0, 0xff, 210), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 1.f);
+        snprintf(buf, sizeof(buf), "%.1f HZ", freq);
+        ag::text(vg, 8.f, 8.f, buf, 7.f, ag::accent(), ag::ALIGN_L, 0.5f);
         snprintf(buf, sizeof(buf), "%s%s", wn[wave], ch > 1 ? "  POLY" : "");
-        drawText(vg, W - 8.f, 7.f, buf, 7.f, nvgRGBA(0xff, 0xe6, 0x80, 220), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 1.f);
+        ag::text(vg, W - 8.f, 8.f, buf, 7.f, ag::warm(), ag::ALIGN_R, 0.5f);
+
         if (wave == 3) snprintf(buf, sizeof(buf), "PW %.0f%%", pw * 100.f);
-        else snprintf(buf, sizeof(buf), "1 CYCLE x2");
-        drawText(vg, 8.f, H - 6.f, buf, 6.5f, colDim(), NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, 0.8f);
+        else snprintf(buf, sizeof(buf), "2 CYCLES");
+        ag::text(vg, ST_SC_X + 2.f, ST_FOOT_TXT, buf, 7.f, ag::dim(), ag::ALIGN_L, 0.5f);
         snprintf(buf, sizeof(buf), "CHAOS %.0f%%", depth * 100.f);
-        drawText(vg, W - 8.f, H - 6.f, buf, 6.5f, colDim(), NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, 0.8f);
+        ag::text(vg, ST_DR_X + ST_DR_W - 2.f, ST_FOOT_TXT, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.5f);
+
         Widget::drawLayer(args, layer);
     }
 };
 
 } // namespace
 
+// ------------------------------------------------------------
+// Module widget
+// ------------------------------------------------------------
+// Places the static panel, screws, live display, and the three rows of
+// controls (VCO knobs with CV/attenuverters, CONTROL switches/jacks, OUTPUT
+// light and jacks).
 struct StaggerWidget : ModuleWidget {
+    // Builds the widget tree: static panel, screws, display, row A
+    // (knob + CV + attenuverter per cell), row B (mult, range, reset, v/oct)
+    // and row C (chaos LED + two output jacks).
     StaggerWidget(Stagger* module) {
         setModule(module);
         box.size = Vec(ST_W, ST_H);
@@ -697,25 +709,27 @@ struct StaggerWidget : ModuleWidget {
 
         addChild(new STDisplay(module));
 
+        // Row A: knob, CV input (left) and attenuverter (right) per cell
         const int knob[4] = {Stagger::PITCH_PARAM, Stagger::CHAOS_PARAM, Stagger::WAVE_PARAM, Stagger::PW_PARAM};
         const int att[4]  = {Stagger::PITCH_ATTEN_PARAM, Stagger::CHAOS_ATTEN_PARAM, Stagger::WAVE_ATTEN_PARAM, Stagger::PW_ATTEN_PARAM};
         const int cv[4]   = {Stagger::PITCH_CV_INPUT, Stagger::CHAOS_CV_INPUT, Stagger::WAVE_CV_INPUT, Stagger::PW_CV_INPUT};
         for (int i = 0; i < 4; ++i) {
             float cx = stCol(i);
-            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, ST_RA), module, knob[i]));
-            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, ST_RA + 40.f), module, cv[i]));
-            addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, ST_RA + 40.f), module, att[i]));
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, ST_A_KNOB), module, knob[i]));
+            addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, ST_A_JACK), module, cv[i]));
+            addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, ST_A_JACK), module, att[i]));
         }
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stCol(0), ST_RB), module, Stagger::CHAOS_MULT_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(stCol(1), ST_RB), module, Stagger::CV_RANGE_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(2), ST_RB), module, Stagger::CHAOS_RESET_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(3), ST_RB), module, Stagger::CV_INPUT));
+        // Row B
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stCol(0), ST_B_Y), module, Stagger::CHAOS_MULT_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(stCol(1), ST_B_Y), module, Stagger::CV_RANGE_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(2), ST_B_Y), module, Stagger::CHAOS_RESET_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(3), ST_B_Y), module, Stagger::CV_INPUT));
 
-        // Row C: chaos LED + L/R outputs
-        addChild(createLightCentered<SmallLight<STCyanLight>>(Vec(stCol(0), ST_IOY), module, Stagger::CHAOS_LIGHT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stCol(2), ST_IOY), module, Stagger::VCO_L_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stCol(3), ST_IOY), module, Stagger::VCO_R_OUTPUT));
+        // Row C: chaos light, then the outputs
+        addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(stColC(0), ST_C_Y), module, Stagger::CHAOS_LIGHT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stColC(1), ST_C_Y), module, Stagger::VCO_L_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stColC(2), ST_C_Y), module, Stagger::VCO_R_OUTPUT));
     }
 };
 
