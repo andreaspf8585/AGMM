@@ -1,23 +1,23 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: DarkHallGranular.cpp
-Generated: 2026-11-04 06:16
 -->
 
 # DarkHallGranular
 
 ## 1. Overview
 
-The `DarkHallGranular` module is a stereo reverb effect designed for the VCV Rack platform, implementing a granular-based reverberation system inspired by "galaxy-style" stereo reverb techniques. It processes stereo audio input through a complex delay-line network with modulation and filtering to create rich, evolving spatial effects.
+`DarkHallGranular` is an 18 HP stereo "galaxy-style" reverb. A shared input diffusion chain feeds two cross-coupled feedback tanks, each containing a long delay, a one-pole damping filter and two modulated all-passes. The two tanks cross-feed each other, producing a dense, slowly evolving tail.
 
-Key features include:
-- Stereo input/output processing
-- Modulatable parameters for replace, brightness, detune, bigness, and dry/wet mix
-- CV inputs with attenuverters for real-time parameter control
-- Reset input for state clearing
-- Input/output gain controls
-- Visual display showing audio scope and level meters
-- Configurable CV range (bipolar/unipolar)
+Key features:
+- Shared 4-stage all-pass input diffusion
+- Two cross-coupled feedback tanks (L and R)
+- Each tank: long delay + damping + 2 modulated all-passes
+- CV + attenuverter on Replace, Brightness, Detune, Bigness
+- Input gain, output gain, dry/wet
+- Reset input (clears tail) and reset LED via mode button
+- Selectable CV range (bipolar ±5 V or unipolar 0–10 V) via menu, persisted
+- Live scope + L/R meters
 
 ## Module Screenshot
 
@@ -27,266 +27,212 @@ Key features include:
 
 ### Main Classes
 
-The module is implemented as a single class `DarkHallGranular` inheriting from `rack::Module`.
+- `DarkHallGranular`: Core module class inheriting from `rack::Module`
+- `DelayLine`: Circular buffer with cubic (Hermite) interpolation and all-pass helper
+- `DhgPanelBackground`: Static panel artwork
+- `DhgDisplayWidget`: Live scope + meters
 
 ### Inheritance
 
-```
-DarkHallGranular : Module
-```
+- `DarkHallGranular` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-#### DelayLine
-A custom delay line implementation with:
-- Circular buffer (`std::vector<float> buf`)
-- Size tracking (`int size`)
-- Write pointer (`int write`)
-- Linear interpolation for fractional delays
-- Allpass filtering capability
-
-#### DarkHallGranular
-Main module class containing:
-- Multiple `DelayLine` instances for various delay paths
-- State variables for low-pass filters, LFOs, DC blocking
-- Parameter and input/output enumerations
-- Scope display buffers for visualization
-- CV range mode configuration
-
-### Relationships
-
-The module uses multiple `DelayLine` objects to create a complex feedback network:
-- 4 allpass delay lines (`apIn[4]`) for input diffusion
-- 2 delay lines (`del1`, `del2`) for main reverberation paths
-- 2 allpass delay lines (`dap1a`, `dap1b`) for first tank
-- 2 allpass delay lines (`dap2a`, `dap2b`) for second tank
+| Group | Storage |
+|-------|---------|
+| Input diffusion | `DelayLine apIn[4]` (init to 4096 samples each) |
+| Tank 1 | `DelayLine dap1a, dap1b, del1` (32768, 32768, 131072 samples) |
+| Tank 2 | `DelayLine dap2a, dap2b, del2` |
+| Damping | `float lp1, lp2` |
+| LFOs | `float lfo1, lfo2, lfo3, lfo4` |
+| Smoothing | `float bigSm` (Bigness smoother) |
+| DC block | `float dcInL, dcInR, dcOutL, dcOutR` |
+| Reset | `bool wasResetHigh`, `bool wasConnected` |
+| CV mode | `CVRange cvRangeMode` |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### DelayLine with cubic interpolation
 
-#### Delay Line Interpolation (Cubic Spline)
-For fractional delay read:
-$$
-y(t) = a t^3 + b t^2 + c t + y_1
-$$
-Where:
-- $a = -0.5 y_0 + 1.5 y_1 - 1.5 y_2 + 0.5 y_3$
-- $b = y_0 - 2.5 y_1 + 2.0 y_2 - 0.5 y_3$
-- $c = -0.5 y_0 + 0.5 y_2$
+The delay line reads at a fractional delay using 4-point Hermite interpolation:
 
-#### Allpass Filter
 $$
-y[n] = d[n] + g (x[n] - d[n-1])
+y(t) = ((a t + b) t + c) t + y_1
 $$
 
-Where:
-- $d[n]$ is the delayed input
-- $g$ is the allpass coefficient (-0.625)
+with the Hermite coefficients:
 
-#### Low-pass Filter
 $$
-y[n] = y[n-1] + \alpha (x[n] - y[n-1])
-$$
-
-Where $\alpha$ is a time-varying coefficient.
-
-#### Soft Clipping
-$$
-\text{softclip}(x, \text{limit}) = \text{limit} \cdot \tanh\left(\frac{x}{\text{limit}}\right)
+\begin{aligned}
+a &= -\tfrac{1}{2}y_0 + \tfrac{3}{2}y_1 - \tfrac{3}{2}y_2 + \tfrac{1}{2}y_3 \\
+b &= y_0 - \tfrac{5}{2}y_1 + 2y_2 - \tfrac{1}{2}y_3 \\
+c &= -\tfrac{1}{2}y_0 + \tfrac{1}{2}y_2
+\end{aligned}
 $$
 
-### Algorithms
+This 4-point interpolation eliminates the high-frequency aliasing that linear interpolation produces at large fractional delays.
 
-1. **Input Diffusion**: 4-stage allpass filtering with fixed delays
-2. **Reverberation Tanks**: Two parallel reverberation paths with feedback
-3. **Modulation**: LFOs modulating delay times and allpass coefficients
-4. **DC Blocking**: Simple DC blocking using feedback with 0.995 coefficient
+### Input diffusion
 
-### Filters
+Four series all-passes on the input smear transients:
 
-- Low-pass filters for smoothing wet signal
-- Allpass filters for phase manipulation
-- DC blocking filters
+$$
+y_i = d_i + g(x_i - g d_i), \quad \text{buf} = x_i - g d_i
+$$
 
-### Oscillators
+with $g = 0.75$ (high diffusion).
 
-- Four LFOs generating sine wave modulation signals at different rates:
-  - Rate 0.5 Hz (lfo1)
-  - Rate 0.31 Hz (lfo2)
-  - Rate 0.23 Hz (lfo3)
-  - Rate 0.37 Hz (lfo4)
+### Two cross-coupled tanks
 
-### Delay Lines
+Tank 1 (left):
 
-- 4 allpass delay lines with fixed delays: 150, 214, 319, 527 samples
-- 2 main delay lines with fixed delays: 4501, 6312 samples
-- 2 allpass delay lines for each tank with fixed delays: 2182, 2690, 2525, 2197 samples
+$$
+\begin{aligned}
+\text{read1} &= \text{read}(\text{del2}, D_2 + m_3\cdot\text{modDepth}) \\
+\text{wet1} &= \text{apOut} + \text{read1} \cdot g_{\text{rt}} \\
+\text{wet1} &= \text{LP}(\text{wet1}) \\
+\text{wet1} &= \text{AP}_a(\text{wet1}, D_{a1} + m_1\cdot\text{apMod}) \\
+\text{wet1} &= \text{AP}_b(\text{wet1}, D_{b1}) \\
+\text{write}(\text{del1}, \text{wet1})
+\end{aligned}
+$$
 
-### Feedback Systems
+Tank 2 (right) mirrors tank 1 with `del1` and `del2` swapped.
 
-- Two reverberation tanks with feedback paths
-- DC blocking using feedback with coefficient 0.995
-- Low-pass filtering of wet signal before output
+The key insight is that the two tanks **read each other's delay lines**, which creates a cross-coupled feedback network that produces a denser, more decorrelated stereo tail than two independent tanks would.
 
-### Modulation
+### Parameters
 
-- LFO modulation of delay times (±55 samples for main delays, ±14 samples for allpass)
-- LFO modulation of allpass coefficients (-0.625)
+- **Replace** — Sets `krt = 0.40 + 0.585*(1 - replace)`. This is the feedback gain; lower replace = more feedback = longer tail.
+- **Brightness** — Sets `lpCoef = 0.08 + 0.90 * bright^2`. This is the one-pole damping coefficient; higher brightness = brighter tail.
+- **Detune** — Sets modulation depth: `modDepth = detune^2 * 55 * srScale` and `apModDepth = detune * 14 * srScale`. Higher detune = more chorus/glide.
+- **Bigness** — Smoothly tracked as `bigSm += (bigTgt - bigSm) * 0.00015` with `bigTgt = 0.4 + bigness * 1.2`. This scales all delay lengths, so changing bigness glides the reverb size smoothly.
 
-### Random Processes
+### DC blocking
 
-- No explicit random processes; uses LFOs for time-varying modulation
+After the wet path, a DC blocker removes any DC offset introduced by the feedback:
+
+$$
+y[n] = x[n] - x[n-1] + 0.995 y[n-1]
+$$
+
+### Safety
+
+The wet path is soft-limited at ±8 V via `softClip`. The output is clamped to ±10 V.
 
 ## 4. Parameters and Controls
 
-### Knobs
+### Knobs (TONE section)
 
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| REPLACE | 0.20 | 0.0 - 1.0 | Replace ratio (0 = all wet, 1 = all dry) |
-| BRIGHTNESS | 0.45 | 0.0 - 1.0 | Brightness control for low-pass filter |
-| DETUNE | 0.50 | 0.0 - 1.0 | Detune amount for modulation |
-| BIGNESS | 0.70 | 0.0 - 1.0 | Size of reverberation effect |
-| DRYWET | 0.50 | 0.0 - 1.0 | Mix between dry and wet signals |
-| INPUT_GAIN | 1.0 | 0.0 - 2.0 | Input gain control |
-| OUTPUT_GAIN | 1.0 | 0.0 - 2.0 | Output gain control |
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `REPLACE_PARAM` | 0 | 1 | 0.20 | Shortens the tail |
+| `BRIGHTNESS_PARAM` | 0 | 1 | 0.45 | Damping cutoff |
+| `DETUNE_PARAM` | 0 | 1 | 0.50 | Modulation depth |
+| `BIGNESS_PARAM` | 0 | 1 | 0.70 | Room size + decay |
+| `REPLACE_ATTEN` | −1 | 1 | 0 | CV attenuverter |
+| `BRIGHTNESS_ATTEN` | −1 | 1 | 0 | CV attenuverter |
+| `DETUNE_ATTEN` | −1 | 1 | 0 | CV attenuverter |
+| `BIGNESS_ATTEN` | −1 | 1 | 0 | CV attenuverter |
 
-### Switches
+### LEVELS knobs
 
-None explicitly defined in code.
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `DRYWET_PARAM` | 0 | 1 | 0.50 | Dry/wet |
+| `INPUT_GAIN_PARAM` | 0 | 2 | 1 | Input gain |
+| `OUTPUT_GAIN_PARAM` | 0 | 2 | 1 | Output gain |
 
-### Buttons
-
-None explicitly defined in code.
-
-### CV Inputs
+### Inputs
 
 | Input | Description |
 |-------|-------------|
-| REPLACE_CV | Replace parameter CV input |
-| BRIGHTNESS_CV | Brightness parameter CV input |
-| DETUNE_CV | Detune parameter CV input |
-| BIGNESS_CV | Bigness parameter CV input |
-| RESET_IN | Reset input |
+| `IN_L` | Left |
+| `IN_R` | Right |
+| `REPLACE_CV` | Replace CV |
+| `BRIGHTNESS_CV` | Brightness CV |
+| `DETUNE_CV` | Detune CV |
+| `BIGNESS_CV` | Bigness CV |
+| `RESET_IN` | Reset (clears reverb tail) |
 
-### Gates
+### Outputs
 
-None explicitly defined in code.
+| Output | Description |
+|--------|-------------|
+| `OUT_L` | Left |
+| `OUT_R` | Right |
 
 ### Enumerations
 
-```cpp
-enum CVRange { BIPOLAR_M5_5, UNIPOLAR_0_10 };
-```
-
-### Parameter Ranges
-
-- All parameters: 0.0 to 1.0 (except gain which is 0.0 to 2.0)
-- CV inputs: -1.0 to +1.0 for attenuverters
-- Reset input: > 1.0V triggers reset
-
-### Default Values
-
-| Parameter | Default |
-|-----------|---------|
-| REPLACE_PARAM | 0.20 |
-| BRIGHTNESS_PARAM | 0.45 |
-| DETUNE_PARAM | 0.50 |
-| BIGNESS_PARAM | 0.70 |
-| DRYWET_PARAM | 0.50 |
-| INPUT_GAIN_PARAM | 1.0 |
-| OUTPUT_GAIN_PARAM | 1.0 |
+- `CVRange`: BIPOLAR_M5_5, UNIPOLAR_0_10
+- `ParamId`: Replace, Brightness, Detune, Bigness, DryWet, InputGain, OutputGain, ReplaceAtten, BrightnessAtten, DetuneAtten, BignessAtten
+- `InputId`: InL, InR, ReplaceCV, BrightnessCV, DetuneCV, BignessCV, Reset
+- `OutputId`: OutL, OutR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-| Input | Voltage Range | Description |
-|-------|---------------|-------------|
-| IN_L | -10V to +10V | Left input |
-| IN_R | -10V to +10V | Right input |
-| REPLACE_CV | -5V to +5V (bipolar) or 0V to +10V (unipolar) | Replace parameter CV |
-| BRIGHTNESS_CV | -5V to +5V (bipolar) or 0V to +10V (unipolar) | Brightness parameter CV |
-| DETUNE_CV | -5V to +5V (bipolar) or 0V to +10V (unipolar) | Detune parameter CV |
-| BIGNESS_CV | -5V to +5V (bipolar) or 0V to +10V (unipolar) | Bigness parameter CV |
-| RESET_IN | Any voltage | Reset input |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `IN_L` | Audio | ±8 V | Left audio |
+| `IN_R` | Audio | ±8 V | Right audio |
+| `REPLACE_CV` | CV | ±10 V | Replace modulation |
+| `BRIGHTNESS_CV` | CV | ±10 V | Brightness modulation |
+| `DETUNE_CV` | CV | ±10 V | Detune modulation |
+| `BIGNESS_CV` | CV | ±10 V | Bigness modulation |
+| `RESET_IN` | Gate | > 1 V | Clears tail |
 
 ### Outputs
 
-| Output | Voltage Range | Description |
-|--------|---------------|-------------|
-| OUT_L | -10V to +10V | Left output |
-| OUT_R | -10V to +10V | Right output |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUT_L` | Audio | ±10 V | Left output |
+| `OUT_R` | Audio | ±10 V | Right output |
+
+### Bypass
+
+`configBypass(IN_L, OUT_L)` and `configBypass(IN_R, OUT_R)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Processing**
-   - Input voltage is soft-clipped to prevent clipping
-   - Input gain applied
-   - Stereo input handling (if only left connected, right mirrors left)
-
-2. **Parameter Processing**
-   - CV inputs processed with attenuverters and scaled appropriately
-   - Parameters clamped to valid ranges
-
-3. **Input Diffusion**
-   - Input signal passed through 4 allpass delay lines with fixed delays
-
-4. **Reverberation Tanks**
-   - Two parallel reverberation tanks:
-     - Tank 1 (left output): Uses delay line `del2` and allpass filters
-     - Tank 2 (right output): Uses delay line `del1` and allpass filters
-   - Modulation applied to delay times via LFOs
-
-5. **Low-pass Filtering**
-   - Wet signals filtered with time-varying low-pass coefficients
-
-6. **DC Blocking**
-   - DC blocking applied using feedback with coefficient 0.995
-
-7. **Mixing**
-   - Dry and wet signals mixed using cosine/sine interpolation
-   - Output gain applied
-
-8. **Output Processing**
-   - Soft clipping applied to prevent output clipping
-   - Final voltage clamped to ±10V range
+1. **Reset check** — If RESET_IN goes high, reset all state.
+2. **Connection check** — If no outputs connected, emit 0; if no inputs connected, reset state and emit 0.
+3. **Parameter read** — Replace, brightness, detune, bigness (with CV), dry/wet, in/out gain.
+4. **Derived values** — `srScale = sr / 32000`, `bigSm` smoothing, `k = srScale * bigSm`, feedback `krt`, damping `lpCoef`, modulation depths.
+5. **Input diffusion** — 4 series all-passes on the mono-summed input.
+6. **Tank 1** — Read from `del2`, damp, 2 modulated all-passes, soft clip, write to `del1`.
+7. **Tank 2** — Read from `del1`, damp, 2 modulated all-passes, soft clip, write to `del2`.
+8. **DC block** — Standard one-pole high-pass.
+9. **Wet boost** — ×1.6.
+10. **Equal-power mix** — Dry × cos + wet × sin.
+11. **Output gain + soft limit** — Clamp to ±10 V.
+12. **Display** — Peaks + scope.
 
 ## 7. Important Functions
 
-### `resetState()`
-Clears all delay lines, resets filter states, and initializes LFO phases.
+### `DelayLine::read(float delay)`
 
-### `onReset()`
-Calls `resetState()` when module is reset.
+4-point Hermite interpolation for fractional delays.
 
-### `dataToJson() / dataFromJson()`
-Handles saving/loading of CV range mode configuration.
-
-### `cvParam()`
-Processes CV inputs with attenuverters and scales appropriately based on current CV range mode.
-
-### `process()`
-Main DSP processing function:
-- Handles reset input
-- Processes input signals
-- Updates LFOs
-- Implements reverberation algorithm
-- Applies mixing and output processing
-
-## 8. Mathematical Implementation
-
-### Delay Line Interpolation
-Uses cubic spline interpolation for fractional delay reads:
 ```cpp
+delay = clampT(delay, 2.f, (float)(size - 4));
+float pos = (float)write - 1.f - delay + 1.f;
+pos -= 1.f;
+while (pos < 0.f) pos += (float)size;
+int i1 = (int)pos;
+float t = pos - (float)i1;
+// ...
 float a = -0.5f*y0 + 1.5f*y1 - 1.5f*y2 + 0.5f*y3;
 float b =      y0 - 2.5f*y1 + 2.0f*y2 - 0.5f*y3;
 float c = -0.5f*y0             + 0.5f*y2;
 return ((a*t + b)*t + c)*t + y1;
 ```
 
-### Allpass Filter
+### `DelayLine::allpass(float in, float delay, float g)`
+
 ```cpp
 float d = read(delay);
 float w = in - g * d;
@@ -294,89 +240,131 @@ push(sanitize(w));
 return d + g * w;
 ```
 
-### Low-pass Filter
-```cpp
-lp1 += lpCoef * (wet - lp1);
-```
+### `resetState()`
 
-### Soft Clipping
-```cpp
-return limit * std::tanh(x / limit);
-```
+Clears all delay lines, filter states, DC blockers and LFOs.
 
-### LFO Generation
-```cpp
-lfo1 += args.sampleTime * 0.50f;
-// ... other LFOs
-float m1 = std::sin(twoPi * lfo1);
-```
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+## 8. Mathematical Implementation
+
+### Hermite coefficients
+
+$$
+a = -\tfrac{1}{2}y_0 + \tfrac{3}{2}y_1 - \tfrac{3}{2}y_2 + \tfrac{1}{2}y_3
+$$
+
+$$
+b = y_0 - \tfrac{5}{2}y_1 + 2y_2 - \tfrac{1}{2}y_3
+$$
+
+$$
+c = -\tfrac{1}{2}y_0 + \tfrac{1}{2}y_2
+$$
+
+### Feedback gain
+
+$$
+k_{rt} = 0.40 + 0.585(1 - \text{replace})
+$$
+
+### Damping coefficient
+
+$$
+\text{lpCoef} = 0.08 + 0.90\cdot\text{bright}^2
+$$
+
+### Modulation depth
+
+$$
+\text{modDepth} = \text{detune}^2 \cdot 55 \cdot \text{srScale}, \quad \text{apModDepth} = \text{detune} \cdot 14 \cdot \text{srScale}
+$$
+
+### Bigness smoothing
+
+$$
+\text{bigSm} \leftarrow \text{bigSm} + (\text{bigTgt} - \text{bigSm}) \cdot 0.00015
+$$
+
+### DC blocker
+
+$$
+y[n] = x[n] - x[n-1] + 0.995 y[n-1]
+$$
+
+### Wet boost
+
+$$
+w \leftarrow 1.6 w
+$$
+
+### Equal-power mix
+
+$$
+\text{out} = \cos(\text{mix}\cdot\pi/2)\text{dry} + \sin(\text{mix}\cdot\pi/2)\text{wet}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Uses fixed-size delay lines with circular buffers for efficient memory access
-- Allpass filters implemented with minimal operations
-- LFOs updated at sample rate with simple increment operations
-- No floating-point division in main processing loop
+- **Input diffusion**: 4 all-passes × (cubic read + write) ≈ 4 × 20 flops
+- **Tank 1**: 1 long read + 1 LP + 2 all-passes + soft clip + 1 write ≈ 60 flops
+- **Tank 2**: same ≈ 60 flops
+- **DC block**: 2 × 4 flops
+- **Total**: ~250 flops/sample
 
 ### Memory Allocation
 
-- Pre-allocated delay line buffers during initialization
-- No dynamic allocation during processing
-- Stack-based scope buffers (96 elements)
+- All delay lines allocated in the constructor:
+  - `apIn[4]`: 4 × 4096 floats ≈ 64 KB
+  - `dap1a`, `dap1b`, `dap2a`, `dap2b`: 4 × 32768 floats ≈ 512 KB
+  - `del1`, `del2`: 2 × 131072 floats ≈ 1 MB
+  - Total ≈ 1.6 MB
 
 ### Buffers
 
-- 4 allpass delay lines: 4096 samples each
-- 2 main delay lines: 131072 samples each
-- 2 allpass delay lines for each tank: 32768 samples each
-- Scope buffers: 96 elements for display visualization
+- 4 × 4096 input diffusers
+- 4 × 32768 tank all-pass
+- 2 × 131072 tank delays
+- 96 × 2 scope floats
 
 ### Real-time Processing
 
-- All processing done in `process()` function called at sample rate
-- No blocking operations or complex algorithms
-- Efficient use of standard library functions
+- All loops bounded
+- No allocation, no blocking
+- Sample-rate changes handled by `srScale`
 
 ### Thread Safety
 
-- Module assumes single-threaded processing by Rack engine
-- No explicit thread synchronization required
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Input sanitization using `sanitize()` function to handle NaN/inf values
-- Clamping of all parameters to valid ranges
-- Proper handling of delay line indices with modulo operations
-- Soft clipping prevents extreme signal peaks
+- `sanitize()` on every push (NaN/Inf → 0)
+- `softClip` on wet path (±8 V)
+- Output clamped to ±10 V
+- `!std::isfinite` check on outputs
 
 ## 10. Dependencies
 
-### Libraries
+### Libraries/Headers
 
-- VCV Rack SDK (`rack.hpp`)
-- Standard C++ libraries: `<cmath>`, `<algorithm>`, `<cstring>`, `<vector>`, `<memory>`, `<cstdio>`
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<algorithm>`, `<cstring>`, `<vector>`, `<memory>`, `<cstdio>`
 
-### Classes and Headers
+### External Classes
 
-- `rack::Module` (base class)
-- `rack::ParamId`, `rack::InputId`, `rack::OutputId` (enumerations)
-- `rack::ProcessArgs` (processing arguments)
-- `json_t` (for configuration serialization)
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::text`, `agmm::plotFrame`, `agmm::screen`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`
 
 ## 11. Summary
 
-The `DarkHallGranular` module implements a sophisticated stereo reverb effect using a combination of delay lines, allpass filters, and modulation to create rich spatial audio effects. It features:
+`DarkHallGranular` is a galaxy-style stereo reverb built from two cross-coupled feedback tanks. Each tank is a long delay with a one-pole damper and two modulated all-passes, and the tanks read each other's delay lines — which produces a much denser, more decorrelated tail than two independent reverbs would.
 
-- Two parallel reverberation tanks with feedback paths
-- Input diffusion through multiple allpass stages
-- LFO-modulated delay times for evolving textures
-- Time-varying low-pass filtering of wet signals
-- DC blocking for clean output
-- Comprehensive parameter control via knobs and CV inputs
-- Visual display showing audio scope and level meters
-- Configurable CV range modes (bipolar/unipolar)
-- Efficient real-time processing with minimal CPU overhead
+The design is focused on **slow, evolving textures**: the Bigness knob smoothly glides the delay lengths (via `bigSm`), the Detune knob modulates both the tank delays and the all-pass delays, and the four free-running LFOs (0.23–0.50 Hz) keep everything in constant slow motion. The result is a reverb that sounds like a room made of glass — present, detailed, and always shifting.
 
-The implementation follows established reverb design principles while incorporating unique modulation techniques to create distinctive spatial effects suitable for ambient and experimental audio applications.
+The main limitations are: no freeze, no pre-delay, and the fixed delay lengths mean you can't do "long hall" or "small room" extremes. But for "galactic" ambient work, this is exactly the right trade-off.
