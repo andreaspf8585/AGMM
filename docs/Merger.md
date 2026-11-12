@@ -1,14 +1,21 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Merger.cpp
-Generated: 2026-11-04 06:22
 -->
 
 # Merger
 
 ## 1. Overview
 
-The `Merger` module is a polyphonic signal combiner for VCV Rack. It accepts up to 16 mono audio inputs and merges them into a single polyphonic output. The module dynamically adjusts the number of channels in the output based on which input channels are connected, with unconnected inputs contributing 0V to the merged signal.
+`Merger` is a 12 HP utility that merges 16 monophonic inputs into one polyphonic output. Each of the 16 inputs becomes one channel of the poly cable. The output channel count is the **highest connected input**, so patching input 9 gives a 9-channel cable even if inputs 1–8 are empty; the empty ones simply carry 0 V. This keeps the channel numbering stable (input N always = channel N) instead of compacting the cable, which would silently re-pitch downstream modules whenever a cable is added or removed.
+
+Key features:
+- 16 monophonic inputs → 1 polyphonic output
+- Output channel count = highest connected input
+- Stable channel numbering (no compaction)
+- 4×4 grid layout for easy patching
+- 16-segment display showing which channels are active
+- Large channel count readout
 
 ## Module Screenshot
 
@@ -18,194 +25,188 @@ The `Merger` module is a polyphonic signal combiner for VCV Rack. It accepts up 
 
 ### Main Classes
 
-- **`Merger`**: Core module class inheriting from `rack::Module`
-- **`MergerWidget`**: UI widget class inheriting from `rack::ModuleWidget`
-- **`MGPanelBackground`**: Custom panel drawing class inheriting from `rack::TransparentWidget`
-- **`MGDisplayWidget`**: Channel count display widget inheriting from `rack::TransparentWidget`
+- `Merger`: Core module class inheriting from `rack::Module`
+- `MGPanelBackground`: Static panel artwork
+- `MGDisplayWidget`: Live channel count + segment bar
 
 ### Inheritance
 
-- `Merger` → `Module`
-- `MergerWidget` → `ModuleWidget`
-- `MGPanelBackground`, `MGDisplayWidget` → `TransparentWidget`
+- `Merger` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State
 
-- **Parameter/Control Enumerations**:
-  - `ParamId`: Empty (no parameters)
-  - `InputId`: `MERGE_INPUT` enum with 16 entries
-  - `OutputId`: `POLY_OUTPUT`
-  - `LightId`: Empty (no lights)
+| Group | Storage |
+|-------|---------|
+| Display | `int channels`, `bool active[16]` |
 
-### Relationships
-
-- `MergerWidget` owns and manages all UI components including:
-  - Panel background (`MGPanelBackground`)
-  - Channel display (`MGDisplayWidget`)
-  - Input jacks (16 total)
-  - Output jack
-- `Merger` holds state information:
-  - `channels`: Current number of active channels
-  - `active[16]`: Boolean array tracking which inputs are connected
-
-### Module Organization
-
-The module is organized into:
-1. Core DSP logic in `Merger::process()`
-2. UI drawing components in anonymous namespace
-3. Widget instantiation in `MergerWidget` constructor
+That's it — the module is essentially stateless. All the DSP is a single loop in `process()`.
 
 ## 3. DSP Theory
 
-The Merger performs a simple signal routing operation without any signal processing or mathematical transformation.
+### Channel counting
 
-### Algorithms
+Each sample, the module scans all 16 inputs and records:
 
-- **Channel Detection**: Iterates through all 16 inputs to determine the highest connected input channel.
-- **Signal Routing**: For each active channel, copies the voltage from the corresponding input to the output.
+1. Which inputs are connected (`active[i]`)
+2. The index of the **highest** connected input + 1 (`last`)
 
-### Filters/Oscillators/Delay Lines/Feedback Systems
+The output channel count is `last`. This is the only "signal processing" — the module is a passive router.
 
-None implemented. This is a pure routing module.
+### Why not compaction?
 
-### Modulation/Random Processes
+A common alternative is to compact the poly cable (skip empty channels). This is wrong for the following reason:
 
-No modulation or random processes present.
+- **Before**: Input 5 connected, output has 5 channels (input 5 = channel 5)
+- **After patching input 3**: If compacted, input 3 = channel 1, input 5 = channel 2. Downstream modules would now play the wrong note.
+
+With the "highest connected" rule:
+- **Before**: Input 5 = channel 5
+- **After patching input 3**: Input 3 = channel 3, input 5 = channel 5. Downstream modules are unaffected.
+
+This is the crucial design decision that makes `Merger` a reliable poly utility.
 
 ## 4. Parameters and Controls
 
-### Knobs/Switches/Buttons
+### Knobs
 
-- **None**: The module has no user-controllable parameters.
+None.
 
-### CV Inputs/Gates
+### Buttons
 
-- **16 Input Channels** (`MERGE_INPUT + i` where `i = 0..15`):
-  - Each input is a mono audio jack
-  - Voltage range: ±12V (standard VCV Rack audio range)
-  - Behavior: Connected inputs contribute their signal to the output
+None.
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `MERGE_INPUT + 0..15` | 16 monophonic inputs |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `POLY_OUTPUT` | Polyphonic output |
 
 ### Enumerations
 
-- `InputId`: `MERGE_INPUT + i` for i = 0..15
-- `OutputId`: `POLY_OUTPUT`
-
-### Parameter Ranges/Default Values
-
-- **No parameters**: All values are determined by input connection status.
+- `ParamId`: (none)
+- `InputId`: `ENUMS(MERGE_INPUT, 16)`
+- `OutputId`: POLY_OUTPUT
+- `LightId`: (none)
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-| Name | Type | Voltage Range | Behavior |
-|------|------|---------------|----------|
-| `MERGE_INPUT + i` (i = 0..15) | Mono Audio | ±12V | Input channel; connected inputs contribute their signal to output |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `MERGE_INPUT + 0..15` | Audio/CV | ±10 V | 16 monophonic inputs |
 
-### Outputs
+### Output
 
-| Name | Type | Voltage Range | Behavior |
-|------|------|---------------|----------|
-| `POLY_OUTPUT` | Polyphonic Audio | ±12V | Output channel count determined by highest connected input |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `POLY_OUTPUT` | Poly | ±10 V | Polyphonic output (1..16 channels) |
+
+### Channel Count
+
+The output channel count is `max(connected input indices) + 1`. So:
+- No inputs → 0 channels (silent)
+- Only input 1 → 1 channel
+- Inputs 1 and 5 → 5 channels (1, 2, 3, 4 carry 0 V)
+- All 16 inputs → 16 channels
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Connection Detection**:
-   - Iterate through all 16 inputs
-   - Check if each input is connected using `isConnected()`
-   - Update `active[i]` array accordingly
-   - Track the highest connected input index (`last`)
+The entire pipeline is 3 lines of code:
 
-2. **Channel Count Determination**:
-   - Set `channels = last` (number of active channels)
-   - If no inputs are connected, `channels = 0`
+```cpp
+int last = 0;
+for (int i = 0; i < 16; ++i) {
+    bool c = inputs[MERGE_INPUT + i].isConnected();
+    active[i] = c;
+    if (c) last = i + 1;
+}
+channels = last;
 
-3. **Output Configuration**:
-   - Call `outputs[POLY_OUTPUT].setChannels(last)` to configure polyphonic output
-   - For each active channel `i`, call `outputs[POLY_OUTPUT].setVoltage(inputs[MERGE_INPUT + i].getVoltage(), i)`
+outputs[POLY_OUTPUT].setChannels(last);
+for (int i = 0; i < last; ++i)
+    outputs[POLY_OUTPUT].setVoltage(inputs[MERGE_INPUT + i].getVoltage(), i);
+```
+
+1. Scan all 16 inputs, record `active[]`, find `last`.
+2. Set the output channel count to `last`.
+3. Copy each input's voltage to the matching output channel.
 
 ## 7. Important Functions
 
-### `Merger::process()`
-- **Purpose**: Main DSP processing function
-- **Responsibility**:
-  - Detects connected inputs
-  - Updates channel count
-  - Routes signals from inputs to output
+### `process(const ProcessArgs &args)`
 
-### `MergerWidget::MergerWidget()`
-- **Purpose**: UI initialization
-- **Responsibility**:
-  - Sets up module reference
-  - Creates and positions all UI components
-  - Adds input/output jacks
+The only non-trivial function. It's a single pass over the 16 inputs.
 
-### `MGDisplayWidget::drawLayer()`
-- **Purpose**: Custom display rendering
-- **Responsibility**:
-  - Shows current channel count
-  - Visualizes active/inactive channels with segmented bar
+There are no helper functions — the module is intentionally minimal.
 
 ## 8. Mathematical Implementation
 
-No mathematical operations are performed. The implementation is purely logical:
+This module has no mathematical processing. It's a pure router.
 
-```cpp
-void process(const ProcessArgs& args) override {
-    int last = 0;
-    for (int i = 0; i < 16; ++i) {
-        bool c = inputs[MERGE_INPUT + i].isConnected();
-        active[i] = c;
-        if (c) last = i + 1;
-    }
-    channels = last;
+The only "computation" is the max-index-of-connected-inputs:
 
-    outputs[POLY_OUTPUT].setChannels(last);
-    for (int i = 0; i < last; ++i)
-        outputs[POLY_OUTPUT].setVoltage(inputs[MERGE_INPUT + i].getVoltage(), i);
-}
-```
+$$
+N_{\text{out}} = 1 + \max_{i \in [0,15]} \{i : \text{input}_i \text{ connected}\}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- **Minimal**: Single loop through 16 inputs
-- **Constant time complexity**: O(1) operation regardless of input state
+- 16 `isConnected()` checks per sample (very cheap)
+- 16 `getVoltage()` calls + `setVoltage()` calls (cheap)
+- Total: ~50 ops/sample
 
 ### Memory Allocation
 
-- **Static allocation**: No dynamic memory allocation
-- **Fixed-size arrays**: `active[16]` array with known size
+- No allocation ever
+- Fixed-size arrays
 
 ### Buffers
 
-- **No buffers**: Direct signal routing without delay or storage
+- `bool active[16]` — 16 bools
 
 ### Real-time Processing
 
-- **Optimized for real-time**: Simple iteration and direct assignment
-- **Thread safety**: Uses standard VCV Rack module threading model
+- The entire process is O(16), bounded
+- No branches that could stall
+- No allocation, no blocking
+
+### Thread Safety
+
+- All state written by audio thread, read by UI thread via torn reads
+- `channels` is the only shared variable, and it's a single int read
 
 ### Numerical Stability
 
-- **None applicable**: No numerical computation involved
+- No numerical operations
+- Just copies voltages
 
 ## 10. Dependencies
 
 ### Libraries/Headers
 
-- `rack.hpp`: Core VCV Rack API
-- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`: Standard C++ libraries
-- `<memory>`: For `std::shared_ptr`
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`
 
-### Classes/Types
+### External Classes
 
-- `Module`, `ModuleWidget`, `TransparentWidget`: VCV Rack base classes
-- `Input`, `Output`: VCV Rack signal handling classes
-- `Vec`, `NVGcontext`, `NVGcolor`: VCV Rack graphics and vector types
-- `APP`, `window::Font`: VCV Rack application context
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::sectionHeader`, `agmm::withA`, `agmm::accent`, `agmm::bright`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `Merger` module is a simple yet effective polyphonic signal combiner that dynamically adjusts its output channel count based on input connections. It accepts up to 16 mono inputs and routes them to a single polyphonic output, with unconnected inputs contributing 0V. The implementation is optimized for real-time performance with minimal CPU overhead and no mathematical operations beyond basic signal routing. The module features a custom UI with visual channel indication and follows standard VCV Rack conventions for module design and behavior.
+`Merger` is the simplest module in the AGMM collection: 16 mono inputs → 1 poly output, with a channel count rule that preserves channel numbering. It's a utility module — you won't patch it for its sound, you'll patch it to combine mono signals into a poly cable.
+
+The design choice to keep stable channel numbering (rather than compacting) is the module's defining feature. Without it, adding or removing a single cable would re-pitch every downstream voice. With it, you can patch and unpatch freely without worrying about what happens downstream.
+
+The main limitation is that it's a "dumb" merger: no attenuation, no summing, no offset. For those features, chain it with a `Mixer3` or `Mixer6`, or use one of the AGMM CV utilities.
