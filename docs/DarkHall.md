@@ -1,21 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: DarkHall.cpp
-Generated: 2026-11-04 06:15
 -->
 
 # DarkHall
 
 ## 1. Overview
 
-The `DarkHall` module is a stereo reverb effect designed for the VCV Rack modular synthesizer platform. It implements a reverberation algorithm based on comb and allpass filters, creating a spatial audio effect that simulates the acoustic properties of a room or hall.
+`DarkHall` is a 12 HP stereo reverb built from eight damped comb filters feeding four series all-passes (a Schroeder/Freeverb-style structure), with a small L/R cross-feed for stereo width. Size sets the comb feedback and delay length, Damping darkens the feedback path, and Modulation gently moves the comb delays. A live display shows a scope of the mono output plus L/R level meters.
 
-Key features include:
-- Stereo input/output processing
-- Four controllable parameters: Mix, Room Size, Damping, and Modulation
-- Real-time scope visualization of output signal
-- Level meters for left/right channels
-- Visual panel with control knobs and I/O jacks
+Key features:
+- 8 damped comb filters + 4 series all-passes per channel
+- L/R cross-feed (0.08×) for stereo width
+- Size controls both comb feedback and delay length
+- Modulation via sine LFO on the comb delays
+- Equal-power dry/wet mix
+- `tanh` soft-limit output
+- Live scope + L/R meters
 
 ## Module Screenshot
 
@@ -25,375 +26,261 @@ Key features include:
 
 ### Main Classes
 
-The module is implemented as a single class `DarkHall` inheriting from `rack::Module`.
+- `DarkHall`: Core module class inheriting from `rack::Module`
+- `DhPanelBackground`: Static panel artwork
+- `DhDisplayWidget`: Live scope + meters + readouts
 
 ### Inheritance
 
-```
-DarkHall : Module
-```
+- `DarkHall` inherits from `rack::Module`
+- `DhPanelBackground` and `DhDisplayWidget` inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-The `DarkHall` class contains several arrays and variables organized for DSP processing:
-
-- **Delay Buffers**: 
-  - `combL[NUM_COMBS][MAX_DELAY]`, `combR[NUM_COMBS][MAX_DELAY]`: Comb filter delay lines for left/right channels
-  - `allpassL[NUM_ALLPASS][MAX_DELAY]`, `allpassR[NUM_ALLPASS][MAX_DELAY]`: Allpass filter delay lines for left/right channels
-
-- **Storage Variables**:
-  - `combStoreL[NUM_COMBS]`, `combStoreR[NUM_COMBS]`: Feedback storage for comb filters
-  - `apIdxL[NUM_ALLPASS]`, `apIdxR[NUM_ALLPASS]`: Index pointers for allpass filters
-  - `modPhase[NUM_COMBS]`: Phase values for modulation
-
-- **Scope Tracking**:
-  - `scopeMin[DH_SCOPE_N]`, `scopeMax[DH_SCOPE_N]`: Min/max signal values for scope display
-  - `scopeHead`, `scopeCount`: Scope buffer management
-  - `scopeBMin`, `scopeBMax`: Current bucket min/max values
-  - `peakL`, `peakR`: Peak level meters
-
-### Relationships Between Classes
-
-The module uses standard VCV Rack architecture:
-- `DarkHallWidget` is a `ModuleWidget` that hosts the `DarkHall` module
-- The widget creates UI elements (knobs, jacks, display) and connects them to the module's parameters and I/O
-- All DSP processing occurs within the `process()` method of `DarkHall`
-
-### Module Organization
-
-The module follows standard VCV Rack conventions:
-- Parameter configuration in constructor using `configParam()`
-- Input/output configuration using `configInput()`/`configOutput()`
-- DSP processing in `process()` method
-- UI elements defined in anonymous namespace within the same file
+| Group | Storage |
+|-------|---------|
+| Comb L | `float combL[8][MAX_DELAY]` (MAX_DELAY = 96000) |
+| Comb R | `float combR[8][MAX_DELAY]` |
+| Comb damping | `float combStoreL[8]`, `combStoreR[8]` |
+| All-pass L | `float allpassL[4][MAX_DELAY]`, `int apIdxL[4]` |
+| All-pass R | `float allpassR[4][MAX_DELAY]`, `int apIdxR[4]` |
+| Modulation | `float modPhase[8]` |
+| Write head | `int writeIndex` |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Freeverb topology
 
-The reverb algorithm is based on a combination of comb and allpass filters:
+`DarkHall` follows the classic Freeverb architecture: eight parallel comb filters (each with its own damping one-pole) feed four series all-pass filters. The combs are the "body" of the reverb, and the all-passes diffuse the output into a smooth tail.
 
-**Comb Filter:**
+### Comb filter
+
+Each comb is a delay line with feedback:
+
 $$
-y[n] = x[n] + g \cdot x[n - D]
-$$
-
-Where:
-- $x[n]$ is input signal
-- $y[n]$ is output signal  
-- $g$ is feedback gain
-- $D$ is delay in samples
-
-**Allpass Filter:**
-$$
-y[n] = -x[n] + x[n-D] + g \cdot y[n-D]
+y_i[n] = x[n] + g \cdot \text{LP}_i\left(y_i[n - D_i]\right)
 $$
 
-Where:
-- $x[n]$ is input signal
-- $y[n]$ is output signal
-- $g$ is feedback gain (typically 0.6)
-- $D$ is delay in samples
+where $D_i$ is the (modulated) delay length, $g$ is the feedback gain (0.75 + 0.20·size), and $\text{LP}_i$ is a one-pole low-pass with coefficient `damp`.
 
-### Algorithms
+The delay length is:
 
-The implementation uses a multi-tap comb filter architecture with:
-1. **8 comb filters** in parallel, each with different delays
-2. **4 allpass filters** in series for diffusion
-3. **Modulation** of comb filter delays using sine wave LFOs
-4. **Damping** applied to comb filter outputs
-5. **Feedback gain** controlled by room size parameter
+$$
+D_i[n] = \left(\text{base}_i + 25 \cdot \text{modAmt} \cdot \sin(2\pi f_i t)\right) \cdot (0.5 + \text{size})
+$$
 
-### Filters
+with base delays `{1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617}` (samples at 48 kHz) and mod rates `0.05 + 0.01 i` Hz.
 
-- **Comb Filters**: 8 parallel comb filters with different delay times
-- **Allpass Filters**: 4 cascaded allpass filters for diffusion
-- **Modulation Filters**: Sine wave LFOs modulating comb delays
+### Cross-feed
 
-### Oscillators
+To create stereo width without a full matrix, each comb's feedback is augmented with a small amount of the *other* channel's damped delay:
 
-- **Modulation LFOs**: Sine wave oscillators with varying frequencies for each comb filter
-- **Frequency Calculation**: 
-  $$
-  f_i = 0.05 + i \cdot 0.01 \quad \text{(Hz)}
-  $$
+$$
+\begin{aligned}
+fbL_i &= (\text{storeL}_i + 0.08\cdot\text{delayR}_i) \cdot g \\
+fbR_i &= (\text{storeR}_i + 0.08\cdot\text{delayL}_i) \cdot g
+\end{aligned}
+$$
 
-### Delay Lines
+### All-pass
 
-- **Maximum Delay**: 96,000 samples (approximately 2 seconds at 48kHz)
-- **Comb Delays**: Base delays from array `[1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]` samples
-- **Allpass Delays**: Not explicitly specified, but implemented as fixed delays in the buffers
+The all-pass is a fixed-gain Schroeder design:
 
-### Feedback Systems
+$$
+y[n] = -x[n] + d[n], \quad \text{buf}[n] = x[n] + g \cdot d[n]
+$$
 
-The feedback system includes:
-1. **Comb Filter Feedback**: 
-   $$
-   \text{feedback} = 0.75 + \text{size} \cdot 0.2
-   $$
-2. **Damping Application**: 
-   $$
-   \text{output}_{\text{damped}} = \text{input} \cdot (1 - \text{damp}) + \text{stored} \cdot \text{damp}
-   $$
+with $g = 0.6$ and $d = \text{buf}[n - D]$ read at the same write index.
 
-### Modulation
+### Equal-power mix
 
-- **Modulation Amount**: Controlled by `MOD_PARAM`
-- **Modulation Depth**: 25 samples maximum deviation
-- **Modulation Frequency**: Varies per comb filter with base frequency of 0.05Hz + i*0.01Hz
+The dry/wet mix uses equal-power crossfade:
 
-### Random Processes
+$$
+\text{out} = \cos(\text{mix} \cdot \pi/2) \cdot \text{dry} + \sin(\text{mix} \cdot \pi/2) \cdot \text{wet}
+$$
 
-The algorithm does not use true random processes, but rather deterministic modulation using sine wave LFOs.
+### Output soft-limit
+
+$$
+\text{out} = \tanh(1.2 \cdot \text{out}) \cdot 5
+$$
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-- **MIX**: 
-  - Range: 0.0 to 1.0
-  - Default: 0.4
-  - Function: Mix between dry (input) and wet (processed) signals
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `MIX_PARAM` | 0 | 1 | 0.4 | Dry/wet |
+| `SIZE_PARAM` | 0 | 1 | 0.7 | Room size (feedback + delay length) |
+| `DAMP_PARAM` | 0 | 1 | 0.6 | Damping (squared internally) |
+| `MOD_PARAM` | 0 | 1 | 0.3 | Modulation depth |
 
-- **SIZE**: 
-  - Range: 0.0 to 1.0  
-  - Default: 0.7
-  - Function: Controls room size, affects delay times and feedback gain
+### Inputs
 
-- **DAMP**: 
-  - Range: 0.0 to 1.0
-  - Default: 0.6
-  - Function: Controls damping (low-pass filtering) of comb filter outputs
+| Input | Description |
+|-------|-------------|
+| `IN_L` | Left |
+| `IN_R` | Right |
 
-- **MOD**: 
-  - Range: 0.0 to 1.0
-  - Default: 0.3
-  - Function: Controls modulation amount for comb delays
+### Outputs
 
-### Switches and Buttons
-
-None implemented.
-
-### CV Inputs
-
-None implemented.
-
-### Gates
-
-None implemented.
+| Output | Description |
+|--------|-------------|
+| `OUT_L` | Left |
+| `OUT_R` | Right |
 
 ### Enumerations
 
-```cpp
-enum ParamId
-{
-    MIX_PARAM,
-    SIZE_PARAM,
-    DAMP_PARAM,
-    MOD_PARAM,
-    PARAMS_LEN
-};
-
-enum InputId
-{
-    IN_L,
-    IN_R,
-    INPUTS_LEN
-};
-
-enum OutputId
-{
-    OUT_L,
-    OUT_R,
-    OUTPUTS_LEN
-};
-```
-
-### Parameter Ranges and Default Values
-
-| Parameter | Range | Default |
-|-----------|-------|---------|
-| MIX_PARAM | 0.0 - 1.0 | 0.4 |
-| SIZE_PARAM | 0.0 - 1.0 | 0.7 |
-| DAMP_PARAM | 0.0 - 1.0 | 0.6 |
-| MOD_PARAM | 0.0 - 1.0 | 0.3 |
+- `ParamId`: Mix, Size, Damp, Mod
+- `InputId`: InL, InR
+- `OutputId`: OutL, OutR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-- **IN_L** (Left Input):
-  - Voltage Range: ±10V
-  - Signal Behavior: Stereo input signal, attenuated by factor of 0.2 before processing
-
-- **IN_R** (Right Input):
-  - Voltage Range: ±10V  
-  - Signal Behavior: Stereo input signal, attenuated by factor of 0.2 before processing
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `IN_L` | Audio | ±10 V | Left audio (×0.2 attenuation) |
+| `IN_R` | Audio | ±10 V | Right audio (×0.2 attenuation) |
 
 ### Outputs
 
-- **OUT_L** (Left Output):
-  - Voltage Range: ±10V
-  - Signal Behavior: Processed stereo output signal scaled by 5.0
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUT_L` | Audio | ±5 V | Left output (after tanh ×5) |
+| `OUT_R` | Audio | ±5 V | Right output |
 
-- **OUT_R** (Right Output):
-  - Voltage Range: ±10V
-  - Signal Behavior: Processed stereo output signal scaled by 5.0
+### Bypass
+
+`configBypass(IN_L, OUT_L)` and `configBypass(IN_R, OUT_R)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Processing**: 
-   - Read left/right inputs and apply 0.2 attenuation factor
-   - Retrieve parameter values (mix, size, damp, mod)
-
-2. **Comb Filter Processing**:
-   - Update modulation phases for each comb filter
-   - Calculate variable delays with modulation applied
-   - Apply delay-based feedback with damping
-   - Accumulate comb filter outputs
-
-3. **Allpass Filtering**:
-   - Apply 4 cascaded allpass filters to combined comb output
-   - Scale output by 0.35 factor
-
-4. **Mixing**:
-   - Apply sine/cosine mixing based on mix parameter
-   - Apply tanh distortion with 1.2 scaling factor
-
-5. **Output Processing**:
-   - Clamp finite values to prevent NaN/inf
-   - Scale output by 5.0 for final voltage level
-   - Update scope display data and peak meters
+1. Input attenuation — Multiply both inputs by 0.2 to keep the comb filters out of saturation.
+2. Parameter read — Knobs, no CV.
+3. Comb loop — For each of the 8 combs: read (with modulation), apply one-pole damping, add cross-feed, multiply by feedback, write back, accumulate into sum.
+4. Sum — Average the 8 comb outputs.
+5. All-pass chain — 4 series all-passes per channel.
+6. Equal-power mix — Dry × cos + wet × sin.
+7. Soft limit — tanh × 1.2, scaled to ±5 V.
+8. Display — Scope + meters.
 
 ## 7. Important Functions
 
-### `allpass()` Function
+### `allpass(float input, float *buf, int &idx, float gain)`
 
-Implements a single allpass filter stage:
-- Takes input signal, delay buffer, index reference, and gain
-- Updates delay buffer with feedback
-- Returns filtered output
-- Handles circular buffer indexing
+Fixed-gain Schroeder all-pass:
 
-### `process()` Function
+```cpp
+float delayed = buf[idx];
+float output = -input + delayed;
+buf[idx] = input + delayed * gain;
+idx++;
+if (idx >= MAX_DELAY) idx = 0;
+return output;
+```
 
-Main DSP processing routine:
-- Reads inputs and parameters
-- Processes comb filters in loop (8 filters)
-- Applies modulation to delays
-- Implements damping filtering
-- Applies allpass filters (4 stages)
-- Mixes dry/wet signals
-- Updates scope display data
-- Sets output voltages
+### `process(const ProcessArgs &args)`
 
-### Constructor
-
-Initializes module configuration:
-- Configures parameters with default values and ranges
-- Configures inputs/outputs
-- Initializes delay buffers to zero
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Core Equations
+### Comb delay
 
-**Feedback Gain Calculation:**
 $$
-\text{feedback} = 0.75 + \text{size} \cdot 0.2
-$$
-
-**Damping Application:**
-$$
-\text{output}_{\text{damped}} = \text{input} \cdot (1 - \text{damp}) + \text{stored} \cdot \text{damp}
+D_i[n] = \left(\text{base}_i + 25\text{modAmt}\sin(2\pi f_i t)\right)(0.5 + \text{size})
 $$
 
-**Modulation Delay Calculation:**
+### Comb feedback
+
 $$
-\text{delay} = \text{baseDelay}_i + \left\lfloor \sin(2\pi \cdot \text{modPhase}_i) \cdot 25 \cdot \text{modAmt} \right\rfloor
+g = 0.75 + 0.20\cdot\text{size} \le 0.95
 $$
 
-**Final Delay Scaling:**
+### Damping one-pole
+
 $$
-\text{delay}_{\text{final}} = \text{delay} \cdot (0.5 + \text{size})
+\text{store}[n] = \text{delay}[n](1 - \text{damp}^2) + \text{store}[n-1]\text{damp}^2
 $$
 
-### Numerical Methods
+### Cross-feed
 
-- **Circular Buffer Indexing**: Uses modulo arithmetic for delay line indexing
-- **Clamping**: Applied to prevent signal overflow in feedback paths
-- **Tanh Distortion**: Used for output limiting and soft clipping
-- **Phase Accumulation**: Linear phase increment for modulation LFOs
+$$
+fbL_i = (\text{storeL}_i + 0.08\text{delayR}_i) g
+$$
+
+### Equal-power mix
+
+$$
+\text{out} = \cos(\text{mix}\cdot\pi/2)\text{dry} + \sin(\text{mix}\cdot\pi/2)\text{wet}
+$$
+
+### Output
+
+$$
+\text{out} = 5\tanh(1.2\cdot\text{mix})
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- **Processing Complexity**: O(N) where N = number of comb filters (8)
-- **Memory Access**: Sequential access to delay buffers with circular indexing
-- **Mathematical Operations**: Basic arithmetic, trigonometric functions, clamping
+- 8 combs × (read + LP + cross-feed + write) ≈ 8 × 12 flops = 96 flops
+- 4 all-passes × 2 channels × (read + write) ≈ 8 × 6 flops = 48 flops
+- Total: ~150 flops/sample
 
 ### Memory Allocation
 
-- **Static Buffers**: All delay lines allocated statically at compile time
-- **Buffer Size**: 96,000 samples maximum per delay line (180KB per channel)
-- **Total Memory**: ~2.3MB for all buffers (8 comb + 4 allpass filters)
+- All buffers allocated once in the constructor
+- `combL[8][96000]`, `combR[8][96000]` ≈ 1.5 M floats ≈ 6 MB
+- `allpassL[4][96000]`, `allpassR[4][96000]` ≈ 768 K floats ≈ 3 MB
+- No allocation in `process()`
 
 ### Buffers
 
-- **Delay Lines**: Fixed-size circular buffers with maximum size of 96,000 samples
-- **Scope Buffer**: 96-element circular buffer for display data
-- **Index Tracking**: Integer indices for circular buffer management
+- 8 × 2 × 96000 comb floats
+- 4 × 2 × 96000 all-pass floats (only 4 delays used)
+- 96 × 2 scope floats
 
 ### Real-time Processing
 
-- **Sample-based Processing**: Each call processes one sample
-- **No Dynamic Allocation**: All memory allocated at initialization
-- **Efficient Indexing**: Modular arithmetic for circular buffer access
+- All loops bounded
+- No allocation, no blocking
+- All-pass index is hard-wrapped at MAX_DELAY (no delay-length parameter)
 
 ### Thread Safety
 
-- **Single-threaded**: Designed for real-time audio processing in Rack's main thread
-- **No External Synchronization**: Assumes single-threaded access to module state
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- **Clamping**: Applied to prevent overflow in feedback paths
-- **Finite Value Checks**: NaN/inf checking on output signals
-- **Limited Range Operations**: All parameters constrained to [0,1] range
+- `clamp` on comb feedback (`fbL`, `fbR` clamped to ±5 V)
+- `clamp` on damping state (±10 V)
+- `tanh` soft limit on output
+- `!std::isfinite` check on outputs
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `rack.hpp`: VCV Rack core library
-- `<cmath>`: Standard math functions (sin, pow, etc.)
-- `<cstdio>`: Standard I/O functions
-- `<cstring>`: String/memory operations
-- `<algorithm>`: Standard algorithms (min/max)
-- `<memory>`: Smart pointer support
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`
 
 ### External Classes
 
-- `rack::Module`: Base module class
-- `rack::ModuleWidget`: Widget base class for UI
-- `rack::ParamQuantity`: Parameter handling
-- `rack::Input`: Input port handling
-- `rack::Output`: Output port handling
-- `rack::TransparentWidget`: UI widget base
-- `rack::NVGcontext`: NanoVG graphics context
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::text`, `agmm::plotFrame`, `agmm::screen`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`
 
 ## 11. Summary
 
-The DarkHall module implements a stereo reverb effect using comb and allpass filter techniques. It features:
+`DarkHall` is a compact Freeverb-style stereo reverb with a handful of user knobs: Size, Damping, Modulation, and Mix. It's the simplest of the AGMM reverbs — no CV inputs, no freeze, no pre-delay — and that's intentional: it's meant to be a "set and forget" ambience that you can drop into any patch without thinking.
 
-- **8 parallel comb filters** with variable delays and modulation
-- **4 cascaded allpass filters** for diffusion
-- **Four controllable parameters**: Mix, Size, Damping, Modulation
-- **Real-time scope visualization** of output signal
-- **Peak level meters** for left/right channels
-- **Stereo input/output processing**
-- **Efficient circular buffer implementation**
-- **Tanh distortion for output limiting**
+The DSP is the classic Freeverb topology: eight parallel damped combs, four series all-passes, cross-feed for width. The `damp^2` curve makes the damping knob feel natural. The equal-power mix, `tanh` soft limit, and `clamp` on the feedback path mean the output is always within ±5 V — safe to patch anywhere.
 
-The algorithm produces a rich, spatial reverb effect suitable for ambient and atmospheric sound design. The implementation is optimized for real-time performance with minimal memory allocation and efficient DSP operations.
+The main limitations are: no CV control at all, and the all-pass delay lines are fixed at MAX_DELAY (96000 samples), which uses ~3 MB of RAM per instance even though only a tiny portion is actually read.
