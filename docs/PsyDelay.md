@@ -1,217 +1,428 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: PsyDelay.cpp
-Generated: 2026-11-04 06:26
 -->
 
 # PsyDelay
 
 ## 1. Overview
 
-The `PsyDelay` module is a stereo delay effect for VCV Rack that provides advanced delay functionality with modulation, feedback control, and various audio processing effects. It features a dual-channel delay line with configurable delay time, feedback, mix, tone filtering, and multiple special effects including bitcrushing, ring modulation, glitching, sample rate reduction, and chaos LFO.
+`PsyDelay` is a 36 HP psychedelic stereo delay with a rich set of self-modulation features. Its core is a modulated stereo delay line (up to 2 seconds) with feedback, reverse playback, ping-pong and phase-flip stereo routing, plus an input gate and a chain of character effects on the wet path: time modulation, cross-mod, glitch, ring mod, sample-rate reduction, bitcrush, feedback/howl, freeze, drive, colour LPF.
 
-The module includes a visual display showing the contents of the delay buffer, read position, and various effect states. It supports both mono and stereo inputs with independent processing for left and right channels, and provides CV control for most parameters.
+Key features:
+- Stereo delay up to 2 s
+- Reverse playback, ping-pong, phase-flip routing
+- Input gate with threshold
+- Chaos LFO (logistic map) or normal sine LFO for time modulation
+- Cross-mod (right channel offset from left feedback)
+- Glitch (random delay jump with smoothing)
+- Ring mod (50 Hz carrier)
+- Sample-rate reduction
+- Bitcrusher (6 bits)
+- Howl (feedback boost with tanh signal)
+- Freeze
+- Drive (tanh saturation)
+- Colour LPF
+- Live delay-line timeline display with tap markers and state chips
 
 ## Module Screenshot
 
 ![PsyDelay VCV Rack Module](images/psydelay.png)
+
 ## 2. Architecture
 
 ### Main Classes
+
 - `PsyDelay`: Core module class inheriting from `rack::Module`
-- `PsyDelayWidget`: UI widget class inheriting from `rack::ModuleWidget`
-- Anonymous namespace containing:
-  - Display drawing helpers (`PDDisplayWidget`, `PDPanelBackground`)
-  - Theme color definitions
-  - Custom light widgets (`TPDCyanLight`, `TPDVioletLight`)
-  - Panel layout constants and drawing functions
+- `PDPanelBackground`: Static panel artwork
+- `PDDisplayWidget`: Live delay-line timeline display
 
 ### Inheritance
+
 - `PsyDelay` inherits from `rack::Module`
-- `PsyDelayWidget` inherits from `rack::ModuleWidget`
-- Custom light widgets inherit from `GrayModuleLightWidget`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
-- `std::vector<float>` for delay buffers (`delayL`, `delayR`)
-- `std::mt19937` and `std::uniform_real_distribution<float>` for random number generation
-- `float` arrays for display data (`peakBins`)
-- Enumerations for parameters, inputs, outputs, and lights
+### State (grouped)
 
-### Relationships
-- `PsyDelayWidget` owns and manages the `PsyDelay` module instance
-- The module maintains internal state for delay buffers, LFO, RNG, and effect processing
-- Display widgets read from module's internal state for visualization
-- All UI elements are created in the widget constructor and linked to module parameters
-
-### Module Organization
-The module is organized into:
-1. Parameter definitions (enum `ParamId`)
-2. Input/output definitions (enum `InputId`, `OutputId`, `LightId`)
-3. Internal state variables
-4. Core processing functions (`process()`, `setSampleRate()`)
-5. UI components and drawing logic
+| Group | Storage |
+|-------|---------|
+| Delay buffers | `std::vector<float> delayL`, `delayR` (2 s + 1 sample) |
+| Write head | `int writePos` |
+| Sample rate | `float sampleRate` |
+| Output filters | `float outFilterL`, `outFilterR` |
+| LFO | `float lfoPhase` |
+| Chaos | `float chaosState` |
+| Ring mod | `float ringPhase` |
+| Glitch | `std::mt19937 rng`, `std::uniform_real_distribution<float> dist`, `float glitchFade, glitchOldL, glitchOldR` |
+| SRR | `float srrCounter`, `lastWetL`, `lastWetR` |
+| Gate | `float gateEnv, gateGain` |
+| Filter init | `bool filterInitialised` |
+| Display | `float peakBins[130]`, `int peakWriteBin, lastBin`, `float dispReadAge`, `dispMod`, `glitchFlash`, `meterL, meterR`, `bool dispGateActive, dispGateOpen` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Delay time
 
-**Delay Line Read/Write Operations:**
-$$ \text{readPos} = \text{writePos} - \text{delaySamples} $$
-$$ \text{wetRaw}[L/R] = (1-f) \cdot \text{delay}[idxL1] + f \cdot \text{delay}[idxL2] $$
+The time knob + CV maps to a delay in samples:
 
-**Feedback Loop:**
-$$ \text{feedbackAmount} = \text{feedback} + \text{howl} \cdot 0.2 + \text{howlSignal} \cdot 0.1 $$
-$$ \text{howlSignal} = \tanh(\text{wetRaw}[L] \cdot \text{howl} \cdot 2) $$
+$$
+t_{\text{norm}} = \text{clamp}(\text{timeKnob} + \text{timeCV}/10, 0, 1)
+$$
 
-**Soft Limiting:**
-$$ f(x) = \begin{cases}
-x & \text{if } |x| \leq 8 \\
-8 + 4 \cdot \tanh\left(\frac{|x| - 8}{4}\right) \cdot \text{sgn}(x) & \text{otherwise}
-\end{cases} $$
-
-**Chaos LFO:**
-$$ x_{n+1} = 3.9 \cdot x_n \cdot (1 - x_n) $$
-
-**Ring Modulation:**
-$$ \text{carrier} = \sin(2\pi f t) $$
-$$ \text{output}[L/R] = \text{output}[L/R] \cdot (1 - \text{amount} \cdot 0.5) + \text{output}[L/R] \cdot \text{carrier} \cdot \text{amount} $$
-
-**Low-pass Filter:**
-$$ y[n] = \alpha \cdot x[n] + (1 - \alpha) \cdot y[n-1] $$
-where $\alpha = \text{color}$
-
-### Algorithms
-- **Linear interpolation**: For fractional delay read positions
-- **Soft limiting**: Prevents feedback oscillation
-- **Chaos LFO**: Logistic map for chaotic modulation
-- **Ring modulation**: Sine wave carrier multiplication
-- **Bitcrushing**: Quantization to fewer bits
-- **Sample rate reduction**: Decimation with hold
-- **Glitching**: Random buffer position jumps with crossfading
-
-### Filters
-- First-order low-pass filter implemented as IIR:
-  $$ y[n] = \alpha \cdot x[n] + (1 - \alpha) \cdot y[n-1] $$
-  where $\alpha$ is the color parameter
-
-### Oscillators
-- Sine wave LFO for modulation when chaos mode is off
-- Ring modulator carrier oscillator
-
-### Delay Lines
-- Dual-channel delay buffers (`delayL`, `delayR`)
-- Circular buffer implementation with write position tracking
-- Fractional read positions with linear interpolation
-
-### Feedback Systems
-- Standard feedback loop with soft limiting
-- Howl effect adds additional feedback through tanh function
-- Freeze mode maintains previous samples with 0.999 decay
+$$
+\text{delaySec} = 0.01 + t_{\text{norm}} \cdot (t_{\max} - 0.01)
+$$
 
 ### Modulation
-- LFO modulation (sine wave or chaos)
-- CV input scaling to parameter range
-- Cross-modulation between channels
 
-### Random Processes
-- Glitch events using uniform random distribution
-- Chaos LFO using logistic map iteration
+The modulation source is either a sine LFO or a chaos LFO (logistic map):
+
+- **Sine**: $m(t) = \sin(2\pi f_{\text{LFO}} t)$
+- **Chaos**: $\text{state} \leftarrow 3.9 \cdot \text{state} \cdot (1 - \text{state})$, $m(t) = 2(\text{state} - 0.5)$
+
+The delay time is modulated by `modSignal * modDepth * 0.05`, giving up to ±5% pitch modulation.
+
+### Read position
+
+For forward playback, the read position is `writePos - delaySamples`. For reverse, it's `writePos + delaySamples` (with wrap).
+
+### Cross-mod
+
+The right channel's read position is offset by the left channel's current output:
+
+$$
+\text{readPosR} = \text{readPos} + \text{crossMod} \cdot \text{delayL}[\text{writePos}] \cdot 0.002 \cdot f_s
+$$
+
+This creates a "feedback into the stereo image" effect.
+
+### Glitch
+
+With probability `glitchAmount * 0.01` per sample, the read position jumps by a random amount:
+
+$$
+\text{jump} = \text{random} \cdot \text{bufferSize} \cdot \text{glitchAmount}
+$$
+
+The jump is smoothed over ~2 ms by crossfading between the old and new read outputs.
+
+### Ring mod
+
+A 50 Hz sine carrier multiplies the wet signal:
+
+$$
+\text{wet} = \text{wet}(1 - \text{ringAmount} \cdot 0.5) + \text{wet} \cdot \text{carrier} \cdot \text{ringAmount}
+$$
+
+### Sample-rate reduction
+
+The wet signal is held for `1 / (1 + srr * 99)` samples:
+
+$$
+\text{hold} = \frac{1}{1 + 99 \cdot \text{srr}}
+$$
+
+### Bitcrusher
+
+Quantization to 6 bits (12 levels):
+
+$$
+\text{wet} = \text{round}(\text{wet} \cdot 6) / 6
+$$
+
+### Feedback
+
+$$
+fb = \text{feedback} + \text{howl} \cdot 0.2
+$$
+
+where `howl` can add up to 0.2 to the feedback. Plus a howl signal from a tanh of the wet:
+
+$$
+\text{howlSignal} = \tanh(\text{wet} \cdot \text{howl} \cdot 2), \quad \text{feedbackAmount} = fb + \text{howlSignal} \cdot 0.1
+$$
+
+### Freeze
+
+When frozen, the delay buffers are attenuated to 0.999 per sample (slow decay):
+
+$$
+\text{buf} \leftarrow \text{buf} \cdot 0.999
+$$
+
+### Drive
+
+$$
+\text{sat} = \tanh(\text{wet} \cdot (1 + \text{drive}))
+$$
+
+### Colour
+
+One-pole LP with coefficient `color` (0.01 .. 0.5):
+
+$$
+\text{lp} \leftarrow \text{lp} + \text{color} \cdot (\text{sat} - \text{lp})
+$$
+
+### Ping-pong / phase flip
+
+- **Ping-pong**: `outR = -processedL`
+- **Phase flip**: `outR = -outR`
+
+### Input gate
+
+A gate on the input signal (threshold 0 = always open):
+
+$$
+\text{gateEnv} \leftarrow \max(\text{level}, \text{gateEnv} \cdot (1 - 10 \Delta t))
+$$
+
+$$
+\text{gateOpen} = \text{gateEnv} \ge \text{gateT}, \quad \text{gateGain} \leftarrow \text{gateGain} + (\text{gateOpen} ? 1 : 0 - \text{gateGain}) \cdot \min(1, 200 \Delta t)
+$$
+
+### Dry/wet mix
+
+$$
+\text{out} = \text{in} \cdot \text{dryAmount} + \text{wet} \cdot \text{mix}
+$$
+
+with `dryAmount = 1 - mix` (or 0.01 when mix = 1 for a tiny dry bleed).
 
 ## 4. Parameters and Controls
 
-### Knobs
-- **TIME**: Delay time, 0.01s to 2.0s (default: 0.5)
-- **FEEDBACK**: Feedback amount, 0% to 120% (default: 80%)
-- **MIX**: Dry/wet mix, 0% to 100% (default: 50%)
-- **COLOR**: Tone filtering, 1% to 50% (default: 20%)
-- **DRIVE**: Drive/saturation, 0x to 3x (default: 1x)
-- **MOD_DEPTH**: Modulation depth, 0% to 100% (default: 20%)
-- **HOWL**: Howl effect amount, 0% to 100% (default: 0%)
-- **RING_MOD**: Ring modulation amount, 0% to 100% (default: 0%)
-- **GLITCH**: Glitch effect amount, 0% to 100% (default: 0%)
-- **GATE_THRESH**: Input gate threshold, 0V to 4V (default: 0V)
-- **SRR**: Sample rate reduction, 0% to 100% (default: 0%)
-- **CROSS_MOD**: Cross-modulation amount, 0% to 100% (default: 0%)
+### Knobs (Delay section, left)
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `TIME_PARAM` | 0 | 1 | 0.5 | Delay time (0.01–2 s) |
+| `FEEDBACK_PARAM` | 0 | 1.2 | 0.8 | Feedback |
+| `MIX_PARAM` | 0 | 1 | 0.5 | Dry/wet |
+| `COLOR_PARAM` | 0.01 | 0.5 | 0.2 | Tone |
+| `DRIVE_PARAM` | 0 | 3 | 1.0 | Drive |
+| `MOD_DEPTH_PARAM` | 0 | 1 | 0.2 | Mod depth |
+
+### Knobs (FX section, right)
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `HOWL_PARAM` | 0 | 1 | 0 | Howl |
+| `RING_MOD_PARAM` | 0 | 1 | 0 | Ring mod |
+| `GLITCH_PARAM` | 0 | 1 | 0 | Glitch |
+| `GATE_THRESH_PARAM` | 0 | 1 | 0 | Gate threshold |
+| `SRR_PARAM` | 0 | 1 | 0 | Sample hold |
+| `CROSS_MOD_PARAM` | 0 | 1 | 0 | Cross-mod |
 
 ### Switches
-- **REVERSE**: Reverse playback direction (Off/On)
-- **CHAOS**: Chaos LFO modulation (Off/On)
-- **PINGPONG**: Ping-pong stereo effect (Off/On)
-- **BITCRUSH**: Bitcrusher effect (Off/On)
-- **FREEZE**: Freeze mode (Off/On)
-- **PHASE_FLIP**: Phase flip effect (Off/On)
 
-### CV Inputs
-- **TIME_CV**: Time CV input, 0 to 10V
-- **FREEZE_CV**: Freeze gate input, 1.0V+ to activate
-- **HOWL_CV**: Howl CV input, 0 to 10V
-- **RING_CV**: Ring mod CV input, 0 to 10V
-- **GLITCH_CV**: Glitch CV input, 0 to 10V
-- **GATE_CV**: Gate threshold CV input, 0 to 10V
+| Switch | Description |
+|--------|-------------|
+| `REVERSE_SWITCH` | Reverse playback |
+| `CHAOS_SWITCH` | Chaos LFO |
+| `PINGPONG_SWITCH` | Ping-pong |
+| `BITCRUSH_SWITCH` | Bitcrusher |
+| `FREEZE_SWITCH` | Freeze |
+| `PHASE_FLIP_SWITCH` | Phase flip |
 
-### Gates
-- **FREEZE_CV**: Freeze gate input (1.0V+ activates freeze)
+### Inputs
 
-## 5. Processing Flow
+| Input | Description |
+|-------|-------------|
+| `LEFT_INPUT` | Left (mono if R empty) |
+| `RIGHT_INPUT` | Right |
+| `TIME_CV_INPUT` | Time CV |
+| `FREEZE_CV_INPUT` | Freeze gate |
+| `HOWL_CV_INPUT` | Howl CV |
+| `RING_CV_INPUT` | Ring mod CV |
+| `GLITCH_CV_INPUT` | Glitch CV |
+| `GATE_CV_INPUT` | Gate threshold CV |
 
-The `process()` function implements the following pipeline:
+### Outputs
 
-1. **Input handling**: Read left/right inputs and CV values
-2. **Delay time calculation**: Convert TIME parameter to samples with CV scaling
-3. **Buffer read/write**: 
-   - Calculate fractional read position
-   - Perform linear interpolation
-   - Apply soft limiting to prevent oscillation
-4. **Feedback processing**:
-   - Add howl effect through tanh function
-   - Combine with standard feedback
-5. **Effect processing**:
-   - Apply bitcrushing if enabled
-   - Apply ring modulation if enabled
-   - Apply sample rate reduction if enabled
-   - Apply glitching if enabled
-6. **Mixing**: Combine dry and wet signals according to MIX parameter
-7. **Output**: Generate stereo output with optional ping-pong effect
+| Output | Description |
+|--------|-------------|
+| `OUT_L_OUTPUT` | Left |
+| `OUT_R_OUTPUT` | Right |
 
-## 6. Special Effects
+### Enumerations
 
-### Bitcrushing
-Applies quantization to reduce bit depth using integer truncation.
+- `ParamId`: Time, Feedback, Mix, Color, Drive, ModDepth, Reverse, Chaos, Pingpong, Bitcrush, Freeze, PhaseFlip, Howl, RingMod, Glitch, GateThresh, SRR, CrossMod
+- `InputId`: Left, Right, TimeCV, FreezeCV, HowlCV, RingCV, GlitchCV, GateCV
+- `OutputId`: OutL, OutR
 
-### Ring Modulation
-Multiplies input signal with a sine wave carrier at 100Hz, creating metallic or bell-like sounds.
+## 5. Inputs and Outputs
 
-### Glitching
-Randomly jumps read position in delay buffer with crossfading to smooth transitions.
+### Inputs
 
-### Sample Rate Reduction (SRR)
-Decimates the output signal by holding samples for multiple cycles.
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `LEFT_INPUT` | Audio | ±10 V | Left audio |
+| `RIGHT_INPUT` | Audio | ±10 V | Right audio |
+| `TIME_CV_INPUT` | CV | 0–10 V | Time modulation |
+| `FREEZE_CV_INPUT` | Gate | > 1 V | Freeze |
+| `HOWL_CV_INPUT` | CV | 0–10 V | Howl |
+| `RING_CV_INPUT` | CV | 0–10 V | Ring mod |
+| `GLITCH_CV_INPUT` | CV | 0–10 V | Glitch |
+| `GATE_CV_INPUT` | CV | 0–10 V | Gate threshold |
 
-### Howl Effect
-Adds additional feedback through a tanh function that creates harmonic distortion.
+### Outputs
 
-### Freeze Mode
-Maintains current delay buffer contents with 0.999 decay factor.
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUT_L_OUTPUT` | Audio | ±10 V | Left |
+| `OUT_R_OUTPUT` | Audio | ±10 V | Right |
 
-## 7. Display System
+### Bypass
 
-The display widget shows:
-- Delay line contents as mirrored bars (newest on right)
-- Read tap position indicator
-- Modulation wobble effect
-- Current time markers
-- Output meters for left/right channels
-- State indicators for all active effects
-- Parameter readouts (time, feedback, mix, etc.)
+`configBypass(LEFT_INPUT, OUT_L_OUTPUT)` and `configBypass(RIGHT_INPUT, OUT_R_OUTPUT)`.
 
-## 8. Hardware Considerations
+## 6. Signal Processing Pipeline
 
-The module uses:
-- Dual circular buffers for stereo processing
-- Linear interpolation for fractional delay reads
-- Soft limiting to prevent clipping in feedback loops
-- Efficient IIR filtering for tone control
-- Random number generation for glitch effects
-- Real-time parameter scaling from CV inputs
+1. **Sample-rate change** — Reallocate delay buffers.
+2. **Input gate** — Track envelope, gate open state.
+3. **Delay time** — Compute from knob + CV.
+4. **Modulation** — Advance LFO or chaos state.
+5. **Read position** — Normal (write − delay) or reverse (write + delay).
+6. **Cross-mod offset** — Add to right read position.
+7. **Read + interpolate** — Linear interp for both channels.
+8. **Glitch** — Random jump with crossfade.
+9. **Ring mod** — 50 Hz carrier.
+10. **Sample-rate reduction**.
+11. **Bitcrusher**.
+12. **Feedback** — With howl signal.
+13. **Freeze** — Write or decay.
+14. **Drive** — tanh saturation.
+15. **Colour LP**.
+16. **Ping-pong / phase-flip**.
+17. **Mix** — Dry/wet.
+18. **Write outputs** — Clamped.
+19. **Meters + display** — Peak bins, read age, tap markers.
 
-All processing is done in the audio thread with appropriate buffer management and memory allocation.
+## 7. Important Functions
+
+### `setSampleRate(float sr)`
+
+Allocates the delay buffers to `2 * sr + 1` samples.
+
+### `onSampleRateChange()`
+
+Reallocates the delay buffers.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+## 8. Mathematical Implementation
+
+### Delay time
+
+$$
+t_{\text{norm}} = \text{clamp}(\text{timeKnob} + \text{CV}/10, 0, 1), \quad \text{delaySec} = 0.01 + t_{\text{norm}} \cdot (t_{\max} - 0.01)
+$$
+
+### Modulation
+
+$$
+\text{modSignal}_{\text{sine}} = \sin(2\pi f_{\text{LFO}} t)
+$$
+
+$$
+\text{modSignal}_{\text{chaos}} = 2(\text{chaosState} - 0.5)
+$$
+
+### Feedback
+
+$$
+fb = \text{feedback} + \text{howl} \cdot 0.2 + \tanh(\text{wet} \cdot \text{howl} \cdot 2) \cdot 0.1
+$$
+
+### Drive
+
+$$
+\text{sat} = \tanh(\text{wet} \cdot (1 + \text{drive}))
+$$
+
+### Colour
+
+$$
+\text{lp} \leftarrow \text{lp} + \text{color} \cdot (\text{sat} - \text{lp})
+$$
+
+### SRR
+
+$$
+\text{step} = \frac{1}{1 + 99 \cdot \text{srr}}
+$$
+
+### Bitcrusher
+
+$$
+\text{wet} \leftarrow \text{round}(\text{wet} \cdot 6) / 6
+$$
+
+### Ping-pong
+
+$$
+\text{outR} = -\text{processedL}
+$$
+
+### Dry/wet mix
+
+$$
+\text{out} = \text{in} \cdot (1 - \text{mix}) + \text{wet} \cdot \text{mix}
+$$
+
+## 9. Performance and Optimization
+
+### CPU Usage
+
+- Per sample: 6 FX blocks + 4 delay line reads + 1 LFO ≈ 200 flops
+- Total: ~200 flops/sample, plus occasional random calls in glitch mode
+
+### Memory Allocation
+
+- `delayL`, `delayR`: 2 s × 48 kHz = 96000 floats each ≈ 768 KB
+- No allocation in `process()`
+
+### Buffers
+
+- Delay L/R: 96000 floats each
+- Display: 130 floats
+
+### Real-time Processing
+
+- All loops bounded
+- No allocation, no blocking
+- `std::mt19937` used for glitch (fast)
+
+### Thread Safety
+
+- All state written by audio thread, read by UI thread via torn reads
+
+### Numerical Stability
+
+- `pdSoftLimit` on feedback path
+- `tanh` on drive and ring mod
+- Delay buffer reset on sample-rate change
+- No `!std::isfinite` check, but the output should be bounded by the `pdSoftLimit`
+
+## 10. Dependencies
+
+### Libraries/Headers
+
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<vector>`, `<random>`, `<algorithm>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::chip`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`, `agmm::VioletLight`
+
+## 11. Summary
+
+`PsyDelay` is a psychedelic stereo delay that packs a huge amount of character into a single module: reverse, ping-pong, phase-flip, chorus, ring mod, glitch, bitcrush, SRR, freeze, drive, colour LPF. It's the kind of module you patch when you want your delay to *do something* — not just echo, but distort and shimmer and stutter.
+
+The display is excellent: the delay line is shown as a mirrored bar timeline, with the read tap as a vertical line, the modulation as a wobble, the glitch as a flash ring, and the state as chips (FRZ/REV/CHS/PNG/CRSH/PHS/GATE). It's a very complete visualization of what the module is doing.
+
+The main limitations are: many of the FX are extreme (bitcrush is fixed at 6 bits, ring mod is fixed at 50 Hz), and there are no menu options to fine-tune them. For a more controlled multi-FX, look at `Pharmakon`; for a more extreme delay, this is exactly right.
