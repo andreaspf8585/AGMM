@@ -71,6 +71,7 @@ static const float TP_ENV_X = 8.f; // envelope plot
 static const float TP_ENV_W = 236.f;
 static const float TP_CHR_X = 252.f; // chroma plot
 static const float TP_CHR_W = 120.f;
+static const float TP_SWEEP_PERIOD = 20.f; // seconds per envelope sweep cycle
 static const float TP_LOG_MIN = 5.64386f;  // log2(50 Hz)
 static const float TP_LOG_MAX = 11.96578f; // log2(4000 Hz)
 
@@ -187,8 +188,7 @@ struct TritoneParadox : Module
     };
 
     static const int TP_MAX_PARTIALS = 20;
-    static const int TP_CTRL_DIV = 16;             // control-rate divider (samples)
-    static constexpr float TP_SWEEP_PERIOD = 20.f; // seconds per sweep cycle
+    static const int TP_CTRL_DIV = 16; // control-rate divider (samples)
 
     // ── Custom ParamQuantity for PITCH (shows note name) ──────────────
     struct PitchQuantity : ParamQuantity
@@ -299,7 +299,7 @@ struct TritoneParadox : Module
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        auto *pq = configParam<PitchQuantity>(PITCH_PARAM, -48.f, 48.f, 0.f, "Pitch", " st");
+        auto *pq = configParam<PitchQuantity>(PITCH_PARAM, -48.f, 48.f, 0.f, "Pitch");
         pq->snapEnabled = true;
 
         configParam(ENV_CENTER_PARAM, 65.f, 2000.f, 370.f, "Envelope centre", " Hz");
