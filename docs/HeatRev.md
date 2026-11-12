@@ -1,414 +1,342 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: HeatRev.cpp
-Generated: 2026-11-04 06:19
 -->
 
 # HeatRev
 
 ## 1. Overview
 
-The HeatRev module is a stereo reverb and delay processor that combines a cathedral reverberation engine with a heat-grid simulation for warm, organic tonal coloration. It features:
+`HeatRev` is a 12 HP hybrid reverb/echo effect built from three layers:
+1. A stereo delay/echo stage with feedback and L/R time spread.
+2. A "Cathedral" reverb: pre-delay, early reflections, input diffusion, and an 8-line FDN with an orthonormal Hadamard feedback matrix.
+3. A 2D "heat grid" diffusion network that adds a slowly moving, warm resonant texture to the tail.
 
-- **Cathedral Reverb**: A high-quality 8-line Feedback Delay Network (FDN) reverb with early reflections, pre-delay, and input diffusion
-- **Heat Grid Simulation**: A cellular automaton-inspired heat propagation system that adds warmth and character to the signal
-- **Stereo Delay**: A configurable stereo delay line with feedback and fractional delay interpolation
-- **Visual Display**: Real-time visualization of the heat-grid state
-
-The module is designed for artistic sound design, adding depth and warmth to audio signals through a combination of algorithmic reverb and organic simulation.
+Key features:
+- 8-line FDN reverb (Cathedral) with Hadamard feedback
+- Pre-delay, early reflections, input all-pass diffusion
+- Reverb controls: Diffusion, Decay, Size, Mix, Damping, Level, Space
+- Delay controls: Time, Feedback, Level, Stereo Spread
+- 2D heat-grid diffusion network with live heat-map display
+- Auto-scaling heat-map visualization
 
 ## Module Screenshot
 
-![Heatrev VCV Rack Module](images/heatrev.png)
+![HeatRev VCV Rack Module](images/heatrev.png)
 
 ## 2. Architecture
 
 ### Main Classes
 
-1. **HeatRev** - The main module class inheriting from `rack::Module`
-2. **SimpleLPF** - One-pole low-pass filter for DC blocking
-3. **StereoDelay** - Stereo delay line with feedback and fractional interpolation
-4. **Cathedral** - 8-line FDN reverb engine with early reflections and pre-delay
+- `HeatRev`: Core module class inheriting from `rack::Module`
+- `SimpleLPF`: One-pole low-pass
+- `StereoDelay`: Stereo delay line with linear-interpolated fractional reads
+- `Cathedral`: Pre-delay + early reflections + input diffusion + 8-line FDN
+- `HRPanelBackground`: Static panel artwork
+- `HRDisplayWidget`: Live heat-map display
 
 ### Inheritance
 
 - `HeatRev` inherits from `rack::Module`
-- No other inheritance relationships in the core implementation
+- Both UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
 
-- `SimpleLPF`: Simple one-pole low-pass filter
-- `StereoDelay`: Stereo delay line with buffer management and fractional read
-- `Cathedral`: Complex reverb engine with:
-  - 8 delay lines (FDN)
-  - Pre-delay buffer
-  - Early reflection buffers
-  - Allpass filters for input diffusion
-  - LFO modulation for line delays
-  - Hadamard mixing matrix
+- `Cathedral::line[8]`: 8 delay lines (32768 samples each)
+- `Cathedral::pdL/pdR`: pre-delay buffers (131072 samples each)
+- `Cathedral::apL[4]/apR[4]`: input diffusers (2048 samples each)
+- `StereoDelay`: L/R delay buffers with fractional read
 
-### Relationships
+### State (grouped)
 
-- `HeatRev` contains instances of `SimpleLPF`, `StereoDelay`, and `Cathedral`
-- The heat-grid simulation is implemented directly within `HeatRev::process()`
-- All DSP components are integrated into the main processing loop
-
-### Module Organization
-
-The module is organized as a single C++ file with:
-1. DSP component definitions (classes)
-2. Main module class (`HeatRev`)
-3. UI widget implementation in anonymous namespace
-4. Panel background and display widgets
-5. Knob and port placement logic
+| Group | Storage |
+|-------|---------|
+| Heat grid | `std::vector<float> state, next`, `int size` |
+| Delay | `StereoDelay delay` |
+| Reverb | `Cathedral cathedral` |
+| DC block | `float dcL, dcR` |
+| LP filter | `SimpleLPF lpL, lpR` |
+| Display | `float viz[16][40]`, `float vizNorm`, `int vizCounter` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Layer 1: Stereo delay
 
-**One-pole low-pass filter:**
-$$ y[n] = y[n-1] + a(x[n] - y[n-1]) $$
-where $ a = 1 - e^{-2\pi f_c T} $
+The delay is a stereo feedback delay with smoothed time:
 
-**Delay line with fractional interpolation:**
-$$ y(t) = x[i] + (t - i)(x[i+1] - x[i]) $$
+$$
+\text{smTime} \leftarrow \text{smTime} + (T - \text{smTime}) \cdot 0.0004
+$$
 
-**Reverb loop gain from RT60:**
-$$ g_i = 10^{-3 \cdot L / (RT60 \cdot sr)} $$
-where $ L $ is the delay line length in samples
+Read positions are interpolated linearly, and the feedback is low-passed (0.4× one-pole) so each repeat gets darker.
 
-**Hadamard mixing matrix:**
-Energy-preserving orthogonal matrix for mixing reverb lines
+### Layer 2: Cathedral reverb
 
-### Algorithms
+**Pre-delay**: A circular buffer read at `(0.010 + 0.060 * space) * sr` samples back.
 
-1. **Cathedral Reverb**: 
-   - 8-line FDN with orthonormal Hadamard mixing
-   - Pre-delay + early reflections
-   - Input diffusion using allpass filters
-   - LFO modulation to avoid metallic ringing
-   - Stability by construction (loop gain < 1)
+**Early reflections**: 7 taps per channel at fixed ms offsets (7, 19, 31, 47, 67, 89, 113 ms), with fixed gains that alternate sign:
 
-2. **Heat Grid Simulation**:
-   - 2D cellular automaton with Laplacian operator
-   - Diffusion process: $ u_{new} = u + diffK \cdot \nabla^2 u $
-   - Boundary conditions: periodic with injection at edges
+$$
+\text{erL} = \sum_k g^L_k \cdot \text{pdL}[\text{pre} + \text{ms}^L_k \cdot \text{tscale}]
+$$
 
-3. **Stereo Delay**:
-   - Fractional delay interpolation using linear interpolation
-   - Separate left/right delay lines
-   - Feedback with clamping to prevent instability
+**Input diffusion**: 4 series Schroeder all-passes per channel.
 
-### Filters
+**FDN**: 8 delay lines, each with its own damping filter and per-line RT60 gain:
 
-- **SimpleLPF**: One-pole low-pass filter for DC blocking
-- **Damping Filter**: First-order low-pass filter applied to reverb tail
-- **Heat Grid Low-pass**: Simple LPF for smoothing heat output
+$$
+g_i = 10^{-3 D_i / (RT60 \cdot f_s)}
+$$
 
-### Oscillators
+Feedback matrix is the **8×8 Hadamard** matrix, normalized by $1/\sqrt{8}$ so it's orthonormal:
 
-- **LFO Modulation**: Sine wave oscillators modulating delay line lengths
-- **Modulation Frequency**: $ f = (0.11 + 0.037 \cdot i) / sr $
+$$
+A = \frac{1}{\sqrt{8}} H_8
+$$
 
-### Delay Lines
+The FDN output is the sum of all 8 lines with alternating L/R taps.
 
-- **Cathedral FDN**: 8 delay lines with fixed lengths from lookup table
-- **Pre-delay**: Single delay line for early reflections
-- **StereoDelay**: Two delay lines with fractional interpolation
+### Layer 3: Heat grid
 
-### Feedback Systems
+A 2D diffusion grid of size `size × size` (up to 64 × 64). Each sample:
 
-- **Reverb Feedback**: Loop gain controlled by RT60 and damping
-- **Heat Grid Feedback**: Diffusion coefficient controls feedback amount
-- **Delay Feedback**: Configurable feedback with maximum 95% clamping
+1. **Inject**: left channel into column 0, right channel into row (size−1).
+2. **Diffuse**: standard 5-point Laplacian:
 
-### Modulation
+$$
+\text{next}[i] = \text{state}[i] + \text{diffK} \cdot \left(\text{state}[L] + \text{state}[R] + \text{state}[U] + \text{state}[D] - 4\text{state}[i]\right)
+$$
 
-- **LFO Modulation**: Slow sine wave modulation of delay line lengths
-- **Parameter Modulation**: All parameters are modulatable via CV inputs
+3. **Decay**: `next *= gridFb`.
+4. **Read**: average 3 cells at each side, symmetrically. Left reads around (0.28, 0.62), right around (0.62, 0.28).
 
-### Random Processes
+### Output mix
 
-- **Heat Grid**: Deterministic cellular automaton (no true randomness)
-- **Modulation**: LFOs provide periodic modulation for natural variation
+$$
+\text{out} = (1-\text{mix}) \cdot \text{in} + \text{mix} \cdot \text{level} \cdot \left(\text{fdn} + \text{er} \cdot 0.35 \cdot \text{space} + 0.35 \cdot \text{heat}\right)
+$$
+
+Followed by a `tanh` soft limit at ±8 V and clamping at ±10 V.
+
+### Safety
+
+If anything becomes non-finite, the module flushes the reverb and heat grid.
 
 ## 4. Parameters and Controls
 
-### Knobs
+### Reverb knobs
 
-1. **DIFFUSION_PARAM** (0.0 - 1.0, default 0.7)
-   - Controls input diffusion in reverb
-   - Range: 0% to 100%
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `DIFFUSION_PARAM` | 0 | 1 | 0.7 | Input diffusion |
+| `DECAY_PARAM` | 0 | 1 | 0.8 | RT60 (0.5–15 s) |
+| `SIZE_PARAM` | 4 | 64 | 48 | Size in cells |
+| `MIX_PARAM` | 0 | 1 | 0.7 | Dry/wet |
+| `DAMPING_PARAM` | 0 | 1 | 0.55 | Damping cutoff |
+| `LEVEL_PARAM` | 0 | 1 | 0.8 | Wet level |
+| `SPACE_PARAM` | 0 | 1 | 0.7 | Pre-delay + reflections + shimmer |
 
-2. **DECAY_PARAM** (0.0 - 1.0, default 0.8)
-   - Controls reverb decay time (RT60)
-   - Range: 0% to 100%
-   - Maps to 0.5s to 15s RT60
+### Delay knobs
 
-3. **SIZE_PARAM** (4.0 - 64.0, default 48.0)
-   - Controls heat-grid size
-   - Range: 4 to 64 cells
-   - Snap enabled
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `DELAY_TIME_PARAM` | 10 ms | 500 ms | 80 ms | Delay time |
+| `DELAY_FEEDBACK_PARAM` | 0 | 0.95 | 0.4 | Feedback |
+| `DELAY_LEVEL_PARAM` | 0 | 1 | 0.7 | Delay level |
+| `STEREO_SPREAD_PARAM` | 0 | 50 ms | 15 ms | L/R delay offset |
 
-4. **MIX_PARAM** (0.0 - 1.0, default 0.7)
-   - Controls wet/dry mix
-   - Range: 0% to 100%
+### Inputs
 
-5. **DAMPING_PARAM** (0.0 - 1.0, default 0.55)
-   - Controls high-frequency damping
-   - Range: 0% to 100%
-   - Higher values = darker reverb
+| Input | Description |
+|-------|-------------|
+| `INPUT_L` | Left |
+| `INPUT_R` | Right |
 
-6. **LEVEL_PARAM** (0.0 - 1.0, default 0.8)
-   - Controls overall output level
-   - Range: 0% to 100%
+### Outputs
 
-7. **DELAY_TIME_PARAM** (10.0 - 500.0, default 80.0)
-   - Controls delay time in milliseconds
-   - Range: 10ms to 500ms
-
-8. **DELAY_FEEDBACK_PARAM** (0.0 - 0.95, default 0.4)
-   - Controls delay feedback amount
-   - Range: 0% to 95%
-
-9. **DELAY_LEVEL_PARAM** (0.0 - 1.0, default 0.7)
-   - Controls delay output level
-   - Range: 0% to 100%
-
-10. **STEREO_SPREAD_PARAM** (0.0 - 50.0, default 15.0)
-    - Controls stereo spread in delay
-    - Range: 0ms to 50ms
-
-11. **SPACE_PARAM** (0.0 - 1.0, default 0.7)
-    - Controls pre-delay and early reflection
-    - Range: 0% to 100%
-
-### CV Inputs
-
-- **INPUT_L**: Left input signal
-- **INPUT_R**: Right input signal
-
-### Gates
-
-None explicitly defined in the code.
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_L` | Left |
+| `OUTPUT_R` | Right |
 
 ### Enumerations
 
-- `ParamId`: Enum for parameter IDs (11 parameters)
-- `InputId`: Enum for input IDs (2 inputs)
-- `OutputId`: Enum for output IDs (2 outputs)
-- `LightId`: Enum for light IDs (0 lights)
+- `ParamId`: Diffusion, Decay, Size, Mix, Damping, Level, DelayTime, DelayFeedback, DelayLevel, StereoSpread, Space
+- `InputId`: InL, InR
+- `OutputId`: OutL, OutR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-1. **INPUT_L** (Left Input)
-   - Voltage range: ±10V
-   - Signal behavior: Audio input signal
-
-2. **INPUT_R** (Right Input)
-   - Voltage range: ±10V
-   - Signal behavior: Audio input signal
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_L` | Audio | ±10 V | Left audio |
+| `INPUT_R` | Audio | ±10 V | Right audio |
 
 ### Outputs
 
-1. **OUTPUT_L** (Left Output)
-   - Voltage range: ±10V
-   - Signal behavior: Mixed dry and wet signals
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_L` | Audio | ±10 V | Left output (clamped) |
+| `OUTPUT_R` | Audio | ±10 V | Right output (clamped) |
 
-2. **OUTPUT_R** (Right Output)
-   - Voltage range: ±10V
-   - Signal behavior: Mixed dry and wet signals
+### Bypass
+
+`configBypass(INPUT_L, OUTPUT_L)` and `configBypass(INPUT_R, OUTPUT_R)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Processing**
-   - Read left/right input voltages
-   - Apply soft clipping to prevent overdrive
-
-2. **Delay Processing**
-   - Calculate delay times for left/right channels
-   - Process stereo delay with feedback
-   - Mix delay output with dry signal
-
-3. **Reverb Processing**
-   - Process cathedral reverb engine
-   - Apply early reflections and pre-delay
-   - Apply damping filter to reverb tail
-   - Apply Hadamard mixing matrix
-
-4. **Heat Grid Processing**
-   - Inject reverb signal into grid edges
-   - Apply diffusion and feedback
-   - Sample grid at specific points for output
-
-5. **Mixing**
-   - Combine reverb, delay, and heat signals
-   - Apply wet/dry mix ratio
-   - Apply final level control
-
-6. **Output Processing**
-   - Apply smooth limiter to prevent clipping
-   - Apply soft clipping to prevent overdrive
-   - Set output voltages
+1. **Sample rate update** — Set delay sample rate.
+2. **Parameter read** — All knobs.
+3. **Cathedral settings** — Compute RT60, scale, room size.
+4. **Heat-grid settings** — Diffusion coefficient, grid feedback, LP cutoff, resize if needed.
+5. **Delay settings** — L/R delay times, feedback.
+6. **Delay processing** — Read delayed L/R, write new L/R with feedback.
+7. **Reverb processing** — Run Cathedral with the dry + delayed input.
+8. **Heat-grid injection** — Inject reverb input into grid edges.
+9. **Heat-grid diffusion** — Laplacian + decay.
+10. **Heat-grid read** — Average 3 cells per side.
+11. **DC block + LP** — Remove DC and limit highs.
+12. **Wet mix** — fdn + ER·space + 0.35·heat, scaled by level.
+13. **Soft limiter** — tanh at ±8 V.
+14. **Dry/wet mix** — With the original input.
+15. **Output clamp** — ±10 V.
+16. **Display update** — Every 512 samples, downsample the heat grid to 16×40 for the display.
 
 ## 7. Important Functions
 
-### HeatRev Class Methods
+### `StereoDelay::process(float inL, float inR, float timeSec, float fb, float sr, float &dL, float &dR)`
 
-1. **`process()`** - Main processing function called every audio block
-2. **`onReset()`** - Reset all internal state
-3. **`updateViz()`** - Update visualization data for display
+Smoothed-time stereo delay with linear interpolation and low-passed feedback.
 
-### DSP Component Methods
+### `Cathedral::process(float inL, float inR, float sr, float rt60, float damping, float scaleTarget, float diffusion, float space, float &fdnL, float &fdnR, float &erL, float &erR)`
 
-1. **`SimpleLPF::setCutoff()`** - Set filter cutoff frequency
-2. **`SimpleLPF::process()`** - Apply low-pass filtering
-3. **`StereoDelay::setSampleRate()`** - Set sample rate for delay processing
-4. **`StereoDelay::resize()`** - Resize delay buffers
-5. **`StereoDelay::setDelayMs()`** - Set delay times in milliseconds
-6. **`StereoDelay::setFeedback()`** - Set feedback amount
-7. **`StereoDelay::process()`** - Process stereo delay
-8. **`Cathedral::init()`** - Initialize reverb engine
-9. **`Cathedral::reset()`** - Reset reverb state
-10. **`Cathedral::allpass()`** - Allpass filter implementation
-11. **`Cathedral::readPD()`** - Read from pre-delay buffer
-12. **`Cathedral::process()`** - Main reverb processing function
+The full Cathedral reverb: pre-delay → early reflections → input diffusion → 8-line FDN.
+
+### `HeatRev::updateViz()`
+
+Downsamples the heat grid to the display resolution (40 × 16) and auto-scales it.
+
+### `HeatRev::process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### One-pole Low-pass Filter
+### Cathedral RT60 gain
 
-```cpp
-void SimpleLPF::setCutoff(float normCutoff) {
-    if (normCutoff <= 0.0f) a = 0.0f;
-    else if (normCutoff >= 1.0f) a = 1.0f;
-    else a = 1.0f - std::exp(-2.0f * float(M_PI) * normCutoff);
-}
+$$
+g_i = 10^{-3 \cdot D_i / (\text{RT60} \cdot f_s)}
+$$
 
-float SimpleLPF::process(float x) {
-    y = y + a * (x - y);
-    return y;
-}
-```
+### Hadamard feedback
 
-### Fractional Delay Interpolation
+$$
+A = \frac{1}{\sqrt{8}} H_8
+$$
 
-```cpp
-float readBuffer(const std::vector<float>& buf, float delaySamples) {
-    if (delaySamples <= 0.0f) return 0.0f;
-    float readPos = static_cast<float>(writePos) - delaySamples;
-    if (readPos < 0.0f) readPos += bufferSize;
-    int idx1 = static_cast<int>(readPos);
-    int idx2 = (idx1 + 1) % bufferSize;
-    float frac = readPos - idx1;
-    return buf[idx1] + frac * (buf[idx2] - buf[idx1]);
-}
-```
+where $H_8$ is the 8×8 Hadamard matrix.
 
-### Reverb Loop Gain Calculation
+### Heat-grid diffusion
 
-```cpp
-g[i] = std::pow(10.f, -3.f * len / (rt60 * sr));
-```
+$$
+\text{next}[i] = \text{state}[i] + \text{diffK} \cdot (\text{state}[L] + \text{state}[R] + \text{state}[U] + \text{state}[D] - 4\text{state}[i])
+$$
 
-### Hadamard Mixing Matrix
+### Heat-grid decay
 
-```cpp
-for (int h = 1; h < N; h <<= 1) {
-    for (int i = 0; i < N; i += (h << 1)) {
-        for (int j = i; j < i + h; ++j) {
-            const float a = y[j], c = y[j + h];
-            y[j] = a + c;
-            y[j + h] = a - c;
-        }
-    }
-}
-```
+$$
+\text{next} \leftarrow \text{next} \cdot \text{gridFb}
+$$
 
-### Heat Grid Diffusion
+with `gridFb` clamped to `[0.99, 0.99995]`.
 
-```cpp
-float laplacian = (u_left + u_right + u_up + u_down) - 4.0f * u;
-next[idx] = u + diffK * laplacian;
-```
+### Heat-grid read (L)
+
+$$
+\text{rawL} = \frac{1}{3}\left(\text{state}[0.28, 0.62] + \text{state}[0.50, 0.50] + \text{state}[0.72, 0.35]\right)
+$$
+
+### Heat-grid read (R)
+
+$$
+\text{rawR} = \frac{1}{3}\left(\text{state}[0.62, 0.28] + \text{state}[0.50, 0.50] + \text{state}[0.35, 0.72]\right)
+$$
+
+### DC block
+
+$$
+y[n] = x[n] - x[n-1] + 0.998 y[n-1]
+$$
+
+### Final mix
+
+$$
+\text{out} = (1-\text{mix})\text{in} + \text{mix} \cdot \text{level} \cdot (\text{fdn} + \text{er} \cdot 0.35 \cdot \text{space} + 0.35 \cdot \text{heat})
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- **Reverb Engine**: 8 delay lines with LFO modulation, Hadamard mixing
-- **Heat Grid**: 2D cellular automaton with boundary conditions
-- **Delay Processing**: Fractional interpolation with buffer management
-- **Visualization**: Periodic snapshot updates (~90 Hz)
+- Cathedral: 8 delay lines × (read + damping + write + Hadamard) ≈ 8 × 20 flops = 160
+- Pre-delay + early reflections: ~30 flops
+- Input diffusion: 4 × 2 × all-pass ≈ 60 flops
+- Heat grid: size² × 10 flops (up to 64 × 64 × 10 = 40 K flops) — the dominant cost
+- Delay: ~40 flops
+- Filters + output: ~30 flops
+- Total: ~42 K flops/sample at size = 64 — borderline for some CPUs
 
 ### Memory Allocation
 
-- **Dynamic Buffers**: 
-  - Delay lines: `std::vector<float>` for each delay line
-  - Heat grid: `std::vector<float>` of size `size × size`
-  - Visualization: Fixed-size 2D array `viz[VIZ_ROWS][VIZ_COLS]`
+- Cathedral: 8 × 32768 + 2 × 131072 + 8 × 2048 ≈ 540 K floats ≈ 2.2 MB
+- Heat grid: 64 × 64 × 2 = 8192 floats ≈ 33 KB
+- Delay: 2 × 57.6 K floats ≈ 460 KB
 
 ### Buffers
 
-- **Delay Buffers**: Dynamically resized based on delay time requirements
-- **Heat Grid**: Fixed-size buffers for current and next states
-- **Pre-delay**: Circular buffer of fixed size (131072 samples)
-- **Early Reflections**: Circular buffers of fixed size (2048 samples each)
+- Cathedral FDN: 262144 floats
+- Cathedral pre-delay: 262144 floats
+- Cathedral allpasses: 16384 floats
+- Heat grid: 8192 floats
+- Delay: 115200 floats
 
 ### Real-time Processing
 
-- All processing occurs in the audio thread
-- No blocking operations or external synchronization
-- Efficient memory access patterns with cache-friendly layouts
+- Heat grid is O(size²) per sample
+- At size = 64, this is 4096 cells × 10 flops = 40 K flops/sample
+- The heat grid resizes on knob change (allocates new vectors), which could cause a glitch — but only on user input
 
 ### Thread Safety
 
-- Single-threaded design (audio thread only)
-- Visualization data accessed by UI thread with no locking required
-- Torn reads in visualization are cosmetic only
+- All state written by audio thread, read by UI thread via torn reads
+- The display grid (`viz`) is updated every 512 samples
 
 ### Numerical Stability
 
-- **Clamping**: All feedback values clamped to prevent instability
-- **Limiting**: Soft limiting applied to output signals
-- **Finite Check**: Safety net for non-finite values
-- **Energy Preservation**: Hadamard mixing matrix preserves energy
-- **Stability by Construction**: Loop gains always < 1 for reverb
+- Cathedral: FDN gain < 1, orthogonal matrix
+- Heat grid: feedback clamped to < 1
+- Output: tanh + clamp
+- Non-finite safety net: reset everything
 
 ## 10. Dependencies
 
-### Libraries
+### Libraries/Headers
 
-- `rack.hpp` - VCV Rack core library
-- Standard C++ STL: `<vector>`, `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<utility>`
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<vector>`, `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<utility>`
 
-### Classes and Headers
+### External Classes
 
-- `rack::Module` - Base module class
-- `rack::math::clamp()` - Value clamping function
-- `rack::math::isfinite()` - Floating-point finiteness check
-- `rack::math::tanh()` - Hyperbolic tangent function
-- `rack::window::Font` - Font handling for UI
-- `rack::window::Widget` - Widget base class
-- `rack::window::DrawArgs` - Drawing arguments
-
-### External Dependencies
-
-- VCV Rack 2 API
-- NVG (NanoVG) for UI rendering
-- System font loading capabilities
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-HeatRev is a sophisticated stereo reverb and delay processor that combines algorithmic reverb with organic heat-grid simulation. The module features:
+`HeatRev` is a hybrid reverb/echo that combines three layers: a stereo delay, a Cathedral 8-line FDN reverb, and a 2D heat-grid diffusion network. The heat grid is the distinctive feature — it's a slow-moving Laplacian diffusion that adds a warm, evolving resonant texture to the tail. The live heat-map display shows the grid state as a matrix of cyan (positive) and violet (negative) cells.
 
-- **Cathedral Reverb Engine**: 8-line FDN with early reflections, pre-delay, and input diffusion
-- **Heat Grid Simulation**: Cellular automaton-based warmth generation
-- **Stereo Delay**: Fractional delay interpolation with feedback
-- **Visual Feedback**: Real-time heat-grid visualization
-- **Parameter Modulation**: All parameters are CV modulatable
-- **Stability**: Built-in stability measures for all feedback systems
+The DSP is sophisticated: the Cathedral reverb uses an orthonormal Hadamard feedback matrix, the heat grid uses a 5-point Laplacian with feedback decay, and the whole thing is soft-limited to avoid runaway. The heat grid is the most interesting part — it's essentially a physical model of heat diffusion in a 2D plate, and it gives the reverb a character you won't find anywhere else.
 
-The implementation uses efficient DSP algorithms including fractional delay interpolation, Hadamard mixing matrices, and cellular automata. The module is designed for artistic sound design applications where natural-sounding reverb with organic warmth is desired.
+The main limitation is CPU: at size = 64, the heat grid alone is 40 K flops/sample, which can strain slower CPUs. For most patches, size = 32 is a better balance. Also, the heat grid resizes on knob change (allocates new vectors), which can cause a small glitch.
