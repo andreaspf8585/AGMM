@@ -1,22 +1,23 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: PsyReverb.cpp
-Generated: 2026-11-04 06:27
 -->
 
 # PsyReverb
 
 ## 1. Overview
 
-The `PsyReverb` module is a stereo reverb effect designed for the VCV Rack platform. It implements a Freeverb-style reverb algorithm with modifications to prevent runaway gain, ensuring stable audio processing without clipping or instability.
+`PsyReverb` is a 14 HP Freeverb-style stereo reverb. The wet path is eight parallel damped comb filters feeding four series Schroeder all-passes, with the total reverb made mono-shared between L and R for a wide, stable image. The four main parameters (Wet, Dry, Room size, Damping) each have a dedicated CV input and bipolar attenuverter, and the small display shows the decay envelope, the damping response, and I/O level meters.
 
 Key features:
-- Stereo input/output processing
-- Four main parameters: Wet, Dry, Room size, Damping
-- CV control with attenuverters for all parameters
-- Mono-to-stereo conversion when only left input is connected
-- Visual metering for input and output signals
-- Real-time parameter updates via clock divider
+- 8 parallel damped comb filters
+- 4 series Schroeder all-passes
+- Mono-shared wet signal for wide image
+- Wet, Dry, Room, Damping knobs
+- CV with attenuverters on all four
+- Display: decay envelope, damping response, I/O meters
+- 0.5 s fade-in after sample rate change (built into the init)
+- Configurable CV range via menu? (No, this one is fixed.)
 
 ## Module Screenshot
 
@@ -26,292 +27,287 @@ Key features:
 
 ### Main Classes
 
-1. **`PsyReverbEngine`** - Core DSP engine implementing the reverb algorithm
-2. **`PsyReverb`** - VCV Rack module wrapper managing parameters, inputs/outputs, and processing
-3. **`PRPanel`** - UI panel drawing for the module's front panel
-4. **`PRDisplay`** - Visual display showing reverb characteristics
+- `PsyReverb`: Core module class inheriting from `rack::Module`
+- `PsyReverbEngine`: The Freeverb DSP
+- `PRPanel`: Static panel artwork
+- `PRDisplay`: Live decay/damping/meters display
 
 ### Inheritance
 
 - `PsyReverb` inherits from `rack::Module`
-- UI components inherit from `rack::widget::TransparentWidget`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-#### `PsyReverbEngine::DelayLine`
-A circular buffer implementation for delay lines:
-```cpp
-struct DelayLine {
-    float *buffer = nullptr;
-    int length = 0;
-    int idx = 0;
-    
-    void init(int len);
-    void destroy();
-    float read() const;
-    void write(float value);
-    void reset();
-};
-```
-
-#### `PsyReverbEngine`
-Main reverb engine with:
-- 8 comb filters (delay lines)
-- 4 allpass filters (delay lines)
-- Lowpass filter state for each comb
-- Parameter storage (`wet`, `dry`, `roomsize`, `damping`)
-- Sample rate tracking
-
-### Module Organization
-
-The module is organized as a single `.cpp` file with:
-1. Layout constants and helper functions
-2. DSP engine implementation (`PsyReverbEngine`)
-3. VCV Rack module wrapper (`PsyReverb`)
-4. UI components in anonymous namespace
-5. Widget class (`PsyReverbWidget`) for GUI
+| Group | Storage |
+|-------|---------|
+| Engine | `PsyReverbEngine reverb` |
+| Timing | `dsp::ClockDivider paramDivider` |
+| Display | `float meterIn, meterOutL, meterOutR` |
 
 ## 3. DSP Theory
 
-### Algorithm Overview
+### Freeverb architecture
 
-The reverb uses a modified Freeverb architecture with:
-- **Comb filters**: 8 parallel delay lines with feedback
-- **Allpass filters**: 4 delay lines with feedback (used to color the reverb)
-- **Lowpass filtering**: Damped comb filter response
-- **Feedback gain control**: Prevents runaway gain
+The Freeverb reverb is eight parallel comb filters followed by four series all-passes, per channel:
 
-### Mathematical Equations
+$$
+y_i = \text{comb}_i(x + g_{\text{cross}} y_{\text{other}}), \quad i = 0..7
+$$
 
-#### Comb Filter Response
-$$y[n] = x[n] + g \cdot d[n - L]$$
+$$
+y = \text{allpass}_0(\text{allpass}_1(\text{allpass}_2(\text{allpass}_3(\text{mean}(y_i))))
+$$
 
-Where:
-- $x[n]$ is input signal
-- $y[n]$ is output signal  
-- $g$ is feedback gain (0.5 + roomsize × 0.48)
-- $d[n - L]$ is delayed sample at delay length $L$
+### Comb filter
 
-#### Lowpass Filter (One-pole)
-$$y[n] = y[n-1] + \alpha(x[n] - y[n-1])$$
+Each comb is a delay line with feedback:
 
-Where:
-$$\alpha = 1 - e^{-2\pi f_c / f_s}$$
+$$
+\text{buf}[w] = x + \text{LP}(\text{buf}[r]) \cdot fb
+$$
 
-#### Allpass Filter
-$$y[n] = -x[n] + d[n - L]$$
-$$d[n] = x[n] + y[n] \cdot g$$
+where `LP` is a one-pole low-pass with cutoff set by the damping knob, and `fb = 0.5 + roomsize * 0.48`.
 
-### Filters and Delay Lines
+### All-pass
 
-The implementation uses:
-- **Comb filters**: 8 delay lines with different lengths (0.0297s to 0.0697s)
-- **Allpass filters**: 4 delay lines with different lengths (0.0051s to 0.0149s)  
-- **Lowpass filtering**: Applied to comb filter outputs for damping effect
+Standard Schroeder all-pass:
 
-### Feedback System
+$$
+y = -x + d, \quad \text{buf}[w] = x + y \cdot g
+$$
 
-Feedback gain is calculated as:
-$$g_{fb} = 0.5 + \text{roomsize} \times 0.48$$
+with $g = 0.7$.
 
-This ensures maximum feedback gain of 0.98, preventing instability.
+### Mono-shared wet
+
+The wet L and wet R are the same signal (mono). This is a design choice: because the comb delays are the same for L and R, the wet output is identical. The "stereo" image comes from the dry L/R + the shared wet. This gives a wide, stable image because the wet doesn't have L/R interference.
+
+### Damping
+
+The damping knob sets the comb low-pass cutoff:
+
+$$
+f_c = 20000 - \text{damp} \cdot 19900
+$$
+
+So damp = 0 → 20 kHz (no damping), damp = 1 → 100 Hz (heavy damping).
+
+### Decay
+
+The roomsize knob sets the comb feedback:
+
+$$
+fb = 0.5 + \text{roomsize} \cdot 0.48
+$$
+
+So roomsize = 0 → 0.5 (short), roomsize = 1 → 0.98 (long).
+
+### RT60 estimate
+
+From the comb feedback and the mean comb length:
+
+$$
+\text{meanDelay} = \frac{1}{8}\sum_i \frac{\text{combDelay}[i]}{f_s} \approx 0.04478 \text{ s}
+$$
+
+$$
+\text{dbLoop} = -20 \log_{10}(fb)
+$$
+
+$$
+\text{RT60} = \frac{60 \cdot \text{meanDelay}}{\text{dbLoop}}
+$$
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **Wet**: Mix between dry and wet signal (0-100%)
-- **Dry**: Mix between input and output (0-100%)  
-- **Room size**: Size of the virtual room (0-100%)
-- **Damping**: High-frequency damping (0-100%)
 
-### Switches/Buttons
-None
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_WET` | 0 | 1 | 0.5 | Wet level |
+| `PARAM_DRY` | 0 | 1 | 0.5 | Dry level |
+| `PARAM_ROOMSIZE` | 0 | 1 | 0.8 | Room size |
+| `PARAM_DAMPING` | 0 | 1 | 0.5 | Damping |
 
-### CV Inputs
-- **Wet CV**: Controls wet parameter (10V = 100%)
-- **Dry CV**: Controls dry parameter (10V = 100%)
-- **Room size CV**: Controls room size (10V = 100%)
-- **Damping CV**: Controls damping (10V = 100%)
+### Attenuverters
 
-### Gates
-None
+| Parameter | Range | Default |
+|-----------|-------|---------|
+| `PARAM_ATTEN_WET` | −1 | 1 | 0 |
+| `PARAM_ATTEN_DRY` | −1 | 1 | 0 |
+| `PARAM_ATTEN_ROOMSIZE` | −1 | 1 | 0 |
+| `PARAM_ATTEN_DAMPING` | −1 | 1 | 0 |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `INPUT_LEFT` | L in |
+| `INPUT_RIGHT` | R in |
+| `CV_WET` | Wet CV |
+| `CV_DRY` | Dry CV |
+| `CV_ROOMSIZE` | Room CV |
+| `CV_DAMPING` | Damping CV |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_LEFT` | L out |
+| `OUTPUT_RIGHT` | R out |
 
 ### Enumerations
-None
 
-### Parameter Ranges and Defaults
-| Parameter | Min | Max | Default |
-|-----------|-----|-----|---------|
-| Wet       | 0.0 | 1.0 | 0.5     |
-| Dry       | 0.0 | 1.0 | 0.5     |
-| Room size | 0.0 | 1.0 | 0.8     |
-| Damping   | 0.0 | 1.0 | 0.5     |
-
-### Attenuverter Parameters
-- **Wet CV attenuverter**: -1.0 to +1.0 (default: 0.0)
-- **Dry CV attenuverter**: -1.0 to +1.0 (default: 0.0)
-- **Room size CV attenuverter**: -1.0 to +1.0 (default: 0.0)
-- **Damping CV attenuverter**: -1.0 to +1.0 (default: 0.0)
+- `ParamId`: Wet, Dry, RoomSize, Damping, AttenWet, AttenDry, AttenRoomSize, AttenDamping
+- `InputId`: InL, InR, CVWet, CVDry, CVRoomSize, CVDamping
+- `OutputId`: OutL, OutR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-| Name | Voltage Range | Behavior |
-|------|---------------|----------|
-| Left input | ±10V | Stereo processing, mono if right is disconnected |
-| Right input | ±10V | Stereo processing |
-| Wet CV | 0-10V | Controls wet parameter (10V = 100%) |
-| Dry CV | 0-10V | Controls dry parameter (10V = 100%) |
-| Room size CV | 0-10V | Controls room size (10V = 100%) |
-| Damping CV | 0-10V | Controls damping (10V = 100%) |
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_LEFT` | Audio | ±10 V | Left (mono if R empty) |
+| `INPUT_RIGHT` | Audio | ±10 V | Right |
+| `CV_WET` | CV | 0–10 V | Wet CV |
+| `CV_DRY` | CV | 0–10 V | Dry CV |
+| `CV_ROOMSIZE` | CV | 0–10 V | Room CV |
+| `CV_DAMPING` | CV | 0–10 V | Damping CV |
 
 ### Outputs
-| Name | Voltage Range | Behavior |
-|------|---------------|----------|
-| Left output | ±10V | Processed stereo signal |
-| Right output | ±10V | Processed stereo signal |
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_LEFT` | Audio | ±10 V | Left |
+| `OUTPUT_RIGHT` | Audio | ±10 V | Right |
+
+### Bypass
+
+`configBypass(INPUT_LEFT, OUTPUT_LEFT)` and `configBypass(INPUT_RIGHT, OUTPUT_RIGHT)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Parameter Update** (every 32 samples):
-   - Read parameter knobs
-   - Apply CV input with attenuverter
-   - Clamp to valid range [0,1]
-   - Update reverb engine parameters
-
-2. **Input Processing**:
-   - Read left and right inputs
-   - If right input disconnected, use left input for both channels (mono-to-stereo)
-
-3. **Reverb Processing**:
-   - For each comb filter:
-     - Read delayed sample
-     - Apply lowpass filtering with damping
-     - Calculate feedback gain: $g = 0.5 + \text{roomsize} \times 0.48$
-     - Write new sample to delay line
-     - Accumulate output
-   - Average comb outputs (divide by 8)
-   - Process through allpass filters (4 stages)
-   - Apply wet/dry mix
-
-4. **Output**:
-   - Apply dry/wet mix with gain control
-   - Clamp output to [-10, 10]V range
-   - Set output voltages
+1. **Sample-rate change** — Re-init reverb delay lines.
+2. **Control-rate update (every 32 samples)** — Compute effective wet, dry, roomsize, damping from knobs + CV × atten.
+3. **Read inputs** — Mono-normal.
+4. **Process reverb** — 8 combs + 4 all-passes (mono, shared between L/R).
+5. **Mix** — `out = dry × in + wet × reverb`.
+6. **Clamp** — ±10 V.
+7. **Write outputs**.
+8. **Update meters** — Peak followers.
 
 ## 7. Important Functions
 
 ### `PsyReverbEngine::init(float sr)`
-Initializes delay lines with calculated lengths based on sample rate.
+
+Allocates all comb and all-pass delay buffers for the given sample rate.
 
 ### `PsyReverbEngine::processStereo(float leftIn, float rightIn, float &leftOut, float &rightOut)`
-Main stereo reverb processing function:
-- Processes 8 comb filters in parallel
-- Applies damping via lowpass filtering
-- Processes 4 allpass filters in series
-- Mixes dry and wet signals
 
-### `PsyReverbEngine::processMono(float in, float &outL, float &outR)`
-Handles mono input by duplicating signal to both outputs.
+The Freeverb algorithm with mono-shared wet.
 
-### `PsyReverb::process(const ProcessArgs &args)`
-VCV Rack processing function:
-- Updates parameters via clock divider (32 sample rate)
-- Reads inputs and handles mono/stereo routing
-- Calls appropriate reverb processing function
-- Updates metering values
+### `compute(paramId, attenId, cvId)`
+
+Reads a knob + CV × atten, clamped to 0..1.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Delay Line Implementation
-```cpp
-void DelayLine::init(int len) {
-    length = std::max(len, 1);
-    buffer = new float[length]();
-    idx = 0;
-}
+### Comb feedback
 
-void DelayLine::write(float value) {
-    buffer[idx] = value;
-    idx = (idx + 1) % length;
-}
-```
+$$
+fb = 0.5 + \text{roomsize} \cdot 0.48 \le 0.98
+$$
 
-### Lowpass Filter Implementation
-```cpp
-inline float lowpass(float in, float &state, float cutoff) {
-    if (cutoff >= 19999.0f)
-        return in;
-    float coeff = 1.0f - std::exp(-2.0f * float(M_PI) * cutoff / sampleRate);
-    state = state + coeff * (in - state);
-    return state;
-}
-```
+### Damping cutoff
 
-### Comb Filter Feedback Gain
-$$g_{fb} = 0.5 + \text{roomsize} \times 0.48$$
+$$
+f_c = 20000 - \text{damp} \cdot 19900 \text{ Hz}
+$$
 
-Maximum gain: $0.5 + 1.0 \times 0.48 = 0.98$
+### Comb delay lengths (at 48 kHz)
+
+$$
+\{0.0297, 0.0371, 0.0411, 0.0437, 0.0489, 0.0557, 0.0623, 0.0697\} \text{ s}
+$$
+
+### All-pass delay lengths
+
+$$
+\{0.0051, 0.0072, 0.0103, 0.0149\} \text{ s}
+$$
+
+### Mix
+
+$$
+\text{out} = \text{dry} \cdot \text{in} + \text{wet} \cdot \text{reverb}
+$$
+
+### RT60 estimate
+
+$$
+\text{RT60} = \frac{60 \cdot 0.04478}{-20 \log_{10}(fb)}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Uses fixed-size delay lines (no dynamic allocation during processing)
-- Processes only 1/32 of samples for parameter updates
-- Minimal floating-point operations per sample
-- Efficient circular buffer indexing
+### CPU Usage
+
+- 8 combs × (read + LP + write) ≈ 8 × 8 = 64 flops
+- 4 all-passes × 2 ≈ 20 flops
+- Total: ~100 flops/sample
 
 ### Memory Allocation
-- Delay line buffers allocated once in `init()`
-- No heap allocations during audio processing
-- Destructor properly cleans up all memory
+
+- Combs: 8 × up to 0.07 × 48 kHz = 26.9 K floats
+- All-passes: 4 × up to 0.015 × 48 kHz = 2.9 K floats
+- Total: ~30 K floats ≈ 120 KB
 
 ### Buffers
-- Fixed-size delay lines (8 comb + 4 allpass)
-- Each delay line uses a circular buffer of appropriate length
-- Buffer sizes calculated from sample rate and fixed delays
+
+- 8 comb delay lines
+- 4 all-pass delay lines
 
 ### Real-time Processing
-- All processing done in real-time audio thread
-- Parameter updates synchronized with audio rate
-- No blocking operations or locks
+
+- All loops bounded
+- No allocation, no blocking
+- Control-rate updates every 32 samples
 
 ### Thread Safety
-- Single-threaded design (audio thread only)
-- Meter values updated atomically (torn reads are cosmetic)
+
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
-- Feedback gain clamped to maximum 0.98
-- Output clamped to [-10, 10]V range
-- Lowpass filter uses stable one-pole implementation
-- Delay line indices use modulo arithmetic
+
+- Comb feedback capped at 0.98
+- Output clamped to ±10 V
+- No DC block (Freeverb typically doesn't need one)
 
 ## 10. Dependencies
 
-### Libraries and Headers
-- `rack.hpp` - VCV Rack core library
-- `<cmath>` - Standard math functions
-- `<cstdio>` - Standard I/O (unused in current code)
-- `<cstring>` - String operations (unused in current code)
-- `<algorithm>` - Standard algorithms
+### Libraries/Headers
 
-### Classes and Types
-- `rack::Module` - Base module class
-- `rack::dsp::ClockDivider` - Sample rate divider for parameter updates
-- `rack::widget::TransparentWidget` - UI widget base
-- `rack::Param` - Parameter handling
-- `rack::Input` - Input handling
-- `rack::Output` - Output handling
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `PsyReverb` module implements a modified Freeverb-style reverb algorithm optimized for VCV Rack. It features:
+`PsyReverb` is a straightforward Freeverb-style stereo reverb. It's the "vanilla" reverb of the AGMM collection: eight damped combs, four all-passes, mono-shared wet, four knobs with CV/attenuverters.
 
-- **Stereo processing** with automatic mono-to-stereo conversion
-- **Four controllable parameters**: Wet, Dry, Room size, Damping  
-- **CV control** with attenuverters for real-time modulation
-- **Stable feedback system** preventing runaway gain
-- **Visual display** showing reverb characteristics (decay curve, damping response)
-- **Real-time metering** of input/output signals
+The mono-shared wet is the key design choice: because the wet is the same for L and R, the reverb doesn't have L/R interference, which gives a very stable, wide image. Combined with the dry L/R input, the result is a reverb that sits nicely in a mix without crowding.
 
-The implementation uses 8 comb filters and 4 allpass filters arranged in a classic reverb topology, with careful attention to numerical stability and performance optimization for real-time audio processing.
+The display shows the decay envelope, damping response, and meters — a nice visualization of the reverb's character. The RT60 estimate is derived from the comb feedback and delay length, and it tracks the knob quite well.
+
+The main limitations are: no freeze, no pre-delay, no modulation, and the mono-shared wet is a fixed design (can't be changed to true stereo). For a more featured reverb, see `InfinityRev` or `PsyReverb2`.
