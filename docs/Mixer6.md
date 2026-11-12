@@ -1,14 +1,20 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Mixer6.cpp
-Generated: 2026-11-04 06:23
 -->
 
 # Mixer6
 
 ## 1. Overview
 
-The `Mixer6` module is a stereo 6-channel audio mixer for VCV Rack. It accepts six stereo input channels (L/R), each with independent level control, CV-controlled attenuation, and optional CV input for dynamic level adjustment. The module provides a master gain control to scale the final mixed output. It also includes visual feedback through an oscilloscope-style display and peak meter indicators.
+`Mixer6` is a 26 HP six-channel version of `Mixer3`. It has the same structure (per-channel L/R inputs, level knob + CV/attenuverter, master gain), but with 6 channels laid out in narrower stacked plates for a taller panel. The extra channels and compact layout make it the "full-size" stereo mixer of the AGMM collection.
+
+Key features:
+- 6 stereo channels (L/R inputs per channel)
+- Per-channel level knob + CV with bipolar attenuverter
+- Master gain
+- Scope of the mono mix + L/R meters
+- Selectable CV range (bipolar/unipolar) via menu, persisted
 
 ## Module Screenshot
 
@@ -17,217 +23,199 @@ The `Mixer6` module is a stereo 6-channel audio mixer for VCV Rack. It accepts s
 ## 2. Architecture
 
 ### Main Classes
+
 - `Mixer6`: Core module class inheriting from `rack::Module`
-- `MxPanelBackground`: Custom widget for drawing the panel background
-- `MxDisplayWidget`: Custom widget for rendering the scope and meters
-- `Mixer6Widget`: Module widget that constructs the UI layout
+- `MxPanelBackground`: Static panel artwork
+- `MxDisplayWidget`: Live scope + meters + readouts
 
 ### Inheritance
+
 - `Mixer6` inherits from `rack::Module`
-- `MxPanelBackground` and `MxDisplayWidget` inherit from `rack::TransparentWidget`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
-- `CVRange`: Enum defining CV input voltage range modes (`BIPOLAR_M5_5`, `UNIPOLAR_0_10`)
-- `ParamId`: Enum for module parameters (6 channel levels, 6 channel attenuverters, master gain)
-- `InputId`: Enum for module inputs (12 stereo audio inputs, 6 CV inputs)
-- `OutputId`: Enum for module outputs (L/R mix)
+### State (grouped)
 
-### Relationships
-- `Mixer6Widget` owns and manages the UI components (`MxPanelBackground`, `MxDisplayWidget`)
-- `Mixer6` holds state data including scope buffers, peak values, and CV range mode
-- All parameters and inputs are indexed using enums for type-safe access
-
-### Module Organization
-- Parameters: 19 total (6 levels + 6 attenuverters + 1 master gain)
-- Inputs: 18 total (12 stereo audio + 6 CV)
-- Outputs: 2 (L/R mix)
+| Group | Storage |
+|-------|---------|
+| CV mode | `CVRange cvRangeMode` |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-The module implements a simple linear mixing algorithm with optional CV control.
+### Per-channel gain
 
-### Mathematical Equations
-For each channel $ ch \in [0,5] $:
-
-$$
-\text{gain}_{ch} = \max(0, \min(1, \text{level}_{ch} + \text{attenuverter}_{ch} \cdot \text{CV}_{ch}))
-$$
+Identical to `Mixer3`:
 
 $$
-\text{mix}_L = \sum_{ch=0}^{5} \text{inL}_{ch} \cdot \text{gain}_{ch}
+g_c = \text{clamp}(\text{LEVEL}_c + \text{atten}_c \cdot \text{scaleCV}(\text{CV}_c), 0, 1)
 $$
 
-$$
-\text{mix}_R = \sum_{ch=0}^{5} \text{inR}_{ch} \cdot \text{gain}_{ch}
-$$
+### Summing
 
 $$
-\text{out}_L = \text{mix}_L \cdot \text{masterGain}
+\text{mixL} = \sum_{c=1}^{6} \text{inL}_c \cdot g_c, \quad \text{mixR} = \sum_{c=1}^{6} \text{inR}_c \cdot g_c
 $$
 
+### Master gain
+
 $$
-\text{out}_R = \text{mix}_R \cdot \text{masterGain}
+\text{outL} = \text{mixL} \cdot g_{\text{master}}, \quad \text{outR} = \text{mixR} \cdot g_{\text{master}}
 $$
 
-### Algorithms
-- Linear mixing with clamping to [0,1] range for gain
-- CV scaling based on mode (`UNIPOLAR_0_10` or `BIPOLAR_M5_5`)
-- Peak detection and decay filtering for meters
-- Scope buffer updating with fixed-size circular buffer
-
-### Filters
-None explicitly implemented. Uses simple first-order decay filter for peak metering.
-
-### Oscillators
-None.
-
-### Delay Lines
-None.
-
-### Feedback Systems
-None.
-
-### Modulation
-CV inputs modulate channel gain via attenuverter control.
-
-### Random Processes
-None.
+The only difference from `Mixer3` is the number of channels (6 vs 3).
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **Channel Level Knobs (6)**: Range [0,1], controls base gain per channel
-- **Master Gain Knob**: Range [0,2], scales final mixed output
 
-### Switches
-- None
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_CH1_LEVEL` .. `PARAM_CH6_LEVEL` | 0 | 1 | 0 | Channel levels |
+| `PARAM_CH1_ATTV` .. `PARAM_CH6_ATTV` | −1 | 1 | 0 | Channel CV attenuverters |
+| `PARAM_MASTER_GAIN` | 0 | 2 | 1 | Master gain |
 
-### Buttons
-- None
+### Inputs
 
-### CV Inputs
-- **Channel CV Inputs (6)**: Voltage-controlled level adjustment
-  - Voltage range depends on `cvRangeMode`:
-    - `UNIPOLAR_0_10`: 0V to +10V → scaled to [-1,1]
-    - `BIPOLAR_M5_5`: -5V to +5V → scaled to [-1,1]
+| Input | Description |
+|-------|-------------|
+| `INPUT_CH1_L` .. `INPUT_CH6_L` | 6 L audio inputs |
+| `INPUT_CH1_R` .. `INPUT_CH6_R` | 6 R audio inputs |
+| `INPUT_CH1_CV` .. `INPUT_CH6_CV` | 6 level CV inputs |
 
-### Gates
-- None
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_L` | Mix L |
+| `OUTPUT_R` | Mix R |
 
 ### Enumerations
-- `CVRange`: 
-  - `UNIPOLAR_0_10` (default)
-  - `BIPOLAR_M5_5`
 
-### Parameter Ranges
-- Channel level: [0,1]
-- Channel attenuverter: [-1,1]
-- Master gain: [0,2]
-
-### Default Values
-- All channel levels: 0.0
-- All channel attenuverters: 0.0
-- Master gain: 1.0
+- `CVRange`: BIPOLAR_M5_5, UNIPOLAR_0_10
+- `ParamId`: CH1Level..CH6Level, CH1Attv..CH6Attv, MasterGain
+- `InputId`: CH1L..CH6L, CH1R..CH6R, CH1CV..CH6CV
+- `OutputId`: OutputL, OutputR
 
 ## 5. Inputs and Outputs
 
-### Audio Inputs
-- **Channel L/R Pairs (6)**: 
-  - Voltage range: ±10V (standard VCV Rack)
-  - Behavior: Stereo audio input
+### Inputs
 
-### CV Inputs
-- **Channel CV Inputs (6)**:
-  - Voltage range: Depends on `cvRangeMode`
-  - Behavior: Modulates channel gain via attenuverter
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_CH1_L` .. `INPUT_CH6_L` | Audio | ±10 V | 6 L inputs |
+| `INPUT_CH1_R` .. `INPUT_CH6_R` | Audio | ±10 V | 6 R inputs |
+| `INPUT_CH1_CV` .. `INPUT_CH6_CV` | CV | ±10 V | 6 level CVs |
 
 ### Outputs
-- **Mix L/R Outputs**:
-  - Voltage range: ±10V
-  - Behavior: Mixed stereo output signal
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_L` | Audio | ±10 V | Mix L |
+| `OUTPUT_R` | Audio | ±10 V | Mix R |
+
+### Menu
+
+- CV range: bipolar (−5..+5) or unipolar (0..+10)
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Reading**: Read all 12 audio inputs and 6 CV inputs
-2. **CV Scaling**: Scale CV values based on `cvRangeMode`
-3. **Gain Calculation**: Compute per-channel gain with clamping:
-   - Base gain = level knob value
-   - Modulated gain = base + (attenuverter × scaled CV)
-   - Clamp to [0,1]
-4. **Mixing**: Accumulate weighted audio samples from all channels
-5. **Master Scaling**: Apply master gain to mixed output
-6. **Output**: Set L/R outputs with final values
-7. **Display Update**:
-   - Peak detection and decay filtering for meters
-   - Scope buffer updating with mono signal
+Identical to `Mixer3` but with 6 channels:
+
+1. Read CV mode.
+2. For each of 6 channels:
+   - Compute gain.
+   - Read L/R inputs.
+   - Add to mix.
+3. Multiply by master gain.
+4. Write outputs.
+5. Update display.
 
 ## 7. Important Functions
 
-- `scaleCV(float v)`: Scales CV input voltage based on current mode
-- `process(const ProcessArgs&)`: Main DSP processing function
-- `dataToJson()`: Serializes module state to JSON
-- `dataFromJson(json_t*)`: Deserializes module state from JSON
-- `MxDisplayWidget::drawLayer()`: Renders scope and meters
+### `scaleCV(float v)`
+
+Same as `Mixer3`.
+
+### `process(const ProcessArgs &args)`
+
+Loop over 6 channels instead of 3.
 
 ## 8. Mathematical Implementation
 
-### Gain Calculation
-```cpp
-float gain = levelKnob + cvOffset;
-if (gain < 0.f) gain = 0.f;
-if (gain > 1.f) gain = 1.f;
-```
+### Per-channel gain
 
-### CV Scaling
-```cpp
-if (cvRangeMode == BIPOLAR_M5_5)
-    return std::max(-1.f, std::min(v / 5.f, 1.f));
-return v / 10.f;  // UNIPOLAR_0_10 – original behavior
-```
+$$
+g_c = \text{clamp}(\text{LEVEL}_c + \text{atten}_c \cdot \text{scaleCV}(\text{CV}_c), 0, 1)
+$$
 
-### Peak Detection with Decay
-```cpp
-float decay = 1.f - 4.f * args.sampleTime;
-peakL = std::max(std::fabs(outL), peakL * decay);
-peakR = std::max(std::fabs(outR), peakR * decay);
-```
+### Summing (6 channels)
+
+$$
+\text{mixL} = \sum_{c=1}^{6} \text{inL}_c \cdot g_c, \quad \text{mixR} = \sum_{c=1}^{6} \text{inR}_c \cdot g_c
+$$
+
+### Master output
+
+$$
+\text{outL} = \text{mixL} \cdot g_{\text{master}}, \quad \text{outR} = \text{mixR} \cdot g_{\text{master}}
+$$
+
+### Peak followers
+
+$$
+\text{peakL} \leftarrow \max(|\text{outL}|, \text{peakL} \cdot (1 - 4\Delta t))
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Simple linear mixing with minimal floating-point operations
-- No complex algorithms or lookups
-- Constant-time processing per sample
+### CPU Usage
+
+- 6 channels × (2 reads + 2 multiplies + 1 add) ≈ 60 flops
+- 1 master multiply
+- Peak + scope ≈ 10 flops
+- Total: ~80 flops/sample
 
 ### Memory Allocation
-- Fixed-size arrays for scope buffers (96 elements)
-- Stack-based allocation for temporary variables
-- No dynamic memory allocation during processing
+
+- No allocation in `process()`
+- `scopeMin[96]`, `scopeMax[96]` fixed-size
 
 ### Buffers
-- `scopeMin[MX_SCOPE_N]` and `scopeMax[MX_SCOPE_N]`: Circular buffer for oscilloscope display
-- `scopeHead`, `scopeCount`: Buffer management indices
+
+- `scopeMin[96]`, `scopeMax[96]`: 192 floats
 
 ### Real-time Processing
-- All operations performed in real-time within `process()` function
-- No blocking or time-consuming operations
+
+- Loop bounded by 6
+- No allocation, no blocking
 
 ### Thread Safety
-- Module state accessed only from main thread during `process()`
-- No concurrent access patterns assumed
+
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
-- Clamping ensures gain values remain within [0,1]
-- Decay factor uses sample time for consistent behavior across sample rates
-- No recursive or feedback-based algorithms that could cause instability
+
+- Gain clamped to `[0, 1]`
+- Master gain `[0, 2]`
+- No feedback, no accumulation issues
 
 ## 10. Dependencies
 
-- VCV Rack SDK (`rack.hpp`)
-- Standard C++ libraries: `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`, `<string>`
-- VCV Rack UI components: `TransparentWidget`, `ModuleWidget`, `DarkPJ301MPort`, `RoundSmallBlackKnob`, `Trimpot`, `RoundBlackKnob`
-- JSON serialization via `json_t` from VCV Rack
+### Libraries/Headers
+
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`, `<string>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `Mixer6` module is a straightforward stereo 6-channel audio mixer with CV-controlled gain stages and master output scaling. It implements linear mixing with optional attenuation, peak detection for meters, and oscilloscope-style visualization. The design emphasizes simplicity and real-time performance while providing flexible control through parameter modulation. The module supports two CV input voltage ranges for compatibility with different control sources.
+`Mixer6` is `Mixer3` with 6 channels instead of 3. It uses a narrower per-channel plate (56 px wide vs 80 px) to fit 6 channels into a 26 HP panel, with the CV jack and attenuverter stacked vertically instead of side-by-side.
+
+The design trade-off is: more channels, but less space per channel. For a small patch, `Mixer3` is more comfortable; for a large patch, `Mixer6` is essential. Both have the same feature set (level knob + CV/atten, master gain, CV range selection).
+
+The main limitation (shared with `Mixer3`) is that the mixer is stereo-only: no pan, no mono, no sends. For a simple submix, this is fine; for a full mixing console, look elsewhere.
