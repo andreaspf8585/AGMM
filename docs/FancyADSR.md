@@ -1,23 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: FancyADSR.cpp
-Generated: 2026-11-04 06:18
 -->
 
 # FancyADSR
 
 ## 1. Overview
 
-The `FancyADSR` module is a VCV Rack 2 plugin that implements an advanced ADSR (Attack, Decay, Sustain, Release) envelope generator with additional features such as:
+`FancyADSR` is a 20 HP envelope generator with per-stage CV control, selectable linear/exponential attack and release shapes, an optional looping mode, and a live scope that shows both the ideal ADSR curve implied by the current knobs (violet preview) and the actual envelope output history (cyan live trace).
 
-- Configurable attack and release curve shapes (linear or exponential)
-- Loop mode for continuous envelope generation
-- Real-time waveform visualization in the module UI
-- End-of-release output trigger
-- CV-controlled parameters
-- Gate and trigger inputs for envelope control
-
-The module provides a visual representation of the current envelope shape and allows users to observe real-time envelope behavior through an oscilloscope-style display.
+Key features:
+- Per-stage CV on Attack, Decay, Sustain, Release
+- Selectable linear or exponential attack shape
+- Selectable linear or exponential release shape
+- Loop mode (retrigger from gate while held)
+- 5 ms end-of-release (EOR) pulse
+- Live scope with preview + live trace
+- Selectable scope time axis (50 ms .. 5 s)
 
 ## Module Screenshot
 
@@ -27,330 +26,320 @@ The module provides a visual representation of the current envelope shape and al
 
 ### Main Classes
 
-- **`FancyADSR`**: The core module class inheriting from `rack::Module`
-- **`FAPanelBackground`**: Custom panel background widget
-- **`FADisplayWidget`**: Custom display widget for visualizing envelope shape and history
-- **`FancyADSRWidget`**: Module widget that constructs the UI layout
+- `FancyADSR`: Core module class inheriting from `rack::Module`
+- `FAPanelBackground`: Static panel artwork
+- `FADisplayWidget`: Live scope + readouts + chips
+- `segCurve` helper: shared curve math for preview
 
 ### Inheritance
 
 - `FancyADSR` inherits from `rack::Module`
-- `FAPanelBackground`, `FADisplayWidget`, and `FancyADSRWidget` inherit from `rack::widget::TransparentWidget`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-```cpp
-struct FancyADSR : Module
-{
-    enum ParamIds { ... };
-    enum InputIds { ... };
-    enum OutputIds { ... };
-    enum LightIds { ... };
-    
-    enum Stage { STAGE_IDLE, STAGE_ATTACK, STAGE_DECAY, STAGE_SUSTAIN, STAGE_RELEASE };
-    
-    // State variables
-    Stage stage;
-    float env;
-    float stageTime;
-    float eorPulseRemaining;
-    bool lastGateState;
-    bool lastTriggerState;
-    
-    // History buffer for display
-    static const int HISTORY_SIZE = 400;
-    float history[HISTORY_SIZE];
-    int historyCount;
-    int historyWritePos;
-    float sampleAccumulator;
-    
-    // Display data (shared between audio and UI threads)
-    float dispAttack, dispDecay, dispSustain, dispRelease;
-    float dispAttackShape, dispReleaseShape;
-    bool dispGate;
-    float eorFlash;
-};
-```
-
-### Relationships
-
-- `FancyADSRWidget` contains:
-  - `FAPanelBackground`
-  - `FADisplayWidget` (linked to the module)
-  - Knobs, switches, and ports arranged in rows
-- `FADisplayWidget` reads from `FancyADSR`'s display data (`disp*`) and history buffer
-- The module maintains internal state for envelope generation and UI display
-
-### Module Organization
-
-The module is organized into:
-1. Core DSP logic in `FancyADSR`
-2. UI components in anonymous namespace (panel, display, widgets)
-3. Module registration via `modelFancyADSR` at the end of the file
+| Group | Storage |
+|-------|---------|
+| Envelope | `Stage stage`, `float env`, `float stageTime` |
+| EOR | `float eorPulseRemaining` |
+| Gate detection | `bool lastGateState`, `bool lastTriggerState` |
+| History | `float history[400]`, `int historyCount`, `int historyWritePos`, `float sampleAccumulator` |
+| Display | `dispAttack, dispDecay, dispSustain, dispRelease`, `dispAttackShape, dispReleaseShape`, `dispGate`, `eorFlash` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Envelope stages
 
-#### Exponential Envelope Segments
-For exponential curves, the value at time $t$ is computed using:
-$$ v(t) = start + (target - start) \cdot (1 - e^{-t/\tau}) $$
+The envelope has five stages:
 
-Where:
-- $\tau = duration / -\ln(0.001)$ to ensure the curve reaches within 0.1% of target at $duration$
+1. **IDLE** — `env = 0`
+2. **ATTACK** — ramp 0 → 1 over `attackTime`
+3. **DECAY** — ramp 1 → `sustainLev` over `decayTime`
+4. **SUSTAIN** — hold at `sustainLev`
+5. **RELEASE** — ramp down to 0 over `releaseTime`
 
-#### Linear Envelope Segments
-For linear curves, the value is computed as:
-$$ v(t) = start + (target - start) \cdot \frac{t}{duration} $$
+### Linear vs exponential segments
 
-### Algorithms
+The `runSegment` function handles both shapes:
 
-The module implements a state machine with five stages:
-1. **STAGE_IDLE**: Output is 0V
-2. **STAGE_ATTACK**: From 0V to 10V (or 1.0 in normalized units)
-3. **STAGE_DECAY**: From 10V to sustain level (exponential decay)
-4. **STAGE_SUSTAIN**: Constant at sustain level
-5. **STAGE_RELEASE**: From current level to 0V
+**Linear** (`shape = 0`):
 
-### Filters and Modulation
+$$
+y = \text{start} + (\text{target} - \text{start})\frac{t}{D}
+$$
 
-- No explicit filters are implemented
-- Parameters are modulated via CV inputs with scaling factor of 1/5 V per unit change
-- All parameters are clamped to valid ranges
+**Exponential** (`shape = 1`):
 
-### Feedback Systems
+$$
+y = \text{start} + (\text{target} - \text{start})\left(1 - e^{-t/\tau}\right), \quad \tau = \frac{D}{-\ln(0.001)}
+$$
 
-None explicitly implemented, but the module uses feedback for:
-- Loop mode: When sustain is reached and loop is enabled, attack restarts from stage 0
-- End-of-release pulse generation: A short 5ms pulse when release completes
+The `-ln(0.001)` factor ensures the exponential segment reaches within 0.1% of its target after `D` seconds — so exponential and linear attacks of the same duration sound comparable in length.
+
+### Gate handling
+
+Rising edge:
+- If IDLE or RELEASE → start attack
+- If SUSTAIN and looping → start attack
+
+Falling edge:
+- If ATTACK/DECAY/SUSTAIN → start release
+
+### Trigger handling
+
+Rising edge while not IDLE → restart attack.
+
+### Loop mode
+
+If LOOP is on and the gate is held, when the envelope reaches SUSTAIN it immediately restarts the attack, producing an LFO-like loop.
+
+### End-of-release pulse
+
+When the envelope reaches 0 (release done), a 5 ms pulse is fired on the EOR output and `eorFlash` is set for the display.
+
+### History
+
+The envelope output is sampled into a 400-entry ring buffer at a rate of `timeScale/400` samples per slot, where `timeScale` is the scope time axis (50 ms .. 5 s). This gives a scrolling scope that always shows the last `timeScale` seconds.
+
+### Preview
+
+The UI computes an "ideal" ADSR curve from the current knob values (a 100-point sampled curve) and draws it as a violet line, so you can see the shape the envelope will have before you play it.
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-| Parameter | ID | Default | Range | Units |
-|-----------|----|---------|-------|-------|
-| ATTACK_PARAM | 0 | 0.01s | 0.001-10.0s | seconds |
-| DECAY_PARAM | 1 | 0.1s | 0.001-10.0s | seconds |
-| SUSTAIN_PARAM | 2 | 0.8 | 0.0-1.0 | normalized |
-| RELEASE_PARAM | 3 | 0.5s | 0.001-10.0s | seconds |
-| ATTACK_SHAPE_PARAM | 4 | 1 (exponential) | 0-1 | enum |
-| RELEASE_SHAPE_PARAM | 5 | 1 (exponential) | 0-1 | enum |
-| LOOP_TOGGLE_PARAM | 6 | 0 (off) | 0-1 | enum |
-| TIME_SCALE_PARAM | 7 | 1.0s | 0.05-5.0s | seconds |
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `ATTACK_PARAM` | 0.001 s | 10 s | 0.01 s | Attack time |
+| `DECAY_PARAM` | 0.001 s | 10 s | 0.1 s | Decay time |
+| `SUSTAIN_PARAM` | 0 | 1 | 0.8 | Sustain level |
+| `RELEASE_PARAM` | 0.001 s | 10 s | 0.5 s | Release time |
+| `TIME_SCALE_PARAM` | 0.05 s | 5 s | 1 s | Scope time axis |
 
 ### Switches
 
-| Switch | ID | Default | Options |
-|--------|----|---------|---------|
-| ATTACK_SHAPE_PARAM | 4 | 1 (exponential) | Linear, Exponential |
-| RELEASE_SHAPE_PARAM | 5 | 1 (exponential) | Linear, Exponential |
-| LOOP_TOGGLE_PARAM | 6 | 0 (off) | Off, On |
+| Switch | Description |
+|--------|-------------|
+| `ATTACK_SHAPE_PARAM` | Linear / Exponential |
+| `RELEASE_SHAPE_PARAM` | Linear / Exponential |
+| `LOOP_TOGGLE_PARAM` | Loop on/off |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `GATE_INPUT` | Gate |
+| `TRIGGER_INPUT` | Retrigger |
+| `ATTACK_CV_INPUT` | Attack CV (5 V adds 1 s) |
+| `DECAY_CV_INPUT` | Decay CV (5 V adds 1 s) |
+| `SUSTAIN_CV_INPUT` | Sustain CV (5 V adds 100%) |
+| `RELEASE_CV_INPUT` | Release CV (5 V adds 1 s) |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `ENV_OUTPUT` | Envelope (0–10 V) |
+| `EOR_OUTPUT` | End of release (5 ms pulse) |
+
+### Lights
+
+- `LOOP_LIGHT` — On when loop mode is enabled
 
 ### Enumerations
 
-```cpp
-enum Stage { STAGE_IDLE, STAGE_ATTACK, STAGE_DECAY, STAGE_SUSTAIN, STAGE_RELEASE };
-```
+- `Stage`: IDLE, ATTACK, DECAY, SUSTAIN, RELEASE
+- `ParamId`: Attack, Decay, Sustain, Release, AttackShape, ReleaseShape, Loop, TimeScale
+- `InputId`: Gate, Trigger, AttackCV, DecayCV, SustainCV, ReleaseCV
+- `OutputId`: Env, EOR
+- `LightId`: Loop
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-| Input | ID | Voltage Range | Signal Behavior |
-|-------|----|---------------|-----------------|
-| GATE_INPUT | 0 | 0-10V | Gate control (high > 1.0V triggers attack, low triggers release) |
-| TRIGGER_INPUT | 1 | 0-10V | Trigger input (high > 1.0V restarts attack from current stage) |
-| ATTACK_CV_INPUT | 2 | -5V to +5V | Modulates attack time (5V adds 1 second) |
-| DECAY_CV_INPUT | 3 | -5V to +5V | Modulates decay time (5V adds 1 second) |
-| SUSTAIN_CV_INPUT | 4 | -5V to +5V | Modulates sustain level (5V adds 100%) |
-| RELEASE_CV_INPUT | 5 | -5V to +5V | Modulates release time (5V adds 1 second) |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `GATE_INPUT` | Gate | > 1 V | Envelope gate |
+| `TRIGGER_INPUT` | Gate | > 1 V | Retrigger |
+| `ATTACK_CV_INPUT` | CV | ±5 V | Attack offset (scaled to 1 s) |
+| `DECAY_CV_INPUT` | CV | ±5 V | Decay offset (scaled to 1 s) |
+| `SUSTAIN_CV_INPUT` | CV | ±5 V | Sustain offset (scaled to 100%) |
+| `RELEASE_CV_INPUT` | CV | ±5 V | Release offset (scaled to 1 s) |
 
 ### Outputs
 
-| Output | ID | Voltage Range | Signal Behavior |
-|--------|----|---------------|-----------------|
-| ENV_OUTPUT | 0 | 0-10V | Envelope output voltage |
-| EOR_OUTPUT | 1 | 0-10V | End-of-release trigger (5ms pulse) |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `ENV_OUTPUT` | CV | 0–10 V | Envelope |
+| `EOR_OUTPUT` | Gate | 0/10 V | End-of-release 5 ms pulse |
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Edge Detection**:
-   - Detect rising/falling edges on gate input
-   - Detect rising edges on trigger input
-
-2. **Parameter Retrieval**:
-   - Get attack, decay, sustain, release times with CV modulation
-   - Get shape parameters (linear/exponential)
-   - Get loop mode state
-
-3. **Stage Transition Logic**:
-   - Gate high → Attack stage if idle or release
-   - Gate low → Release stage if in attack/decay/sustain
-   - Trigger high → Restart attack from current stage
-
-4. **Envelope Generation**:
-   - Advance envelope through stages using `runSegment()` function
-   - Apply exponential decay for decay stage (always exponential)
-   - Handle loop mode transitions
-
-5. **Output Generation**:
-   - Convert normalized envelope to 0-10V output
-   - Generate EOR pulse when release completes
-
-6. **Display Update**:
-   - Update display data for UI
-   - Sample envelope for history buffer
-   - Update EOR flash state
+1. **Gate/trigger edge detect** — Detect rising and falling edges of gate and trigger.
+2. **Stage transitions** — On edges, transition between stages as described in §3.
+3. **Read parameters + CVs** — Attack, decay, sustain, release times with CV offsets.
+4. **Stage evaluation**:
+   - **ATTACK**: `env = runSegment(0, 1, attackTime, stageTime, attackShape)`; increment `stageTime`; if `>= attackTime`, transition to DECAY.
+   - **DECAY**: `env = runSegment(1, sustainLev, decayTime, stageTime, 1.0)` (always exponential); increment; if `>= decayTime`, transition to SUSTAIN.
+   - **SUSTAIN**: `env = sustainLev`; if loop and gate, transition to ATTACK.
+   - **RELEASE**: `env = runSegment(env, 0, releaseTime, stageTime, releaseShape)`; increment; if `>= releaseTime`, transition to IDLE and fire EOR.
+   - **IDLE**: `env = 0`.
+5. **Write env output** — `env * 10 V`.
+6. **Write EOR** — 10 V if pulse active.
+7. **Update loop LED**.
+8. **Update display data** — Sample the envelope into the history ring buffer at `timeScale/400` intervals.
 
 ## 7. Important Functions
 
-### Core DSP Functions
+### `runSegment(float start, float target, float duration, float t, float shape)`
+
+Evaluates one envelope segment at time `t`.
 
 ```cpp
-void onGate(bool high) {
-    // Handle gate transitions
-}
-
-void onTrigger(bool high) {
-    // Handle trigger transitions
-}
-
-float runSegment(float start, float target, float duration, float t, float shape) {
-    // Compute envelope segment value with linear or exponential curve
+if (duration <= 0.0f) return target;
+float alpha = clamp(t / duration, 0.0f, 1.0f);
+if (shape <= 0.5f) { // linear
+    return start + (target - start) * alpha;
+} else { // exponential
+    const float eps = 0.001f;
+    float tau = duration / -std::log(eps);
+    float factor = 1.0f - std::exp(-t / tau);
+    return start + (target - start) * factor;
 }
 ```
 
-### Parameter Helpers
+### `onGate(bool high)`
+
+Handles a gate transition.
 
 ```cpp
-float getAttack() { ... }
-float getDecay() { ... }
-float getSustain() { ... }
-float getRelease() { ... }
-bool getLoop() { ... }
-float getTimeScale() { ... }
-```
-
-### Process Function
-
-```cpp
-void process(const ProcessArgs &args) override {
-    // Main DSP loop
+if (high) {
+    if (stage == STAGE_IDLE || stage == STAGE_RELEASE) {
+        stage = STAGE_ATTACK;
+        stageTime = 0.0f;
+    } else if (stage == STAGE_SUSTAIN && getLoop()) {
+        stage = STAGE_ATTACK;
+        stageTime = 0.0f;
+    }
+} else {
+    if (stage == STAGE_ATTACK || stage == STAGE_DECAY || stage == STAGE_SUSTAIN) {
+        stage = STAGE_RELEASE;
+        stageTime = 0.0f;
+    }
 }
 ```
+
+### `onTrigger(bool high)`
+
+Restarts attack from any non-IDLE stage.
+
+### `getAttack()`, `getDecay()`, `getSustain()`, `getRelease()`
+
+Read knob + CV, clamp to valid ranges.
+
+### `getHistorySample(int index)`
+
+Returns the history sample at `index` (0 = oldest).
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Exponential Curve Implementation
+### Linear segment
 
-The exponential curve uses a time constant $\tau$ calculated as:
-$$ \tau = \frac{duration}{-\ln(0.001)} $$
+$$
+y = \text{start} + (\text{target} - \text{start})\frac{t}{D}
+$$
 
-This ensures that at $t = duration$, the value is within 0.1% of the target.
+### Exponential segment
 
-### Segment Calculation
+$$
+\tau = \frac{D}{-\ln(0.001)}, \quad y = \text{start} + (\text{target} - \text{start})(1 - e^{-t/\tau})
+$$
 
-```cpp
-float runSegment(float start, float target, float duration, float t, float shape)
-{
-    if (duration <= 0.0f) return target;
-    float alpha = rack::math::clamp(t / duration, 0.0f, 1.0f);
-    if (shape <= 0.5f) // linear
-    {
-        return start + (target - start) * alpha;
-    }
-    else // exponential: tau = duration / -ln(0.001)
-    {
-        const float eps = 0.001f;
-        float tau = duration / -std::log(eps);
-        float factor = 1.0f - std::exp(-t / tau);
-        return start + (target - start) * factor;
-    }
-}
-```
+### Stage time
 
-### Loop Mode Logic
+$$
+\text{stageTime} \leftarrow \text{stageTime} + \Delta t
+$$
 
-When loop mode is enabled and gate is high during sustain:
-```cpp
-if (getLoop() && gateHigh)
-{
-    stage = STAGE_ATTACK;
-    stageTime = 0.0f;
-}
-```
+Transition when `stageTime >= duration`.
+
+### History sampling
+
+$$
+\text{interval} = \frac{\text{timeScale}}{400}
+$$
+
+Every `interval` seconds, write `outVoltage` to `history[historyWritePos]`, advance the write head, and saturate `historyCount` at 400.
+
+### CV scaling
+
+$$
+\text{attackTime} = \text{clamp}(\text{knob} + \text{CV}/5, 0.001, 10)
+$$
+
+Same for decay and release.
+
+$$
+\text{sustainLev} = \text{clamp}(\text{knob} + \text{CV}/5, 0, 1)
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- The module performs minimal floating-point operations per sample
-- Uses lookup tables for display rendering (via history buffer)
-- No complex mathematical functions beyond `exp()` and `log()`
-- Efficient state machine with simple conditional logic
+- Per sample: 1 stage evaluation + 1 segment call (exp or linear) + 1 history write interval check ≈ 30 flops
+- Display: 400-point scope + 100-point preview + 6 chips
 
 ### Memory Allocation
 
-- Fixed-size arrays:
-  - `history[HISTORY_SIZE]` (400 floats)
-  - Preallocated in constructor
-- No dynamic allocation during processing
+- All state is fixed-size
+- History buffer: 400 floats = 1.6 KB
+- No allocation in `process()`
 
 ### Buffers
 
-- History buffer: 400 samples for real-time display
-- Sample accumulator for time-based sampling
+- `history[400]`: 1.6 KB
 
 ### Real-time Processing
 
-- Uses VCV Rack's sample-time based processing
-- All calculations are deterministic and sample-rate independent
-- No blocking operations or thread synchronization required
+- All operations are O(1) per sample
+- No allocation, no blocking
+- The exponential segment uses 1 `exp` call per sample during attack/release
 
 ### Thread Safety
 
-- Display data (`disp*`) is written by audio thread, read by UI thread
-- Uses torn reads which are cosmetic only (no functional impact)
-- No mutexes or locks needed for display data access
+- All state written by audio thread, read by UI thread via torn reads
+- The 400-entry history buffer is written sequentially by the audio thread and read as a snapshot by the UI
 
 ### Numerical Stability
 
-- All parameters are clamped to valid ranges
-- Exponential calculations use stable `std::exp()` function
-- Time-based calculations use sample-time increments
-- No division by zero in envelope calculations
+- All times clamped to 0.001 .. 10 s
+- Sustain clamped to 0..1
+- Envelope output clamped to 0..10 V
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `rack.hpp` (VCV Rack core)
-- `<cmath>` for mathematical functions (`std::exp`, `std::log`)
-- `<cstdio>` for formatted I/O
-- `<cstring>` for memory operations
-- `<algorithm>` for clamp function
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### VCV Rack Classes Used
+### External Classes
 
-- `Module`
-- `ParamIds`, `InputIds`, `OutputIds`, `LightIds` enums
-- `ProcessArgs`
-- `configParam`, `configSwitch`, `configInput`, `configOutput`, `configLight`
-- `onReset()`, `process()` virtual methods
-- `rack::math::clamp`
-
-### Custom Classes
-
-- `FancyADSR` (main module)
-- `FAPanelBackground`
-- `FADisplayWidget`
-- `FancyADSRWidget`
-- `TFACyanLight`
-- `FACyanLight`
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::plate`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::chip`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-The `FancyADSR` module is a sophisticated envelope generator that implements standard ADSR behavior with enhanced features including configurable curve shapes, loop mode, and real-time visualization. It provides both linear and exponential attack/decay/release curves, CV modulation for all parameters, and an oscilloscope-style display showing the current envelope shape and history.
+`FancyADSR` is a classic ADSR envelope generator with a few nice extras: per-stage CV, selectable attack/release shapes (linear or exponential), loop mode, an EOR pulse, and a live scope that shows both the ideal ADSR curve and the actual output.
 
-The implementation uses a clean state machine approach with efficient mathematical calculations for envelope segments. The module is optimized for real-time performance with minimal CPU usage and no dynamic memory allocation during processing. The UI provides visual feedback through a custom display widget that shows both live envelope tracing and ideal curve preview, making it easy to understand the current envelope shape and parameters.
+The linear/exponential option is significant: exponential attacks sound "punchy" while linear attacks sound "smooth", and being able to switch between them (per-stage, not globally) is a feature usually only found on high-end hardware envelopes. The `τ = D / -ln(0.001)` formula ensures that exponential segments reach their target within 0.1% after exactly `D` seconds — so exponential and linear segments of the same duration feel comparable in length.
+
+The main limitations are: no sustain CV (only sustain is CV-able, not decay-to-sustain), and the EOR pulse is fixed at 5 ms. For a simpler envelope, see any basic ADSR; for a more feature-rich envelope, see the `FancyADSR`-inspired `Pharmakon` (which adds a full multi-FX chain) or `InstantDrone` (which adds an envelope per oscillator).
