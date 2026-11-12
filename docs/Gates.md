@@ -1,22 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Gates.cpp
-Generated: 2026-11-04 06:18
 -->
 
 # Gates
 
 ## 1. Overview
 
-The `Gates` module is a digital logic gate implementation for VCV Rack that processes two binary inputs (A and B) through various Boolean operations to produce seven distinct outputs: AND, OR, NOT, NAND, NOR, XOR, and XNOR.
+`Gates` is a 24 HP polyphonic logic processor. It takes two gate inputs (A and B) and produces seven simultaneous logic outputs: AND, OR, NOT (of A), NAND, NOR, XOR and XNOR. Each input is treated as "high" when its voltage exceeds 1 V, and every output is 10 V when its logic function is true and 0 V when false. All outputs are polyphonic: the channel count is the larger of the two inputs' channel counts (at least one).
 
-The module features:
-- Two input jacks for binary signals (A and B)
-- Seven output jacks corresponding to logic gate functions
-- A time knob that controls the display update rate
-- Real-time visualization of input/output signal history
-- Visual indicators for active inputs/outputs
-- Multi-channel support for both inputs and outputs
+Key features:
+- 7 logic outputs: AND, OR, NOT, NAND, NOR, XOR, XNOR
+- Fully polyphonic (channel count = max(A, B))
+- Live 9-row scrolling logic scope
+- Adjustable time axis (5 ms .. 50 s)
+- Per-output activity LEDs
+- Per-input activity LEDs
+- Log-mapped TIME knob with friendly display
 
 ## Module Screenshot
 
@@ -26,278 +26,253 @@ The module features:
 
 ### Main Classes
 
-1. **`Gates`** - Core module class inheriting from `rack::Module`
-2. **`TimeQuantity`** - Custom parameter quantity class for time knob display formatting
-3. **`GTPanel`** - Panel widget for visual representation
-4. **`GTDisplay`** - Display widget showing signal history
-5. **`GatesWidget`** - Module widget combining panel and display
+- `Gates`: Core module class inheriting from `rack::Module`
+- `TimeQuantity`: Custom ParamQuantity for the log TIME knob
+- `GTPanel`: Static panel artwork
+- `GTDisplay`: Live logic scope
 
 ### Inheritance
 
 - `Gates` inherits from `rack::Module`
-- `TimeQuantity` inherits from `rack::ParamQuantity`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-```cpp
-struct Gates : Module {
-    enum ParamId { PARAM_TIME, PARAMS_LEN };
-    enum InputId { INPUT_A, INPUT_B, INPUTS_LEN };
-    enum OutputId {
-        OUTPUT_AND, OUTPUT_OR, OUTPUT_NOT, OUTPUT_NAND,
-        OUTPUT_NOR, OUTPUT_XOR, OUTPUT_XNOR, OUTPUTS_LEN
-    };
-    enum LightId {
-        LIGHT_A, LIGHT_B,
-        LIGHT_AND, LIGHT_OR, LIGHT_NOT, LIGHT_NAND,
-        LIGHT_NOR, LIGHT_XOR, LIGHT_XNOR,
-        LIGHTS_LEN
-    };
-```
-
-### Relationships
-
-- `Gates` contains all logic processing and state management
-- `TimeQuantity` customizes parameter display behavior for the time knob
-- `GTPanel` handles panel-level drawing and layout
-- `GTDisplay` renders signal history visualization
-- `GatesWidget` combines all visual elements into a complete module widget
+| Group | Storage |
+|-------|---------|
+| Current state | `bool aNow`, `bool bNow`, `bool outNow[7]` |
+| History | `bool histA[512]`, `histB[512]`, `histOut[7][512]`, `int histPos` |
+| Timing | `float screenMs`, `double histAccum` |
 
 ## 3. DSP Theory
 
-### Logic Operations
+### Logic functions
 
-The module implements standard Boolean logic operations on binary inputs:
+For inputs A and B:
 
-- **AND**: $ A \land B $
-- **OR**: $ A \lor B $
-- **NOT**: $ \lnot A $
-- **NAND**: $ \lnot (A \land B) $
-- **NOR**: $ \lnot (A \lor B) $
-- **XOR**: $ A \oplus B $
-- **XNOR**: $ \lnot (A \oplus B) $
+$$
+\begin{aligned}
+\text{AND} &= A \land B \\
+\text{OR} &= A \lor B \\
+\text{NOT} &= \lnot A \\
+\text{NAND} &= \lnot(A \land B) \\
+\text{NOR} &= \lnot(A \lor B) \\
+\text{XOR} &= A \oplus B \\
+\text{XNOR} &= A \odot B
+\end{aligned}
+$$
 
-### Signal Processing
+### Input threshold
 
-The module operates on binary signals where:
-- Input voltage > 1V represents logic high (true)
-- Input voltage ≤ 1V represents logic low (false)
+Each input is high if its voltage exceeds 1 V:
 
-Output voltages are either:
-- 0V (logic low)
-- 10V (logic high)
+$$
+\text{high}(v) = v > 1.0
+$$
 
-### History Sampling
+### Polyphony
 
-Signal history is stored in circular buffers for visualization purposes, with sampling rate determined by the time knob setting.
+The output channel count is `max(A_ch, B_ch)` (at least 1). For channels where an input has no channel, it reads 0 (so `high = false`).
+
+### History sampling
+
+The 512-slot history buffer spans exactly `screenMs` milliseconds:
+
+$$
+\Delta t_{\text{slot}} = \frac{\text{screenMs}}{1000 \cdot 512} \text{ s}
+$$
+
+Every `Δt_slot` seconds, all 9 signals (A, B, and 7 outputs) are written to the history.
+
+### Time knob mapping
+
+The TIME knob uses an inverted logarithmic mapping:
+
+$$
+\text{ms} = 50000 \cdot \left(\frac{5}{50000}\right)^t
+$$
+
+where $t \in [0, 1]$ is the knob position. So:
+
+- $t = 0$ → 50 s/screen (slowest)
+- $t = 0.5$ → 500 ms/screen (default)
+- $t = 1$ → 5 ms/screen (fastest)
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-- **Time** (`PARAM_TIME`): 
-  - Range: 0.0 to 1.0
-  - Default: 0.5 (500 ms/screen)
-  - Mapping: Logarithmic from 50000 ms to 5 ms
-  - Display: Shows actual time in milliseconds or seconds per screen
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_TIME` | 0 | 1 | 0.5 | Time axis (log, 5 ms .. 50 s) |
 
-### Switches/Buttons
+### Inputs
 
-None explicitly defined.
+| Input | Description |
+|-------|-------------|
+| `INPUT_A` | Input A |
+| `INPUT_B` | Input B |
 
-### CV Inputs
+### Outputs
 
-- **Input A** (`INPUT_A`): Binary input signal (0V or 10V)
-- **Input B** (`INPUT_B`): Binary input signal (0V or 10V)
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_AND` | A AND B |
+| `OUTPUT_OR` | A OR B |
+| `OUTPUT_NOT` | NOT A |
+| `OUTPUT_NAND` | NOT (A AND B) |
+| `OUTPUT_NOR` | NOT (A OR B) |
+| `OUTPUT_XOR` | A XOR B |
+| `OUTPUT_XNOR` | A XNOR B |
 
-### Gates
+### Lights
 
-- **Input A**: Binary input
-- **Input B**: Binary input
+- `LIGHT_A`, `LIGHT_B` — input activity
+- `LIGHT_AND` .. `LIGHT_XNOR` — output activity
 
 ### Enumerations
 
-```cpp
-enum ParamId { PARAM_TIME, PARAMS_LEN };
-enum InputId { INPUT_A, INPUT_B, INPUTS_LEN };
-enum OutputId {
-    OUTPUT_AND, OUTPUT_OR, OUTPUT_NOT, OUTPUT_NAND,
-    OUTPUT_NOR, OUTPUT_XOR, OUTPUT_XNOR, OUTPUTS_LEN
-};
-enum LightId {
-    LIGHT_A, LIGHT_B,
-    LIGHT_AND, LIGHT_OR, LIGHT_NOT, LIGHT_NAND,
-    LIGHT_NOR, LIGHT_XOR, LIGHT_XNOR,
-    LIGHTS_LEN
-};
-```
+- `ParamId`: Time
+- `InputId`: A, B
+- `OutputId`: And, Or, Not, Nand, Nor, Xor, Xnor
+- `LightId`: A, B, And, Or, Not, Nand, Nor, Xor, Xnor
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-- **Input A** (`INPUT_A`): 
-  - Voltage range: 0V to 10V
-  - Behavior: Logic high when > 1V, logic low otherwise
-  - Channels: Multi-channel support (up to 16 channels)
-
-- **Input B** (`INPUT_B`):
-  - Voltage range: 0V to 10V
-  - Behavior: Logic high when > 1V, logic low otherwise
-  - Channels: Multi-channel support (up to 16 channels)
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_A` | Poly Gate | > 1 V = high | Input A |
+| `INPUT_B` | Poly Gate | > 1 V = high | Input B |
 
 ### Outputs
 
-- **AND** (`OUTPUT_AND`): 
-  - Voltage range: 0V or 10V
-  - Behavior: High only when both inputs are high
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_AND` | Poly Gate | 0/10 V | A AND B |
+| `OUTPUT_OR` | Poly Gate | 0/10 V | A OR B |
+| `OUTPUT_NOT` | Poly Gate | 0/10 V | NOT A |
+| `OUTPUT_NAND` | Poly Gate | 0/10 V | NAND |
+| `OUTPUT_NOR` | Poly Gate | 0/10 V | NOR |
+| `OUTPUT_XOR` | Poly Gate | 0/10 V | XOR |
+| `OUTPUT_XNOR` | Poly Gate | 0/10 V | XNOR |
 
-- **OR** (`OUTPUT_OR`):
-  - Voltage range: 0V or 10V
-  - Behavior: High when either input is high
-
-- **NOT** (`OUTPUT_NOT`):
-  - Voltage range: 0V or 10V
-  - Behavior: Inverted input A
-
-- **NAND** (`OUTPUT_NAND`):
-  - Voltage range: 0V or 10V
-  - Behavior: High when inputs are not both high
-
-- **NOR** (`OUTPUT_NOR`):
-  - Voltage range: 0V or 10V
-  - Behavior: High when neither input is high
-
-- **XOR** (`OUTPUT_XOR`):
-  - Voltage range: 0V or 10V
-  - Behavior: High when inputs differ
-
-- **XNOR** (`OUTPUT_XNOR`):
-  - Voltage range: 0V or 10V
-  - Behavior: High when inputs are equal
+All outputs share the same channel count = `max(A_ch, B_ch)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input sampling**: Read voltage levels from both input jacks
-2. **Logic evaluation**: Apply Boolean operations to input values
-3. **Output generation**: Set output voltages based on logic results (0V or 10V)
-4. **Channel management**: Handle multi-channel inputs/outputs
-5. **History recording**: Sample current states for visualization
-6. **Light updates**: Update visual indicators for active signals
+1. **Read TIME knob** — Map to `screenMs` via `timeKnobToMs()`.
+2. **Determine channel count** — `max(A_ch, B_ch, 1)`.
+3. **Per-channel logic** — For each channel, evaluate A and B (threshold at 1 V), compute all 7 functions, write to outputs.
+4. **Snapshot** — Save channel 0's A, B and output states for the display and LEDs.
+5. **Update LEDs** — Set each LED from channel 0's corresponding state.
+6. **History sampling** — Advance `histAccum` by `sampleTime`; while it exceeds `slotSec`, write the current A, B and 7 outputs to `history[histPos]` and advance.
+7. **Set output channels** — Ensure all 7 outputs have the computed channel count.
 
 ## 7. Important Functions
 
-### `process()`
+### `timeKnobToMs(float t)`
 
-Main processing function that:
-- Converts time knob value to milliseconds per screen
-- Reads input voltages and determines binary states
-- Computes all logic gate outputs
-- Sets output voltages
-- Updates light indicators
-- Records history for visualization
+Converts knob position (0..1) to milliseconds per screen.
 
-### `timeKnobToMs()`
+```cpp
+t = clamp(t, 0.f, 1.f);
+return 50000.f * std::pow(5.f / 50000.f, t);
+```
 
-Converts logarithmic time knob parameter (0.0-1.0) to actual milliseconds:
-$$ \text{ms} = 50000 \times \left(\frac{5}{50000}\right)^t $$
+### `msToTimeKnob(float ms)`
 
-### `msToTimeKnob()`
+Inverse of the above, used by the ParamQuantity.
 
-Inverse conversion from milliseconds to time knob parameter:
-$$ t = \frac{\log(\text{ms}/50000)}{\log(5/50000)} $$
+### `TimeQuantity::getDisplayValue()`
+
+Returns the current value in milliseconds.
+
+### `TimeQuantity::setDisplayValue(float v)`
+
+Accepts a value in milliseconds and converts it back to a knob position.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Time Mapping
-
-The time knob uses a logarithmic mapping from 0.0 to 1.0:
+### Time knob mapping
 
 $$
-\text{ms} = 50000 \times \left(\frac{5}{50000}\right)^t
+\text{ms} = 50000 \cdot \left(\frac{5}{50000}\right)^t
 $$
 
-Where:
-- $ t \in [0, 1] $
-- $ \text{ms} \in [5, 50000] $
+### History slot duration
 
-### History Sampling Rate
-
-The history buffer is sampled at a rate determined by:
 $$
-\text{slotSec} = \frac{\text{screenMs}}{1000 \times \text{HIST}}
+\Delta t_{\text{slot}} = \frac{\text{screenMs}}{1000 \cdot 512}
 $$
 
-Where `HIST` = 512 samples.
+### Logic functions
+
+All are standard boolean operations evaluated per channel.
+
+### Channel count
+
+$$
+N_{\text{out}} = \max(A_{\text{ch}}, B_{\text{ch}}, 1)
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Simple Boolean operations with minimal computational overhead
-- History buffer sampling occurs only during process() calls
-- No complex mathematical functions beyond basic trigonometric and logarithmic operations
+- Per sample: 7 logic ops per channel × up to 16 channels ≈ 112 ops
+- LED updates: 9 per sample
+- History: 1 write per `Δt_slot` (rare)
+- Total: ~200 flops/sample
 
 ### Memory Allocation
 
-- Fixed-size arrays for history buffers (512 elements each)
-- No dynamic memory allocation in main processing loop
-- Stack-based local variables for temporary calculations
+- All state is fixed-size
+- History buffers: 512 × 9 = 4608 bools ≈ 4.6 KB
+- No allocation in `process()`
 
 ### Buffers
 
-- Circular buffers for signal history (512 samples per channel)
-- Single-channel history for visualization display
-- No intermediate buffers required
+- `histA[512]`, `histB[512]`, `histOut[7][512]`: 4608 bools
 
 ### Real-time Processing
 
-- All operations completed within single process() call
-- History sampling rate calculated at each sample time
-- No blocking or asynchronous operations
+- All operations are O(1) per channel
+- No allocation, no blocking
+- History sampling rate is bounded by `screenMs` (fastest is 5 ms / 512 = 9.77 µs, ~100 K writes/s)
 
 ### Thread Safety
 
-- Module operates in real-time audio thread context
-- No external synchronization required
-- State updates are atomic within the process() function
+- All state written by audio thread, read by UI thread via torn reads
+- History is written by audio thread, read as a snapshot by UI
 
 ### Numerical Stability
 
-- Uses standard floating-point arithmetic
-- Clamp values to valid ranges where necessary
-- No iterative algorithms or feedback loops that could cause instability
+- Pure boolean logic — no numerical issues
+- Threshold at 1 V is deterministic
 
 ## 10. Dependencies
 
 ### Libraries/Headers
 
-- `rack.hpp` - VCV Rack core library
-- `<cmath>` - Standard math functions (pow, log)
-- `<cstdio>` - Standard I/O functions (snprintf)
-- `<cstring>` - String operations
-- `<algorithm>` - Standard algorithms (max)
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### Classes/Types
+### External Classes
 
-- `rack::Module`
-- `rack::ParamQuantity`
-- `rack::TransparentWidget`
-- `rack::DrawArgs`
-- `rack::NVGcontext`
-- `rack::Vec`
-- `rack::Model`
-- `rack::ModuleWidget`
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::dim`, `agmm::bright`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-The `Gates` module is a digital logic gate implementation that processes two binary inputs through standard Boolean operations to produce seven distinct outputs. It features:
+`Gates` is a polyphonic logic processor that produces all seven standard logic functions from two gate inputs. It's a simple but very useful utility for combining gates — for example, gating a trigger with a clock (AND), or gating it with the inverse of a reset (NAND), or producing a trigger on rising/falling edges (XOR).
 
-- Real-time binary signal processing with multi-channel support
-- Visual history display showing input/output waveforms
-- Logarithmic time knob for controlling display update rate
-- Complete visual feedback through LED indicators
-- Efficient memory usage with fixed-size circular buffers
-- Standard VCV Rack module architecture and widget system
+The most distinctive feature is the live 9-row logic scope, which shows the history of A, B and all seven outputs as scrolling square waves. The TIME knob makes it easy to see both very short (< 5 ms) and very long (> 10 s) gate patterns.
 
-The implementation is straightforward, focusing on accurate logic gate operations while providing visualization capabilities for signal analysis. The module supports both single-channel and multi-channel operation, making it suitable for various digital signal processing applications within the VCV Rack ecosystem.
+The main limitation is that it only has two inputs — no NOT for B, no multi-input AND/OR. For more complex logic, chain multiple `Gates` modules or use a `Bastion` filter as a threshold detector.
