@@ -1,23 +1,23 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Reverb.cpp
-Generated: 2026-11-04 06:30
 -->
 
 # Reverb
 
 ## 1. Overview
 
-The `Reverb` module is a VCV Rack plugin implementing a simple yet effective reverb effect using a feedback delay line with damping and drive control. It simulates the natural decay of sound in an acoustic space by introducing delayed, attenuated versions of the input signal back into itself.
+`Reverb` is a 12 HP single-line feedback delay reverb with damping, drive and dry/wet mix. It is deliberately minimal: one mono delay line (up to ~4 s at 48 kHz) with a damped feedback path, a soft-clipping tanh write, an optional input drive saturator, and an output gain. The result is a warm, feedback-based ambience rather than a full FDN.
 
-Key features include:
-- Adjustable decay time (feedback)
-- Damping filter to simulate high-frequency loss
-- Variable delay time
-- Drive control for distortion
+Key features:
+- Single feedback delay line (up to 4 s)
+- Damped feedback (one-pole LP in the loop)
+- Soft-clipped write (tanh)
+- Optional drive saturation
 - Dry/wet mix
-- Output gain control
-- Visual scope display showing signal amplitude over time
+- Output gain (0–3×)
+- Scope + single mono meter
+- Six knobs: Decay, Damp, Delay Time, Drive, Mix, Gain
 
 ## Module Screenshot
 
@@ -27,311 +27,239 @@ Key features include:
 
 ### Main Classes
 
-- `Reverb`: The core DSP module inheriting from `rack::Module`
-- `RvPanelBackground`: Custom widget for panel background drawing
-- `RvDisplayWidget`: Custom widget for the scope and readout display
-- `ReverbWidget`: VCV Rack widget that ties together the module and its UI
+- `Reverb`: Core module class inheriting from `rack::Module`
+- `RvPanelBackground`: Static panel artwork
+- `RvDisplayWidget`: Live scope + meter + readouts
 
 ### Inheritance
 
-The `Reverb` class inherits from `rack::Module`, providing standard VCV Rack module functionality including parameter configuration, input/output handling, and processing.
+- `Reverb` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
 
-- `RvCellDef`: Structure mapping control names to parameter IDs for layout
-- `RvDisplayWidget`: Custom drawing widget for scope visualization
-- `RvPanelBackground`: Custom drawing widget for panel background elements
+- `RvCellDef { const char *name; int param; }` — table of 6 control cells
 
-### Relationships
+### State (grouped)
 
-The module is composed of:
-1. DSP processing logic in the `Reverb` class
-2. UI components (`ReverbWidget`, `RvDisplayWidget`, `RvPanelBackground`)
-3. Layout constants defined in anonymous namespace
-4. Parameter and input/output definitions within `Reverb`
-
-### Module Organization
-
-The module is organized as a single `.cpp` file with:
-- DSP implementation (`Reverb` class)
-- UI drawing code in anonymous namespace
-- Widget construction logic
-- Model registration at the end
+| Group | Storage |
+|-------|---------|
+| Delay buffer | `float delayBuffer[192000]` |
+| Write head | `int writePos` |
+| Damping | `float lowpass` |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `float peakOut` |
 
 ## 3. DSP Theory
 
-This reverb uses a feedback delay line (FDBL) architecture with damping and drive effects.
+### The feedback delay loop
 
-### Mathematical Equations
+The reverb is a single delay line with feedback:
 
-The core algorithm is based on:
-
-1. **Feedback Delay Line**:
-   $$
-   y[n] = x[n] + \alpha \cdot d[n - D]
-   $$
-
-2. **Low-pass Filtering**:
-   $$
-   y_{lp}[n] = y_{lp}[n-1] + \beta (x[n] - y_{lp}[n-1])
-   $$
-
-3. **Tanh Distortion**:
-   $$
-   y = \tanh(\alpha x)
-   $$
-
-4. **Linear Interpolation for Delay Read**:
-   $$
-   d[n] = d_0[n] + f(d_1[n] - d_0[n])
-   $$
-
-### Algorithms
-
-- Feedback delay line with linear interpolation
-- First-order low-pass filter for damping
-- Tanh distortion function for drive effect
-- Dry/wet mixing
-- Output gain control
-
-### Filters
-
-A first-order low-pass filter is implemented using a recursive formula:
 $$
-y[n] = y[n-1] + \beta(x[n] - y[n-1])
+\text{buf}[w] = \tanh(\text{in} + \text{filtered} \cdot \text{decay})
 $$
 
-Where $\beta$ is the damping coefficient calculated from the damping parameter.
+where `filtered` is a one-pole low-pass of the read output. The tanh keeps the write bounded (soft clipping).
 
-### Delay Lines
+### Delay read
 
-The delay line uses a circular buffer with:
-- Fixed maximum size: `MAX_DELAY = 192000` samples
-- Linear interpolation between delay taps for smooth modulation
-- Read position calculation with wraparound logic
+Read at `delayMs` back with linear interpolation:
 
-### Feedback Systems
-
-Feedback is implemented as:
 $$
-\text{feedbackIn} = \text{input} + \text{filteredDelay} \times \text{time}
+\text{readPos} = \text{writePos} - \text{delaySamples}
 $$
 
-Where `time` represents the feedback coefficient (decay parameter).
-
-### Modulation
-
-The delay time is modulated via a parameter that maps to actual samples using:
 $$
-\text{delaySamples} = \text{delayMs} \times 0.001 \times \text{sampleRate}
+\text{delayed} = \text{buf}[i_0] + \text{frac} \cdot (\text{buf}[i_1] - \text{buf}[i_0])
 $$
 
-### Random Processes
+### Damping
 
-No random processes are implemented in this module.
+One-pole low-pass in the feedback path:
+
+$$
+\text{lowpass} \leftarrow \text{lowpass} + c \cdot (\text{delayed} - \text{lowpass})
+$$
+
+where $c = 1 - e^{-2\pi f_c / f_s}$ and $f_c = 200 \cdot 40^{\text{damp}}$ (200 Hz .. 8 kHz).
+
+### Drive
+
+Optional tanh saturation with makeup gain:
+
+$$
+\text{wet} = \frac{\tanh(\text{driveAmt} \cdot \text{wet})}{\tanh(\text{driveAmt})}
+$$
+
+with `driveAmt = drive * 4`.
+
+### Dry/wet mix
+
+$$
+\text{mixed} = (1 - \text{mix}) \cdot \text{in} + \text{mix} \cdot \text{wet}
+$$
+
+### Output
+
+$$
+\text{out} = 5 \tanh(\text{mixed} \cdot \text{outGain})
+$$
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-- **DECAY (TIME_PARAM)**: Range [0, 0.995], default 0.5
-- **DAMP (DAMP_PARAM)**: Range [0, 1], default 0.5
-- **DELAY (DELAY_MS_PARAM)**: Range [0, 1000], default 200 ms
-- **DRIVE (DRIVE_PARAM)**: Range [0, 1], default 0
-- **MIX (MIX_PARAM)**: Range [0, 1], default 0.5
-- **GAIN (OUTPUT_GAIN_PARAM)**: Range [0, 3], default 1
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `TIME_PARAM` | 0 | 0.995 | 0.5 | Decay (feedback) |
+| `DAMP_PARAM` | 0 | 1 | 0.5 | Damping (200 Hz .. 8 kHz) |
+| `DELAY_MS_PARAM` | 0 | 1000 | 200 | Delay time (ms) |
+| `DRIVE_PARAM` | 0 | 1 | 0 | Drive |
+| `MIX_PARAM` | 0 | 1 | 0.5 | Dry/wet |
+| `OUTPUT_GAIN_PARAM` | 0 | 3 | 1 | Output gain |
 
-### Switches/Buttons
+### Inputs
 
-None
+| Input | Description |
+|-------|-------------|
+| `AUDIO_INPUT` | Audio in |
 
-### CV Inputs
+### Outputs
 
-- **AUDIO_INPUT**: Audio signal input
-
-### Gates
-
-None
+| Output | Description |
+|--------|-------------|
+| `AUDIO_OUTPUT` | Audio out |
 
 ### Enumerations
 
-- `ParamId`: Defines parameter IDs for all controls
-- `InputId`: Defines input IDs (single audio input)
-- `OutputId`: Defines output IDs (single audio output)
-
-### Parameter Ranges and Defaults
-
-| Parameter | Min | Max | Default |
-|-----------|-----|-----|---------|
-| TIME_PARAM | 0.0 | 0.995 | 0.5 |
-| DAMP_PARAM | 0.0 | 1.0 | 0.5 |
-| DELAY_MS_PARAM | 0.0 | 1000.0 | 200.0 |
-| DRIVE_PARAM | 0.0 | 1.0 | 0.0 |
-| MIX_PARAM | 0.0 | 1.0 | 0.5 |
-| OUTPUT_GAIN_PARAM | 0.0 | 3.0 | 1.0 |
+- `ParamId`: Time, Damp, DelayMs, Drive, Mix, OutputGain
+- `InputId`: AudioIn
+- `OutputId`: AudioOut
 
 ## 5. Inputs and Outputs
 
-### AUDIO_INPUT
+### Input
 
-- **Type**: Audio input
-- **Voltage Range**: ±10V (standard VCV Rack audio range)
-- **Signal Behavior**: Input audio signal to be processed by the reverb effect
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `AUDIO_INPUT` | Audio | ±10 V | Audio in |
 
-### AUDIO_OUTPUT
+### Output
 
-- **Type**: Audio output
-- **Voltage Range**: ±10V (standard VCV Rack audio range)
-- **Signal Behavior**: Mixed dry/wet processed audio signal
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `AUDIO_OUTPUT` | Audio | ±5 V | Audio out |
+
+### Bypass
+
+`configBypass(AUDIO_INPUT, AUDIO_OUTPUT)` — with no cable, input passes through.
 
 ## 6. Signal Processing Pipeline
 
-1. Read input voltage from `AUDIO_INPUT`
-2. Retrieve parameter values:
-   - Time (feedback coefficient)
-   - Damping
-   - Delay time in ms
-   - Drive amount
-   - Mix ratio
-   - Output gain
-3. Calculate damping coefficient from damping parameter using:
-   $$
-   \text{cutoff} = 200 \times \left(\frac{8000}{200}\right)^{\text{damp}} \\
-   \beta = 1 - e^{-2\pi \cdot \text{cutoff}/\text{sampleRate}}
-   $$
-4. Calculate delay samples from delay time:
-   $$
-   \text{delaySamples} = \text{delayMs} \times 0.001 \times \text{sampleRate}
-   $$
-5. Perform linear interpolation on delay line read positions
-6. Apply low-pass filtering to delayed signal using damping coefficient
-7. Calculate feedback input:
-   $$
-   \text{feedbackIn} = \text{input} + \text{filteredDelay} \times \text{time}
-   $$
-8. Store feedback input in delay buffer with tanh distortion
-9. Apply drive effect if enabled:
-   $$
-   y = \tanh(\text{driveAmount} \cdot x) \times \text{norm}
-   $$
-10. Mix dry and wet signals:
-    $$
-    \text{mixed} = (1 - \text{mix}) \cdot \text{input} + \text{mix} \cdot \text{wet}
-    $$
-11. Apply output gain with tanh distortion:
-    $$
-    \text{out} = 5 \cdot \tanh(\text{mixed} \times \text{outGain})
-    $$
-12. Output processed signal to `AUDIO_OUTPUT`
+1. **Read params** — Time, damp, delayMs, drive, mix, outGain.
+2. **Compute damping coefficient** — `c = 1 - exp(-2π * cutoff / fs)`, with `cutoff = 200 * 40^damp`.
+3. **Read delay** — Interpolate at `writePos - delayInt - frac`.
+4. **Damping** — `lowpass += c * (delayed - lowpass)`.
+5. **Write** — `buf[writePos] = tanh(in + lowpass * time)`.
+6. **Advance** — `writePos = (writePos + 1) % MAX_DELAY`.
+7. **Drive** — If `drive > 0`, apply tanh saturation.
+8. **Mix** — Dry + wet.
+9. **Output** — `out = 5 * tanh(mixed * outGain)`.
+10. **Display** — Peak follower, scope ring buffer.
 
 ## 7. Important Functions
 
-### `Reverb::process()`
+### `process(const ProcessArgs &args)`
 
-Main DSP processing function that:
-- Reads input and parameters
-- Calculates delay line positions with interpolation
-- Applies damping filter
-- Implements feedback loop
-- Applies drive effect
-- Mixes dry/wet signals
-- Outputs final signal with gain control
-
-### `RvDisplayWidget::drawLayer()`
-
-Handles scope visualization by:
-- Drawing grid lines
-- Rendering amplitude buckets
-- Drawing level meter
-- Displaying parameter readouts
+The only function; it's the entire DSP in one loop.
 
 ## 8. Mathematical Implementation
 
-### Damping Coefficient Calculation
+### Damping cutoff
 
 $$
-\beta = 1 - e^{-2\pi \cdot \text{cutoff}/\text{sampleRate}}
+f_c = 200 \cdot 40^{\text{damp}}
 $$
 
-Where cutoff frequency is mapped from damping parameter:
-$$
-\text{cutoff} = 200 \times \left(\frac{8000}{200}\right)^{\text{damp}} = 200 \times 40^{\text{damp}}
-$$
+So damp = 0 → 200 Hz, damp = 0.5 → ~1.26 kHz, damp = 1 → 8 kHz.
 
-### Linear Interpolation
-
-For delay read positions:
-$$
-\text{delayed} = d_0 + f(d_1 - d_0)
-$$
-
-Where $f$ is the fractional part of delay samples.
-
-### Tanh Distortion
+### Damping coefficient
 
 $$
-y = \tanh(\alpha x) \times \text{norm}
+c = 1 - e^{-2\pi f_c / f_s}
 $$
 
-With normalization:
+### Feedback write
+
 $$
-\text{norm} = \frac{1}{\tanh(\text{driveAmount})}
+\text{buf}[w] = \tanh(\text{in} + \text{lowpass} \cdot \text{time})
 $$
+
+### Drive
+
+$$
+\text{out} = \tanh(4d \cdot \text{in}) / \tanh(4d)
+$$
+
+### Output
+
+$$
+\text{out} = 5 \tanh(\text{mixed} \cdot g)
+$$
+
+### Scope
+
+`scopeMin`/`scopeMax` are min/max of the output, updated every 2.5 ms.
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Uses fixed-size circular buffer (constant memory)
-- Simple mathematical operations (exp, tanh, clamp)
-- Minimal branching in main processing loop
-- Efficient interpolation using integer arithmetic
+- Per sample: 2 tanh calls + 4 arith + 2 reads + 1 write ≈ 30 flops
+- Display: ~100 flops/frame
+- Total: ~30 flops/sample
 
 ### Memory Allocation
 
-- Static buffer: `float delayBuffer[MAX_DELAY]` (192000 floats = ~768KB)
-- Small fixed-size arrays for scope tracking
-- No dynamic allocation during processing
+- `delayBuffer[192000]` = 750 KB
+- No allocation in `process()`
 
 ### Buffers
 
-- Circular delay line buffer of size 192000 samples
-- Scope tracking buffers of 96 elements each
+- 192000 floats
 
 ### Real-time Processing
 
-- All operations are real-time safe
-- No blocking or time-consuming operations
-- Fixed sample rate processing
+- All operations are O(1) per sample
+- No allocation, no blocking
 
 ### Thread Safety
 
-- Single-threaded DSP processing
-- No shared state between processing threads
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Clamp all values to prevent overflow/underflow
-- Proper handling of delay line wraparound
-- Use of `std::tanh` for distortion (stable)
-- Proper interpolation to avoid artifacts
+- `tanh` on write and on output
+- Delay feedback is bounded by 0.995
+- `!std::isfinite` check on output
 
 ## 10. Dependencies
 
-### Libraries
+### Libraries/Headers
 
-- VCV Rack SDK (`rack.hpp`)
-- Standard C++ libraries: `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### Classes and Headers
+### External Classes
 
-- `rack::Module` (base module class)
-- `rack::Param` (parameter handling)
-- `rack::Input`/`Output` (input/output handling)
-- `rack::math::clamp` (clamping function)
-- `nvg::context` (for UI drawing)
-- `Vec`, `Widget`, `TransparentWidget` (VCV Rack UI classes)
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `Reverb` module implements a classic feedback delay line reverb effect with damping and drive controls. It uses a circular buffer for the delay line, first-order low-pass filtering for damping, and tanh distortion for drive effects. The implementation is optimized for real-time performance with fixed-size buffers and efficient mathematical operations. The module provides visual feedback through a scope display showing signal amplitude over time, and includes comprehensive parameter controls for shaping the reverb characteristics.
+`Reverb` is the simplest reverb in the AGMM collection: a single feedback delay line with damping, drive, and mix. It's not an algorithmic reverb — it's a delay that happens to sound like a small room. This is intentional: the module is designed to be a "one-knob ambience" that you can drop in anywhere without worrying about parameters.
+
+The tanh write is the key to stability: without it, high feedback + high input would drive the delay line into runaway. With it, the reverb saturates gracefully as it gets loud, which sounds musical (like a real room).
+
+The main limitations are: only one delay line (so no density), no pre-delay, no modulation, and no stereo input. But for a compact reverb that always sounds good, this is excellent.
