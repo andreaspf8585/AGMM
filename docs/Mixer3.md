@@ -1,14 +1,20 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Mixer3.cpp
-Generated: 2026-11-04 06:23
 -->
 
 # Mixer3
 
 ## 1. Overview
 
-The `Mixer3` module is a stereo 3-channel audio mixer for VCV Rack. It accepts three stereo input channels (L/R) and provides a single stereo output (L/R). Each channel has independent level control, CV-controlled attenuation, and a master gain stage. The module also includes a visual display showing the signal scope and peak meters.
+`Mixer3` is an 18 HP stereo 3-channel mixer. Each channel has L/R inputs, a level knob, and a CV input with a bipolar attenuverter. The three channels are summed and scaled by a master gain. The module is meant to be a simple, straightforward stereo mixer for patching multiple sources into one stereo bus.
+
+Key features:
+- 3 stereo channels (L/R inputs per channel)
+- Per-channel level knob + CV with bipolar attenuverter
+- Master gain
+- Scope of the mono mix + L/R meters
+- Selectable CV range (bipolar/unipolar) via menu, persisted
 
 ## Module Screenshot
 
@@ -17,242 +23,228 @@ The `Mixer3` module is a stereo 3-channel audio mixer for VCV Rack. It accepts t
 ## 2. Architecture
 
 ### Main Classes
+
 - `Mixer3`: Core module class inheriting from `rack::Module`
-- `M3PanelBackground`: Custom widget for panel rendering
-- `M3DisplayWidget`: Custom widget for scope and meter display
-- `Mixer3Widget`: Module widget class inheriting from `rack::ModuleWidget`
+- `M3PanelBackground`: Static panel artwork
+- `M3DisplayWidget`: Live scope + meters + readouts
 
 ### Inheritance
+
 - `Mixer3` inherits from `rack::Module`
-- `M3PanelBackground` and `M3DisplayWidget` inherit from `rack::TransparentWidget`
-- `Mixer3Widget` inherits from `rack::ModuleWidget`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
-- `CVRange`: Enumeration with two values:
-  - `BIPOLAR_M5_5`: -5V to +5V range for CV scaling
-  - `UNIPOLAR_0_10`: 0V to +10V range for CV scaling
+### State (grouped)
 
-### Relationships
-- `Mixer3Widget` contains and manages `M3PanelBackground` and `M3DisplayWidget`
-- All widgets are linked to the `Mixer3` module instance
-- Parameters, inputs, and outputs are configured through `Mixer3::config()` methods
-
-### Module Organization
-The module is organized into:
-1. Parameter definitions (knobs, attenuverters)
-2. Input definitions (audio L/R, CV)
-3. Output definitions (stereo mix)
-4. Processing logic in `process()` method
-5. Display tracking and visualization components
+| Group | Storage |
+|-------|---------|
+| CV mode | `CVRange cvRangeMode` |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Per-channel gain
 
-The core mixing operation is:
+Each channel's gain is:
+
 $$
-\text{mix}_L = \sum_{i=1}^{3} (\text{in}_{L,i} \times \text{gain}_i)
-$$
-$$
-\text{mix}_R = \sum_{i=1}^{3} (\text{in}_{R,i} \times \text{gain}_i)
+g_c = \text{clamp}(\text{LEVEL}_c + \text{atten}_c \cdot \text{scaleCV}(\text{CV}_c), 0, 1)
 $$
 
-Where:
-- $\text{in}_{L,i}$ and $\text{in}_{R,i}$ are the left and right input voltages for channel $i$
-- $\text{gain}_i = \text{levelKnob}_i + (\text{CV}_i \times \text{attenuverter}_i)$
+where:
 
-The final output is:
 $$
-\text{out}_L = \text{mix}_L \times \text{masterGain}
-$$
-$$
-\text{out}_R = \text{mix}_R \times \text{masterGain}
+\text{scaleCV}(v) = \begin{cases} v / 10 & \text{unipolar} \\ \text{clamp}(v/5, -1, 1) & \text{bipolar} \end{cases}
 $$
 
-### Algorithms
-- **Level Control**: Linear gain control with CV modulation via attenuverter
-- **CV Scaling**: Two modes:
-  - Unipolar (0V to +10V): $ \text{scaledCV} = \frac{\text{cv}}{10} $
-  - Bipolar (-5V to +5V): $ \text{scaledCV} = \frac{\text{cv}}{5} $
-- **Peak Detection**: Exponential decay smoothing with time constant based on sample rate
-- **Scope Display**: Moving average of signal range over time
+The gain is clamped to `[0, 1]` so a channel can never invert phase or amplify above unity.
 
-### Filters
-None explicitly implemented.
+### Summing
 
-### Oscillators
-None explicitly implemented.
+$$
+\text{mixL} = \sum_c \text{inL}_c \cdot g_c, \quad \text{mixR} = \sum_c \text{inR}_c \cdot g_c
+$$
 
-### Delay Lines
-None explicitly implemented.
+### Master gain
 
-### Feedback Systems
-None explicitly implemented.
-
-### Modulation
-- CV inputs modulate channel gain via attenuverter control
-- Attenuverter allows both positive and negative modulation (±1.0 range)
-- Gain is clamped between 0 and 1
-
-### Random Processes
-None explicitly implemented.
+$$
+\text{outL} = \text{mixL} \cdot g_{\text{master}}, \quad \text{outR} = \text{mixR} \cdot g_{\text{master}}
+$$
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **Channel 1 Level**: 0.0 to 1.0, default 0.0
-- **Channel 2 Level**: 0.0 to 1.0, default 0.0
-- **Channel 3 Level**: 0.0 to 1.0, default 0.0
-- **Master Gain**: 0.0 to 2.0, default 1.0
 
-### Switches
-None explicitly defined.
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_CH1_LEVEL` | 0 | 1 | 0 | Channel 1 level |
+| `PARAM_CH2_LEVEL` | 0 | 1 | 0 | Channel 2 level |
+| `PARAM_CH3_LEVEL` | 0 | 1 | 0 | Channel 3 level |
+| `PARAM_CH1_ATTV` | −1 | 1 | 0 | Ch 1 CV attenuverter |
+| `PARAM_CH2_ATTV` | −1 | 1 | 0 | Ch 2 CV attenuverter |
+| `PARAM_CH3_ATTV` | −1 | 1 | 0 | Ch 3 CV attenuverter |
+| `PARAM_MASTER_GAIN` | 0 | 2 | 1 | Master gain |
 
-### Buttons
-None explicitly defined.
+### Inputs
 
-### CV Inputs
-- **Channel 1 CV**: Modulates channel gain (0V to +10V or -5V to +5V depending on mode)
-- **Channel 2 CV**: Modulates channel gain (0V to +10V or -5V to +5V depending on mode)
-- **Channel 3 CV**: Modulates channel gain (0V to +10V or -5V to +5V depending on mode)
+| Input | Description |
+|-------|-------------|
+| `INPUT_CH1_L` | Ch 1 L audio |
+| `INPUT_CH1_R` | Ch 1 R audio |
+| `INPUT_CH2_L` | Ch 2 L audio |
+| `INPUT_CH2_R` | Ch 2 R audio |
+| `INPUT_CH3_L` | Ch 3 L audio |
+| `INPUT_CH3_R` | Ch 3 R audio |
+| `INPUT_CH1_CV` | Ch 1 level CV |
+| `INPUT_CH2_CV` | Ch 2 level CV |
+| `INPUT_CH3_CV` | Ch 3 level CV |
 
-### Gates
-None explicitly defined.
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_L` | Mix L output |
+| `OUTPUT_R` | Mix R output |
 
 ### Enumerations
-- `CVRange`: 
-  - `BIPOLAR_M5_5` (-5V to +5V)
-  - `UNIPOLAR_0_10` (0V to +10V, default)
 
-### Parameter Ranges
-- Level knobs: [0.0, 1.0]
-- Attenuverters: [-1.0, 1.0]
-- Master gain: [0.0, 2.0]
-
-### Default Values
-- All level knobs: 0.0
-- All attenuverters: 0.0
-- Master gain: 1.0
-- CV range mode: `UNIPOLAR_0_10`
+- `CVRange`: BIPOLAR_M5_5, UNIPOLAR_0_10
+- `ParamId`: CH1Level..CH3Level, CH1Attv..CH3Attv, MasterGain
+- `InputId`: CH1L..CH3R, CH1CV..CH3CV
+- `OutputId`: OutputL, OutputR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-- **Channel 1 L**: Audio input (left channel)
-- **Channel 1 R**: Audio input (right channel)
-- **Channel 2 L**: Audio input (left channel)
-- **Channel 2 R**: Audio input (right channel)
-- **Channel 3 L**: Audio input (left channel)
-- **Channel 3 R**: Audio input (right channel)
-- **Channel 1 CV**: Control voltage for level modulation
-- **Channel 2 CV**: Control voltage for level modulation
-- **Channel 3 CV**: Control voltage for level modulation
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_CH1_L` | Audio | ±10 V | Channel 1 L |
+| `INPUT_CH1_R` | Audio | ±10 V | Channel 1 R |
+| `INPUT_CH2_L` | Audio | ±10 V | Channel 2 L |
+| `INPUT_CH2_R` | Audio | ±10 V | Channel 2 R |
+| `INPUT_CH3_L` | Audio | ±10 V | Channel 3 L |
+| `INPUT_CH3_R` | Audio | ±10 V | Channel 3 R |
+| `INPUT_CH1_CV` | CV | ±10 V | Ch 1 level CV |
+| `INPUT_CH2_CV` | CV | ±10 V | Ch 2 level CV |
+| `INPUT_CH3_CV` | CV | ±10 V | Ch 3 level CV |
 
 ### Outputs
-- **Output L**: Mixed left channel output
-- **Output R**: Mixed right channel output
 
-### Voltage Ranges
-- Audio inputs/outputs: ±10V (standard VCV Rack audio range)
-- CV inputs: 0V to +10V or -5V to +5V depending on `cvRangeMode` setting
-- Gain values: [0.0, 1.0] for channel levels after modulation
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_L` | Audio | ±10 V | Mix L |
+| `OUTPUT_R` | Audio | ±10 V | Mix R |
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Reading**: Read all 9 input signals (3 stereo channels × 2 inputs each + 3 CV inputs)
-2. **CV Scaling**: Apply scaling based on `cvRangeMode` setting
-3. **Gain Calculation**: 
-   - Calculate base gain from level knob
-   - Add CV modulation scaled by attenuverter
-   - Clamp gain to [0.0, 1.0]
-4. **Mixing**: Multiply each channel's audio input by its calculated gain and sum across channels
-5. **Master Gain**: Apply master gain stage to final mix
-6. **Output**: Set output voltages
-7. **Display Tracking**: Update peak meters and scope data
+1. **Read CV mode** from `cvRangeMode`.
+2. **For each channel**:
+   - Read level knob, attenuverter, CV.
+   - Compute `gain = clamp(knob + atten * scaleCV(cv), 0, 1)`.
+   - Read L and R inputs.
+   - Add `inL * gain` and `inR * gain` to mix.
+3. **Read master gain**.
+4. **Multiply mix** by master gain.
+5. **Write outputs**.
+6. **Update display** — peak followers + scope ring buffer.
 
 ## 7. Important Functions
 
-### `scaleCV(float v) const`
-- Scales CV input voltage based on current `cvRangeMode`
-- Returns scaled value in range [-1.0, 1.0] for bipolar or [0.0, 1.0] for unipolar
+### `scaleCV(float v)`
 
-### `process(const ProcessArgs &args) override`
-- Main DSP processing function called each sample
-- Implements the mixing algorithm with CV modulation
-- Updates display tracking data (peak detection, scope)
+Scales a CV according to the current mode.
 
-### `dataToJson() override` / `dataFromJson(json_t* root) override`
-- Serialize/deserialize module state including `cvRangeMode`
+```cpp
+if (cvRangeMode == BIPOLAR_M5_5) return std::max(-1.f, std::min(v / 5.f, 1.f));
+return v / 10.f;
+```
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Gain Calculation
+### Per-channel gain
+
 $$
-\text{gain}_i = \max(0.0, \min(1.0, \text{levelKnob}_i + (\text{CV}_i \times \text{attenuverter}_i)))
+g_c = \text{clamp}(\text{LEVEL}_c + \text{atten}_c \cdot \text{scaleCV}(\text{CV}_c), 0, 1)
 $$
 
-### Peak Detection
+### Summing
+
 $$
-\text{peak}_{L/R} = \max(|\text{output}_{L/R}|, \text{peak}_{L/R} \times \text{decay})
-$$
-Where decay factor is:
-$$
-\text{decay} = 1.0 - 4.0 \times \text{sampleTime}
+\text{mixL} = \sum_{c=1}^{3} \text{inL}_c \cdot g_c, \quad \text{mixR} = \sum_{c=1}^{3} \text{inR}_c \cdot g_c
 $$
 
-### Scope Tracking
-- Maintains a circular buffer of 96 samples
-- Each sample bucket covers approximately 2.5ms
-- Updates min/max range for each bucket
+### Master output
+
+$$
+\text{outL} = \text{mixL} \cdot g_{\text{master}}, \quad \text{outR} = \text{mixR} \cdot g_{\text{master}}
+$$
+
+### Peak followers
+
+$$
+\text{peakL} \leftarrow \max(|\text{outL}|, \text{peakL} \cdot (1 - 4\Delta t))
+$$
+
+Same for R.
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Simple arithmetic operations (addition, multiplication, clamping)
-- Minimal conditional logic
-- Fixed-size processing loop (3 channels)
+### CPU Usage
+
+- 3 channels × (2 reads + 2 multiplies + 1 add) ≈ 30 flops
+- 1 master multiply
+- Peak + scope ≈ 10 flops
+- Total: ~50 flops/sample
 
 ### Memory Allocation
-- Stack-based arrays: `scopeMin`, `scopeMax` (96 elements each)
-- No dynamic allocation in main processing path
+
+- No allocation in `process()`
+- `scopeMin[96]`, `scopeMax[96]` fixed-size
+- No `std::vector` used
 
 ### Buffers
-- Circular buffer for scope display (96 elements)
-- Peak detection variables (`peakL`, `peakR`)
+
+- `scopeMin[96]`, `scopeMax[96]`: 192 floats
 
 ### Real-time Processing
-- All operations performed in real-time within `process()` method
-- No blocking or time-consuming operations
+
+- Loop bounded by 3 (channels)
+- No allocation, no blocking
+- `scopeCount` increments every sample and resets at the bucket size
 
 ### Thread Safety
-- Module state is accessed only from the main audio thread
-- No inter-thread synchronization required
+
+- All state written by audio thread, read by UI thread via torn reads
+- `cvRangeMode` is read by UI thread but only written from the context menu (rare)
 
 ### Numerical Stability
-- Clamping ensures gain values stay within [0.0, 1.0]
-- Exponential decay for peak detection prevents runaway values
-- Floating-point arithmetic used throughout
+
+- Gain is clamped to `[0, 1]`
+- Master gain is `[0, 2]`
+- No feedback, no accumulation issues
+- All outputs are bounded by input voltage × max gain
 
 ## 10. Dependencies
 
 ### Libraries/Headers
-- `rack.hpp`: VCV Rack core library
-- `<cmath>`: Standard math functions (std::max, std::min, std::fabs)
-- `<cstdio>`: Standard I/O (unused in this file)
-- `<cstring>`: String operations (unused in this file)
-- `<algorithm>`: Standard algorithms (std::max, std::min)
-- `<memory>`: std::shared_ptr
-- `<string>`: std::string
 
-### Classes/Types
-- `rack::Module`: Base module class
-- `rack::ModuleWidget`: Module widget base class
-- `rack::TransparentWidget`: Widget for transparent drawing
-- `rack::Param`: Parameter interface
-- `rack::Input`: Input port interface
-- `rack::Output`: Output port interface
-- `rack::json_t`: JSON data structure (from VCV Rack)
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`, `<string>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `Mixer3` module is a stereo 3-channel audio mixer with CV-controlled gain stages and master output control. It implements linear mixing with per-channel level knobs, CV inputs with attenuverters, and a master gain stage. The module supports two CV scaling modes (unipolar 0-10V or bipolar -5 to +5V) and includes visual feedback through peak meters and a signal scope display. The implementation is straightforward with no complex DSP algorithms, focusing on efficient real-time processing and clean audio routing.
+`Mixer3` is a straightforward stereo 3-channel mixer. It has everything you need for a small mix (per-channel level, CV with attenuverter, master gain) and nothing you don't (no routing, no sends, no EQ).
+
+The `scaleCV` feature is worth noting: it lets the same module work with both bipolar LFOs (±5 V) and unipolar envelopes (0–10 V) without changing the patch. The attenuverter then scales that CV into the knob offset, and the result is clamped to `[0, 1]` so a channel can never invert phase or amplify above unity (which would cause instability in a feedback patch).
+
+The main limitations are: only 3 channels (for more, use `Mixer6`), no mute/solo (you have to turn the level down), and no pan (the stereo width comes from the input signals, not from panning). For a small modular mixer, these are acceptable trade-offs.
