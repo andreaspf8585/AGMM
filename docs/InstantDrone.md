@@ -1,24 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: InstantDrone.cpp
-Generated: 2026-11-04 06:21
 -->
 
 # InstantDrone
 
 ## 1. Overview
 
-The `InstantDrone` module is a multi-oscillator drone generator designed for VCV Rack. It produces three distinct oscillator voices that can be modulated and processed through various effects including low-pass filtering, envelope control, and a dense reverb system. The module features:
+`InstantDrone` is a 20 HP three-oscillator drone synth with per-oscillator controls, a multi-tap delay-based reverb, and a live scope of the stereo output. Each oscillator has its own frequency (V/Oct plus knob), waveform (sine/triangle/saw), mix level, drift amount (random slow pitch wander), low-pass filter cutoff and reverb send, all with dedicated CV inputs.
 
-- Three independent oscillators with sine, triangle, and sawtooth waveforms
-- Individual pitch control via knob and CV input (V/Oct)
-- Random drift modulation for each oscillator
-- Per-oscillator mixing and filter cutoff controls
-- Reverb send levels with dedicated wet/dry mix
-- Multi-tap delay-based reverb system
-- Envelope bypass switches for each oscillator
-- Stereo output with adjustable gain
-- Visual display showing signal scope and level meters
+Key features:
+- 3 independent oscillators
+- Per-oscillator V/Oct pitch, waveform, mix, drift, filter, reverb send
+- Optional envelope input per oscillator (with bypass switch)
+- Multi-tap delay-based reverb (4 delay lines per channel)
+- Master gain trim (dB)
+- Live scope + L/R meters
+- Drift: slow random pitch wander for organic movement
 
 ## Module Screenshot
 
@@ -28,362 +26,302 @@ The `InstantDrone` module is a multi-oscillator drone generator designed for VCV
 
 ### Main Classes
 
-- **`InstantDrone`**: The core module class inheriting from `rack::Module`
-- **`DroneDelay`**: A multi-tap delay line structure for reverb processing
-- **`InstantDroneWidget`**: UI widget class inheriting from `rack::ModuleWidget`
-- **Anonymous namespace functions**: UI drawing helpers and panel components
+- `InstantDrone`: Core module class inheriting from `rack::Module`
+- `DroneDelay`: Fixed-length circular delay (44100 samples)
+- `DRPanelBackground`: Static panel artwork
+- `DRDisplayWidget`: Live scope + meters + readouts
+- `DRWaveWidget`: Per-oscillator mini waveform display
+- `DREnvLed`: Per-oscillator envelope-active LED
 
 ### Inheritance
 
 - `InstantDrone` inherits from `rack::Module`
-- `InstantDroneWidget` inherits from `rack::ModuleWidget`
+- All UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-- **`DroneDelay`**:
-  - Circular buffer of size 44100 floats
-  - Write position tracking
-  - `process()` method for delay line operation
-
-### Relationships
-
-- `InstantDrone` contains:
-  - Three oscillator state variables (`phases`, `driftValues`, `driftTargets`)
-  - Three lowpass filter state variables (`lowpass1`, `lowpass2`, `lowpass3`)
-  - Four `DroneDelay` instances for left and right channels
-  - Scope display data arrays for visualization
-
-### Module Organization
-
-- Parameters defined in `enum ParamId`
-- Inputs defined in `enum InputId`
-- Outputs defined in `enum OutputId`
-- All UI components are created in the widget constructor (`InstantDroneWidget`)
-- DSP processing occurs in `process()` method
-- UI rendering is handled by various widget classes within anonymous namespace
+| Group | Storage |
+|-------|---------|
+| Oscillator phases | `float phases[3]` |
+| Drift | `float driftValues[3]`, `driftTargets[3]` |
+| Filters | `float lowpass1, lowpass2, lowpass3` |
+| Reverb L | `DroneDelay delayL[4]` |
+| Reverb R | `DroneDelay delayR[4]` |
+| Display | `float scopeMin[55]`, `scopeMax[55]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Oscillator synthesis
 
-#### Oscillator Generation:
-$$ \text{osc}(t) = \text{waveform}(\phi(t)) $$
+Each oscillator has three waveforms:
 
-Where $\phi(t)$ is the phase, updated as:
-$$ \phi(t + dt) = \phi(t) + f(t) \cdot dt $$
+- **Sine**: $\sin(2\pi \phi)$
+- **Triangle**: $1 - 4|\phi - 0.5|$
+- **Saw**: $2\phi - 1$
 
-#### Pitch Calculation:
-$$ f = 261.626 \cdot 2^{p} $$
+The phase accumulator advances at `freq * dt`, where `freq = 261.626 * 2^pitch` and `pitch = FREQ_knob + V/Oct CV + drift`.
 
-Where $p$ is pitch in octaves.
+### Drift
 
-#### Lowpass Filter:
-$$ y[n] = y[n-1] + f \cdot (x[n] - y[n-1]) $$
+Each oscillator has a slow random walk on its pitch:
 
-#### Random Walk Drift:
-$$ \text{drift}[n] = \text{drift}[n-1] + (\text{target} - \text{drift}[n-1]) \cdot s $$
+$$
+\text{driftTarget} \sim \text{Uniform}[-1, 1] \quad \text{when } u < 0.002
+$$
 
-Where $s$ is the slew rate.
+$$
+\text{drift} \leftarrow \text{drift} + (\text{driftTarget} - \text{drift}) \cdot 0.01
+$$
 
-### Algorithms
+The `drift` value is scaled by the DRIFT knob + CV, and added to the pitch. This gives the oscillator a slow, organic pitch wobble (like tape wow/flutter).
 
-- **Multi-tap delay**: Implements a circular buffer with multiple read positions
-- **Lowpass filtering**: First-order IIR filter (leaky integrator)
-- **Random drift**: Continuous random walk with periodic target updates
-- **Envelope processing**: Linear interpolation between 0 and 1 based on CV input
-- **Stereo reverb**: Multi-tap delay with different tap lengths for left/right channels
+### Envelope
 
-### Filters
+If the envelope switch is on:
 
-- First-order lowpass IIR filter implemented as:
-$$ y[n] = y[n-1] + f \cdot (x[n] - y[n-1]) $$
+$$
+\text{envelope} = \text{clamp}(\text{ENV\_input} / 10, 0, 1)
+$$
 
-Where $f$ is the filter coefficient.
+Otherwise `envelope = 1`.
 
-### Oscillators
+### Per-oscillator low-pass
 
-Three waveform types supported:
-1. Sine: $\sin(2\pi \phi)$
-2. Triangle: $1 - 4|\phi - 0.5|$
-3. Sawtooth: $2\phi - 1$
+A one-pole LP on the oscillator output:
 
-### Delay Lines
+$$
+\text{lp} \leftarrow \text{lp} + f(\text{osc} - \text{lp}), \quad f = \text{cutoff} \cdot 0.15
+$$
 
-- Circular buffer of size 44100 samples (assuming 44.1kHz sample rate)
-- Four delay taps per channel with different lengths
-- Feedback coefficient of 0.985
+### Multi-tap delay reverb
 
-### Feedback Systems
+Four delay lines per channel, each with its own tap time:
 
-- Random walk drift uses feedback to maintain continuous modulation
-- Reverb system uses feedback in delay lines
+- Left: `{3431, 5743, 7853, 9437}` samples
+- Right: `{3721, 5923, 8147, 9601}` samples
 
-### Modulation
+Each line reads, writes input + feedback × previous read:
 
-- V/Oct input: 1V/octave scaling
-- CV inputs: 0-10V scaled to 0-1 multiplier
-- Knob inputs: direct parameter control
-- Envelope input: 0-10V scaled to 0-1 gain multiplier
+$$
+\text{read} = \text{buf}[(\text{writePos} - \text{len}) \bmod 44100], \quad \text{buf}[\text{writePos}] = \text{in} + \text{read} \cdot 0.985
+$$
 
-### Random Processes
+The four reads are averaged to form the wet signal.
 
-- Continuous random walk drift with periodic target updates (2‰ rate)
-- Uniform distribution for target generation
+### Output gain
+
+$$
+\text{out} \leftarrow \text{out} \cdot 10^{\text{gainDb}/20}
+$$
 
 ## 4. Parameters and Controls
 
-### Knobs
+### Per-oscillator (×3)
 
-| Parameter | Default | Range | Units |
-|-----------|---------|-------|-------|
-| `FREQ1_PARAM` | 0.0 | -3.0 to 3.0 | oct |
-| `FREQ2_PARAM` | 0.0 | -3.0 to 3.0 | oct |
-| `FREQ3_PARAM` | 0.0 | -3.0 to 3.0 | oct |
-| `MIX1_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `MIX2_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `MIX3_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `DRIFT1_PARAM` | 0.2 | 0.0 to 1.0 | % |
-| `DRIFT2_PARAM` | 0.2 | 0.0 to 1.0 | % |
-| `DRIFT3_PARAM` | 0.2 | 0.0 to 1.0 | % |
-| `SEND1_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `SEND2_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `SEND3_PARAM` | 0.5 | 0.0 to 1.0 | % |
-| `FILT1_PARAM` | 0.6 | 0.0 to 1.0 | % |
-| `FILT2_PARAM` | 0.6 | 0.0 to 1.0 | % |
-| `FILT3_PARAM` | 0.6 | 0.0 to 1.0 | % |
-| `REVERB_WET_PARAM` | 0.7 | 0.0 to 1.0 | % |
-| `OUTPUT_GAIN_PARAM` | 0.0 | -10.0 to 10.0 | dB |
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `FREQ{n}_PARAM` | −3 | 3 | 0 | Frequency (octaves from C4) |
+| `WAVE{n}_PARAM` | 0 | 2 | 0 | Waveform (Sine, Triangle, Saw) |
+| `MIX{n}_PARAM` | 0 | 1 | 0.5 | Mix level |
+| `DRIFT{n}_PARAM` | 0 | 1 | 0.2 | Drift amount |
+| `SEND{n}_PARAM` | 0 | 1 | 0.5 | Reverb send |
+| `FILT{n}_PARAM` | 0 | 1 | 0.6 | Filter cutoff |
 
-### Switches
+### Master
 
-| Parameter | Default | States |
-|-----------|---------|--------|
-| `WAVE1_PARAM` | 0 (Sine) | 0=Sine, 1=Triangle, 2=Saw |
-| `WAVE2_PARAM` | 0 (Sine) | 0=Sine, 1=Triangle, 2=Saw |
-| `WAVE3_PARAM` | 0 (Sine) | 0=Sine, 1=Triangle, 2=Saw |
-| `ENV1_SWITCH` | 0 (Off) | 0=Bypassed, 1=Active |
-| `ENV2_SWITCH` | 0 (Off) | 0=Bypassed, 1=Active |
-| `ENV3_SWITCH` | 0 (Off) | 0=Bypassed, 1=Active |
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `REVERB_WET_PARAM` | 0 | 1 | 0.7 | Drone intensity (wet mix) |
+| `OUTPUT_GAIN_PARAM` | −10 dB | 10 dB | 0 dB | Output gain |
 
-### CV Inputs
+### Envelope switches (×3)
 
-| Input | Range | Function |
-|-------|-------|----------|
-| `VOCT1_INPUT` | -10V to +10V | Pitch modulation |
-| `VOCT2_INPUT` | -10V to +10V | Pitch modulation |
-| `VOCT3_INPUT` | -10V to +10V | Pitch modulation |
-| `DRIFT1_CV` | -5V to +5V | Drift amount modulation |
-| `DRIFT2_CV` | -5V to +5V | Drift amount modulation |
-| `DRIFT3_CV` | -5V to +5V | Drift amount modulation |
-| `MIX1_CV` | -5V to +5V | Mix level modulation |
-| `MIX2_CV` | -5V to +5V | Mix level modulation |
-| `MIX3_CV` | -5V to +5V | Mix level modulation |
-| `FILT1_CV` | -5V to +5V | Filter cutoff modulation |
-| `FILT2_CV` | -5V to +5V | Filter cutoff modulation |
-| `FILT3_CV` | -5V to +5V | Filter cutoff modulation |
-| `SEND1_CV` | -5V to +5V | Reverb send modulation |
-| `SEND2_CV` | -5V to +5V | Reverb send modulation |
-| `SEND3_CV` | -5V to +5V | Reverb send modulation |
-| `ENV1_INPUT` | 0V to +10V | Envelope signal |
-| `ENV2_INPUT` | 0V to +10V | Envelope signal |
-| `ENV3_INPUT` | 0V to +10V | Envelope signal |
+| Switch | Description |
+|--------|-------------|
+| `ENV{n}_SWITCH` | Envelope bypass (Off = bypassed, On = active) |
+
+### Inputs (×3 per oscillator)
+
+| Input | Description |
+|-------|-------------|
+| `VOCT{n}_INPUT` | V/Oct |
+| `DRIFT{n}_CV` | Drift CV |
+| `MIX{n}_CV` | Mix CV |
+| `FILT{n}_CV` | Filter CV |
+| `SEND{n}_CV` | Send CV |
+| `ENV{n}_INPUT` | Envelope input |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `LEFT_OUTPUT` | Left |
+| `RIGHT_OUTPUT` | Right |
 
 ### Enumerations
 
-- `ParamId`: All parameters defined in enum
-- `InputId`: All inputs defined in enum
-- `OutputId`: All outputs defined in enum
+- `ParamId`: Freq1..3, Wave1..3, Mix1..3, Drift1..3, Send1..3, Filt1..3, ReverbWet, OutputGain, Env1..3 Switch
+- `InputId`: VOct1..3, Drift1..3 CV, Mix1..3 CV, Filt1..3 CV, Send1..3 CV, Env1..3
+- `OutputId`: Left, Right
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-| Input | Voltage Range | Signal Behavior |
-|-------|---------------|-----------------|
-| `VOCT1_INPUT` | -10V to +10V | Pitch modulation (1V/octave) |
-| `VOCT2_INPUT` | -10V to +10V | Pitch modulation (1V/octave) |
-| `VOCT3_INPUT` | -10V to +10V | Pitch modulation (1V/octave) |
-| `DRIFT1_CV` | -5V to +5V | Drift amount modulation (0-1 scale) |
-| `DRIFT2_CV` | -5V to +5V | Drift amount modulation (0-1 scale) |
-| `DRIFT3_CV` | -5V to +5V | Drift amount modulation (0-1 scale) |
-| `MIX1_CV` | -5V to +5V | Mix level modulation (0-1 scale) |
-| `MIX2_CV` | -5V to +5V | Mix level modulation (0-1 scale) |
-| `MIX3_CV` | -5V to +5V | Mix level modulation (0-1 scale) |
-| `FILT1_CV` | -5V to +5V | Filter cutoff modulation (0.01-0.99 scale) |
-| `FILT2_CV` | -5V to +5V | Filter cutoff modulation (0.01-0.99 scale) |
-| `FILT3_CV` | -5V to +5V | Filter cutoff modulation (0.01-0.99 scale) |
-| `SEND1_CV` | -5V to +5V | Reverb send modulation (0-1 scale) |
-| `SEND2_CV` | -5V to +5V | Reverb send modulation (0-1 scale) |
-| `SEND3_CV` | -5V to +5V | Reverb send modulation (0-1 scale) |
-| `ENV1_INPUT` | 0V to +10V | Envelope signal (0-1 scale) |
-| `ENV2_INPUT` | 0V to +10V | Envelope signal (0-1 scale) |
-| `ENV3_INPUT` | 0V to +10V | Envelope signal (0-1 scale) |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `VOCT{n}_INPUT` | CV | 1 V/oct | Pitch CV |
+| `DRIFT{n}_CV` | CV | ±5 V | Drift offset |
+| `MIX{n}_CV` | CV | ±5 V | Mix offset |
+| `FILT{n}_CV` | CV | ±5 V | Filter offset |
+| `SEND{n}_CV` | CV | ±5 V | Send offset |
+| `ENV{n}_INPUT` | CV | 0–10 V | Envelope |
 
 ### Outputs
 
-| Output | Voltage Range | Signal Behavior |
-|--------|---------------|-----------------|
-| `LEFT_OUTPUT` | -10V to +10V | Left stereo channel output |
-| `RIGHT_OUTPUT` | -10V to +10V | Right stereo channel output |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `LEFT_OUTPUT` | Audio | ±10 V | Left |
+| `RIGHT_OUTPUT` | Audio | ±10 V | Right |
 
 ## 6. Signal Processing Pipeline
 
-1. **Oscillator Generation**:
-   - Each oscillator generates waveform based on phase
-   - Phase is updated using frequency and sample time
-   - Waveform type selected from switch parameter
-
-2. **Pitch Modulation**:
-   - Base pitch from knob + V/Oct input
-   - Drift modulation added (random walk with CV control)
-
-3. **Envelope Processing**:
-   - Envelope bypass switch determines if envelope is applied
-   - If active, envelope input scaled to 0-1 and applied as gain multiplier
-
-4. **Mixing and Filtering**:
-   - Mix level from knob + CV input
-   - Lowpass filter applied with cutoff from knob + CV input
-
-5. **Reverb Processing**:
-   - Dry signal sum from all oscillators
-   - Reverb send levels from knob + CV input
-   - Multi-tap delay system with different tap lengths for left/right channels
-
-6. **Final Output**:
-   - Wet/dry mix applied to reverb output
-   - Overall gain applied from master gain knob
-   - Stereo outputs generated
+1. **Per oscillator**:
+   - Update drift target if random roll < 0.002
+   - Slew drift value
+   - Read V/Oct CV + FREQ knob + drift → pitch
+   - Compute frequency
+   - Advance phase
+   - Generate waveform
+   - Read mix knob + CV
+   - Read envelope (if active) else 1
+   - Compute `oscillator = rawOsc * 5 * baseGain * envelope`
+   - Apply one-pole LP filter
+   - Add to dry sum
+   - Add to reverb send (× send knob + CV)
+2. **Multi-tap delay reverb** — Process reverb send through 4 delay lines per channel, average
+3. **Mix** — `out = drySum + wet * wetAmount`
+4. **Output gain** — Apply dB gain
+5. **Display** — Peaks + scope
 
 ## 7. Important Functions
 
-### `process()`
-Main DSP processing function that:
-- Updates oscillator phases and drift values
-- Calculates pitch with modulation
-- Generates waveforms
-- Applies envelope control
-- Processes lowpass filtering
-- Implements multi-tap reverb system
-- Computes final stereo output
+### `getWaveform(float phase, int type)`
 
-### `getWaveform()`
-Returns waveform value for given phase and type:
-- Sine: $\sin(2\pi \phi)$
-- Triangle: $1 - 4|\phi - 0.5|$
-- Sawtooth: $2\phi - 1$
+Returns the selected waveform at the given phase.
 
-### `DroneDelay::process()`
-Performs delay line operation:
-- Reads from buffer at calculated position
-- Writes input + feedback output to write position
-- Updates circular buffer index
+```cpp
+switch (type) {
+case 0: return std::sin(2.f * M_PI * phase);
+case 1: return 1.f - 4.f * std::fabs(phase - 0.5f);
+case 2: return 2.f * phase - 1.f;
+default: return std::sin(2.f * M_PI * phase);
+}
+```
+
+### `DroneDelay::process(float input, float feedback, int length)`
+
+Circular delay with feedback.
+
+```cpp
+length = clamp(length, 1, 44099);
+int readPos = (writePos - length + 44100) % 44100;
+float output = buffer[readPos];
+buffer[writePos] = input + output * feedback;
+writePos = (writePos + 1) % 44100;
+return output;
+```
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Oscillator Generation
-$$ \text{osc}(t) = \begin{cases}
-\sin(2\pi \phi) & \text{if type = 0} \\
-1 - 4|\phi - 0.5| & \text{if type = 1} \\
-2\phi - 1 & \text{if type = 2}
-\end{cases} $$
+### Oscillator frequency
 
-### Pitch Calculation
-$$ f = 261.626 \cdot 2^{p} $$
-Where $p = \text{knob} + \text{V/Oct input}$
+$$
+f = 261.626 \cdot 2^{\text{pitch}}
+$$
 
-### Phase Update
-$$ \phi(t + dt) = \phi(t) + f \cdot dt $$
+where `pitch = FREQ + V/Oct + drift`.
 
-### Lowpass Filter
-$$ y[n] = y[n-1] + f \cdot (x[n] - y[n-1]) $$
-Where $f = \text{cutoff} \cdot 0.15$
+### Drift update
 
-### Random Walk Drift
-$$ \text{drift}[n] = \text{drift}[n-1] + (\text{target} - \text{drift}[n-1]) \cdot 0.01 $$
+$$
+\text{drift} \leftarrow \text{drift} + (\text{target} - \text{drift}) \cdot 0.01
+$$
 
-### Envelope Application
-$$ \text{gain} = \text{raw\_osc} \cdot 5.0 \cdot \text{base\_gain} \cdot \text{envelope} $$
+with target re-rolled when `uniform() < 0.002`.
+
+### Low-pass filter
+
+$$
+\text{lp} \leftarrow \text{lp} + f(\text{osc} - \text{lp}), \quad f = \text{cutoff} \cdot 0.15
+$$
+
+### Delay feedback
+
+$$
+\text{buf}[w] = \text{in} + \text{read} \cdot 0.985
+$$
+
+### Output gain
+
+$$
+g = 10^{\text{dB}/20}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Three oscillators with waveform generation
-- Four delay taps per channel (8 total)
-- Lowpass filters applied to each oscillator
-- Random number generation for drift
-- Real-time processing at 44.1kHz sample rate
+- 3 oscillators × (phase advance + waveform + LP) ≈ 3 × 20 flops
+- 3 drift updates ≈ 15 flops
+- 8 delay lines (4 L + 4 R) × (read + write) ≈ 8 × 10 flops
+- Total: ~150 flops/sample
 
 ### Memory Allocation
 
-- Static buffers:
-  - `DroneDelay` buffer: 44100 floats (176KB)
-  - Scope display data: 55 * 2 = 110 floats (440 bytes)
-  - Module state variables: ~30 floats
-- No dynamic allocation in DSP path
+- `DroneDelay` buffers: 8 × 44100 floats ≈ 1.4 MB
+- No allocation in `process()`
 
 ### Buffers
 
-- Circular delay buffers of 44100 samples each
-- Scope visualization buffer of 55 elements
-- All buffers are static and preallocated
+- `delayL[4]`, `delayR[4]`: 8 × 44100 = 352800 floats ≈ 1.4 MB
 
 ### Real-time Processing
 
-- All processing done within `process()` method
-- No blocking operations or memory allocation
-- Sample-based processing with fixed time steps
-- Uses VCV Rack's sample time for timing
+- All loops bounded by 3 (oscillators) or 4 (delay lines)
+- No allocation, no blocking
 
 ### Thread Safety
 
-- Module state accessed by audio thread only
-- Scope data shared between audio and UI threads (torn read acceptable)
-- No synchronization primitives needed for core DSP
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- First-order IIR filters are stable with proper coefficient bounds
-- Clamp operations prevent out-of-range values
-- Circular buffer indexing uses modulo arithmetic
-- Proper handling of floating-point operations
+- Output gain clamped to ±10 dB
+- Feedback 0.985 < 1
+- Waveforms bounded to ±1
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `rack.hpp` - VCV Rack core library
-- `cmath` - Standard math functions
-- `cstdio` - C standard I/O
-- `cstring` - C string operations
-- `algorithm` - STL algorithms
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### Classes and Structures
+### External Classes
 
-- `rack::Module` - Base module class
-- `rack::ModuleWidget` - Base widget class
-- `DroneDelay` - Custom delay line structure
-- `NVGcontext` - NanoVG rendering context (UI only)
-- `Vec` - Vector class for positioning
-- `DrawArgs` - Drawing arguments
-
-### VCV Rack Components
-
-- `createParamCentered`, `createInputCentered`, `createOutputCentered` - UI component creation
-- `RackGridWidth`, `RackGridHeight` - Panel sizing constants
-- `nvgRGB`, `nvgRGBA`, `nvgLinearGradient` - NanoVG drawing functions
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::plate`, `agmm::text`, `agmm::plotFrame`, `agmm::screen`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The `InstantDrone` module is a sophisticated multi-oscillator drone generator with real-time modulation capabilities and a dense reverb system. It implements three independent oscillators with sine, triangle, and sawtooth waveforms, each with individual pitch, drift, mix, filter, and send controls. The module features:
+`InstantDrone` is a compact 3-oscillator drone synth. It's focused on slow, evolving textures: the drift feature adds a tape-like wow/flutter to each oscillator, the per-oscillator low-pass filtering lets you shape the timbre, and the multi-tap delay reverb adds depth and space.
 
-- Continuous random walk drift for natural modulation
-- Per-oscillator lowpass filtering
-- Multi-tap delay-based reverb system with different tap lengths for stereo
-- Envelope bypass switches for each oscillator
-- Comprehensive CV control for all parameters
-- Stereo output with master gain control
-- Visual display showing signal scope and level meters
+The most distinctive feature is the drift: each oscillator has a slow random pitch walk that never exactly repeats, giving the drone a "living" quality. Combined with the per-oscillator envelope (which can be bypassed), it's a versatile module for both static drones and evolving textures.
 
-The implementation uses efficient DSP algorithms including first-order IIR filters, circular buffers for delay lines, and proper numerical handling to ensure real-time performance on VCV Rack. The module is designed for creating ambient drone textures with rich harmonic content and spatial effects.
+The main limitations are: the reverb is a simple multi-tap delay rather than a proper algorithmic reverb, and the filter is a fixed one-pole (no resonance). But for a compact 20 HP drone voice, these are reasonable trade-offs.
