@@ -1,23 +1,24 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Dice.cpp
-Generated: 2026-11-04 06:16
 -->
 
 # Dice
 
 ## 1. Overview
 
-The Dice module is a polyphonic random voltage generator for VCV Rack that produces gate signals and voltage outputs (V/Oct) based on clock inputs. It generates random voltages within configurable ranges, quantizes them to musical scales, and outputs gates with configurable probability and duration.
+`Dice` is a 16 HP polyphonic random-gate / random-V/Oct generator. On every rising clock edge it rolls a die per voice: with the PROBABILITY setting a voice fires, opening its gate for the configured gate time and latching a new random voltage. That voltage is emitted both raw (RANDOM output) and quantized to a selectable scale (QUANT output), making the module usable as a random sequencer, a probabilistic trigger source, or a quantized random melody generator.
 
 Key features:
-- Polyphonic operation (1-16 voices)
-- Clock-triggered random voltage generation
-- Configurable gate probability (0-100%)
-- Gate duration control (5ms to 500ms)
-- Random voltage range selection (-5/+5V, -2/+2V, -1/+1V, 0/+1V)
-- Musical scale quantization with 64 predefined scales
-- Visual display showing current configuration and output voltages
+- Up to 16 polyphonic voices
+- Per-voice dice roll on each clock edge
+- Configurable probability (0–100%)
+- Raw random V/Oct and quantized V/Oct outputs
+- 60+ built-in scales
+- Gate time selectable via menu (5 ms .. 500 ms)
+- Random range selectable via menu (0..1, -1..1, -2..2, -5..5)
+- 16 gate LEDs
+- Live bar display of the current random voltages
 
 ## Module Screenshot
 
@@ -27,354 +28,286 @@ Key features:
 
 ### Main Classes
 
-**Dice**: The primary module class inheriting from `rack::Module`
-- Manages all state and processing logic
-- Handles parameters, inputs, outputs, and lights
-- Implements core DSP algorithms for random voltage generation and quantization
-
-**DiceWidget**: UI component for the module
-- Extends `rack::ModuleWidget` 
-- Provides visual representation including:
-  - Panel layout with controls and I/O ports
-  - Custom display widget showing voltage waveforms
-  - LED indicators for each voice channel
-  - Context menu for configuration options
+- `Dice`: Core module class inheriting from `rack::Module`
+- `DiceScale`: Struct for a named quantization scale
+- `diceScales()`: Static function returning the 60+ scale list
+- `DCPanel`: Static panel artwork
+- `DCDisplay`: Live 16-channel bar display
 
 ### Inheritance
 
-```
-Dice : Module
-DiceWidget : ModuleWidget
-```
+- `Dice` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
 
-**DiceScale**: 
-- `std::string name` - Scale name (e.g., "Major", "Minor")
-- `std::vector<float> intervals` - Semitone intervals from root note
+- `DiceScale { std::string name; std::vector<float> intervals; }` — one named scale with its semitone intervals
+- Static table via `diceScales()`
 
-### Relationships
+### State (grouped)
 
-- `Dice` contains state arrays for 16 voices: gate voltages, V/Oct voltages, quantized voltages, and gate timers
-- `DiceWidget` owns the UI components and displays data from `Dice`
-- The module communicates with the host system through standard VCV Rack interfaces (parameters, inputs, outputs, lights)
-
-### Module Organization
-
-The module is organized as a single source file (`Dice.cpp`) containing:
-1. Layout constants for UI positioning
-2. Scale definitions (64 predefined musical scales)
-3. Main `Dice` class implementation
-4. UI drawing code in anonymous namespace
-5. Widget creation and context menu logic
+| Group | Storage |
+|-------|---------|
+| Per-voice gates | `float gateVoltages[16]` |
+| Per-voice V/Oct | `float voctVoltages[16]` |
+| Per-voice quantized | `float quantizedVoltages[16]` |
+| Gate timers | `float gateTimers[16]` |
+| Edge detect | `bool lastClockState` |
+| Settings | `float gateTime`, `int randomRange`, `int selectedScale` |
+| Display | `int activePoly`, `float flash[16]` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Clock edge detection
 
-**Random Voltage Generation:**
-$$ v_{rand} = \begin{cases}
-u \cdot 1.0 & \text{if range = 0} \\
-u \cdot 2.0 - 1.0 & \text{if range = 1} \\
-u \cdot 4.0 - 2.0 & \text{if range = 2} \\
-u \cdot 10.0 - 5.0 & \text{if range = 3}
-\end{cases} $$
+On every rising edge of `INPUT_CLOCK`:
 
-Where $ u \in [0,1) $ is a uniform random variable.
+$$
+\text{edge}[n] = \text{clockHigh}[n] \land \lnot\text{clockHigh}[n-1]
+$$
 
-**Quantization to Scale:**
-$$ v_{quantized} = \text{octave} + \text{bestMatch} $$
+### Per-voice dice roll
 
-Where:
-- $\text{octave} = \lfloor \frac{v_{rand} \cdot 12}{12} \rfloor$
-- $\text{bestMatch}$ is the closest interval from the selected scale's intervals
+For each voice $c$, if the roll succeeds:
 
-**Gate Timing:**
-$$ \text{gateTimer}[c] = \max(0, \text{gateTimer}[c] - \Delta t) $$
+$$
+u_c \sim \text{Uniform}[0, 1], \quad u_c < \text{prob} \implies \text{fire}
+$$
 
-Where $\Delta t$ is the sample time.
+On fire:
+- `gateVoltages[c] = 10 V`
+- `gateTimers[c] = gateTime`
+- A new random V/Oct is generated.
 
-### Algorithms
+On fail:
+- `gateVoltages[c] = 0 V`
+- `gateTimers[c] = 0`
 
-**Random Voltage Generation Algorithm:**
-1. Select random range based on `randomRange` parameter
-2. Generate uniform random value $ u \in [0,1) $
-3. Scale and offset according to selected range:
-   - Range 0: $[0,1)$ → $[0,1)$
-   - Range 1: $[0,1)$ → $[-1,1)$
-   - Range 2: $[0,1)$ → $[-2,2)$
-   - Range 3: $[0,1)$ → $[-5,5)$
+### Random V/Oct generation
 
-**Scale Quantization Algorithm:**
-1. Convert voltage to semitones: $ \text{semitones} = v_{rand} \cdot 12 $
-2. Extract octave and fractional part
-3. For each interval in the scale:
-   - Calculate difference between fractional part and interval (normalized to 0-1)
-   - Consider both positive and negative octave shifts
-4. Select the interval with minimum difference
+Depends on the selected random range:
 
-**Gate Generation Algorithm:**
-1. Detect rising clock edge
-2. For each active voice channel:
-   - Generate random probability check
-   - If successful, set gate voltage to 10V and initialize timer
-3. Decrement gate timers for all channels
-4. When timer expires, reset gate voltage to 0
+| Range | Formula |
+|-------|---------|
+| 0..1 | `random::uniform()` |
+| −1..1 | `random::uniform() * 2 - 1` |
+| −2..2 | `random::uniform() * 4 - 2` |
+| −5..5 | `random::uniform() * 10 - 5` |
 
-### Filters
+### Scale quantization
 
-None implemented.
+For the quantized output:
 
-### Oscillators
+$$
+\text{quantized} = \text{quantizeToScale}(\text{raw}, \text{scale})
+$$
 
-None implemented.
+The quantizer works in semitone space:
+1. Compute `semitones = voltage * 12`.
+2. Split into an octave and a fractional part.
+3. Find the closest scale degree (also considering the wrap to the next octave).
+4. Return the quantized voltage.
 
-### Delay Lines
+### Gate timing
 
-None implemented.
+Each gate stays high for `gateTime` seconds, then falls:
 
-### Feedback Systems
+$$
+\text{gateTimers}[c] \leftarrow \text{gateTimers}[c] - \Delta t
+$$
 
-None implemented.
-
-### Modulation
-
-- Clock input modulates when gates are generated
-- Probability parameter modulates gate generation chance
-- Polyphony parameter controls number of active voices
-
-### Random Processes
-
-Uniform random number generation via `random::uniform()` for:
-- Gate probability decisions (0-100%)
-- Voltage generation within specified ranges
+When it reaches 0, `gateVoltages[c] = 0`.
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-**PARAM_POLYPHONY** (70, 226)
-- Range: 1 to 16 voices
-- Default: 1 voice
-- Units: voices
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_POLYPHONY` | 1 | 16 | 1 | Number of voices |
+| `PARAM_PROBABILITY` | 0 | 1 | 0.5 | Gate probability |
 
-**PARAM_PROBABILITY** (170, 226)
-- Range: 0.0 to 1.0 (0% to 100%)
-- Default: 0.5 (50%)
-- Units: %
+### Inputs
 
-### Switches/Buttons
+| Input | Description |
+|-------|-------------|
+| `INPUT_CLOCK` | Clock (rising edge triggers a roll) |
 
-None implemented.
+### Outputs
 
-### CV Inputs
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_GATES` | Polyphonic gates |
+| `OUTPUT_VOCT` | Polyphonic random V/Oct (raw) |
+| `OUTPUT_QUANTIZED` | Polyphonic random V/Oct (quantized) |
 
-**INPUT_CLOCK** (36, 332)
-- Voltage range: 0V to 10V
-- Behavior: Rising edge triggers gate generation
+### Lights
 
-### Gates
-
-None implemented.
+- `LIGHT_GATES + i` (16 total) — per-channel gate activity
 
 ### Enumerations
 
-**Dice::ParamId**
-- `PARAM_POLYPHONY`
-- `PARAM_PROBABILITY`
-
-**Dice::InputId**
-- `INPUT_CLOCK`
-
-**Dice::OutputId**
-- `OUTPUT_GATES`
-- `OUTPUT_VOCT`
-- `OUTPUT_QUANTIZED`
-
-**Dice::LightId**
-- `LIGHT_GATES` (16 lights, one per voice)
-
-### Parameter Ranges and Default Values
-
-| Parameter | Range | Default |
-|-----------|-------|---------|
-| PARAM_POLYPHONY | 1-16 | 1 |
-| PARAM_PROBABILITY | 0.0-1.0 | 0.5 |
+- `ParamId`: Polyphony, Probability
+- `InputId`: Clock
+- `OutputId`: Gates, V/Oct, Quantized
+- `LightId`: Gates (16)
 
 ## 5. Inputs and Outputs
 
 ### Input
 
-**INPUT_CLOCK**
-- Voltage range: 0V to 10V
-- Behavior: Clock signal triggers gate generation
-- Connection type: DarkPJ301M port
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_CLOCK` | Gate | > 1 V | Clock (rising edge) |
 
 ### Outputs
 
-**OUTPUT_GATES**
-- Voltage range: 0V or 10V (gate)
-- Channels: 16 (polyphonic)
-- Connection type: DarkPJ301M port
-
-**OUTPUT_VOCT**
-- Voltage range: -5V to +5V (random V/Oct)
-- Channels: 16 (polyphonic)
-- Connection type: DarkPJ301M port
-
-**OUTPUT_QUANTIZED**
-- Voltage range: -5V to +5V (quantized V/Oct)
-- Channels: 16 (polyphonic)
-- Connection type: DarkPJ301M port
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_GATES` | Poly Gate | 0/10 V | Per-voice gate |
+| `OUTPUT_VOCT` | Poly CV | see range | Per-voice raw random V/Oct |
+| `OUTPUT_QUANTIZED` | Poly CV | see range | Per-voice quantized V/Oct |
 
 ## 6. Signal Processing Pipeline
 
-1. **Clock Detection**: Detect rising edge on INPUT_CLOCK
-2. **Polyphony Handling**: Clamp PARAM_POLYPHONY to [1,16] range
-3. **Gate Generation**:
-   - For each voice channel up to polyphony:
-     - Generate random probability check
-     - If successful: set gate voltage = 10V, initialize timer
-     - If failed: set gate voltage = 0V, reset timer
-4. **Voltage Generation**:
-   - Generate random voltage in selected range
-   - Quantize to selected musical scale
-5. **Gate Timer Management**:
-   - Decrement all gate timers by sample time
-   - When timer expires, set gate voltage = 0V
-6. **Output Routing**:
-   - Set output channels based on current polyphony
-   - Output gate, random V/Oct, and quantized V/Oct voltages
+1. **Clock edge detect** — `risingEdge = clockHigh && !lastClockState`.
+2. **Parameter read** — Polyphony, probability.
+3. **Per-voice roll** — For each voice: roll the die; on success set gate high, gate timer, generate new random voltage; on fail set gate low.
+4. **Gate timer decrement** — For each voice: decrement the gate timer; when zero, gate falls.
+5. **Unused channels clear** — For channels above `polyphony`, clear gates, V/Oct, quantized, timers.
+6. **Set output channels** — Set the poly channel count to `polyphony`.
+7. **Write outputs** — Per-voice gate, raw V/Oct, quantized V/Oct.
+8. **LEDs** — Flash each channel's LED based on its current gate.
+9. **Display** — Update the flash envelope and the quantized/raw bar display.
 
 ## 7. Important Functions
 
 ### `quantizeToScale(float voltage, const DiceScale &scale)`
-- Converts a voltage to the closest note in the given scale
-- Implements nearest neighbor search through scale intervals
-- Handles octave wrapping for fractional semitones
+
+Quantizes a voltage to the nearest note of a scale.
+
+```cpp
+float semitones = voltage * 12.0f;
+int octave = (int)std::floor(semitones);
+float fractional = semitones - octave;
+float bestMatch = 0.0f;
+float minDiff = 100.0f;
+for (float interval : scale.intervals) {
+    float degree = interval / 12.0f;
+    float diff = std::abs(fractional - degree);
+    if (diff < minDiff) { minDiff = diff; bestMatch = degree; }
+    diff = std::abs((fractional + 1.0f) - degree);
+    if (diff < minDiff) { minDiff = diff; bestMatch = degree - 1.0f; }
+}
+return (float)(octave + (int)std::floor(bestMatch + 0.5f)) + bestMatch;
+```
 
 ### `generateRandomVoltage(int channel)`
-- Generates random voltage for specified voice channel
-- Applies selected range scaling based on `randomRange` parameter
-- Calls quantization function with current scale
 
-### `onReset(const ResetEvent &e)`
-- Resets module state to defaults:
-  - Gate time = 10ms
-  - Random range = 0 (0 to +1V)
-  - Selected scale = 0 (Major)
+Generates a fresh random voltage according to the selected range, and quantizes it.
 
-### `dataToJson()`
-- Serializes module state for saving presets
-
-### `dataFromJson(json_t *root)`
-- Deserializes module state from saved presets
+```cpp
+float voltage = 0.0f;
+switch (randomRange) {
+    case 0: voltage = random::uniform(); break;
+    case 1: voltage = (random::uniform() * 2.0f) - 1.0f; break;
+    case 2: voltage = (random::uniform() * 4.0f) - 2.0f; break;
+    case 3: voltage = (random::uniform() * 10.0f) - 5.0f; break;
+}
+voctVoltages[channel] = voltage;
+quantizedVoltages[channel] = quantizeToScale(voltage, scale);
+```
 
 ### `process(const ProcessArgs &args)`
-- Main processing function called each audio block
-- Handles clock detection and edge triggering
-- Manages all voice states and output generation
+
+Main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Random Voltage Generation
+### Rising edge
 
-The implementation uses `random::uniform()` to generate a uniform random value in [0,1), then scales it according to the selected range:
+$$
+\text{edge} = \text{clockHigh} \land \lnot\text{lastClockState}
+$$
 
-```cpp
-switch (randomRange)
-{
-case 0: voltage = random::uniform(); break;           // [0,1)
-case 1: voltage = (random::uniform() * 2.0f) - 1.0f;  // [-1,1)
-case 2: voltage = (random::uniform() * 4.0f) - 2.0f;  // [-2,2)
-case 3: voltage = (random::uniform() * 10.0f) - 5.0f; // [-5,5)
-}
-```
+### Dice roll
 
-### Scale Quantization
+$$
+u \sim \text{Uniform}[0, 1], \quad u < \text{prob}
+$$
 
-The quantization algorithm:
-1. Converts voltage to semitones: $ \text{semitones} = v_{rand} \cdot 12 $
-2. Extracts octave and fractional part
-3. For each interval in the scale:
-   - Calculates difference between fractional part and interval (0-1 range)
-   - Considers both positive and negative octave shifts
-4. Selects the interval with minimum difference
+### Random ranges
 
-### Gate Timing
+| Range | $u$ | Output |
+|-------|-----|--------|
+| 0..1 | $u$ | $u$ |
+| −1..1 | $u$ | $2u - 1$ |
+| −2..2 | $u$ | $4u - 2$ |
+| −5..5 | $u$ | $10u - 5$ |
 
-```cpp
-gateTimers[c] -= args.sampleTime;
-if (gateTimers[c] <= 0.0f)
-    gateVoltages[c] = 0.0f;
-```
+### Gate timing
+
+$$
+\text{gateTimers}[c] \leftarrow \text{gateTimers}[c] - \Delta t
+$$
+
+### Quantization
+
+$$
+\text{out} = (o + \lfloor b + 0.5 \rfloor) + b, \quad b = \text{bestMatch}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Single audio thread processing
-- Minimal floating-point operations per voice
-- Efficient array access patterns
-- No complex mathematical functions beyond basic trigonometry for UI visualization
+- Per edge: 16 rolls × (1 compare + maybe 1 RNG + 1 quantize) ≈ 16 × 20 flops
+- Per sample: 16 decrements + 16 output writes ≈ 100 flops
+- Total: ~150 flops/sample + 16 RNG calls per edge
 
 ### Memory Allocation
 
-- Static arrays for voice state (16 elements each)
-- Precomputed scale data stored in static vector
-- No dynamic memory allocation during processing
+- All state is fixed-size
+- No allocation in `process()`
+- The scale table is a static `std::vector`
 
 ### Buffers
 
-- Voice state arrays: 16 elements each
-- No dedicated buffers required
+- `gateVoltages[16]`, `voctVoltages[16]`, `quantizedVoltages[16]`, `gateTimers[16]`: 64 floats
+- `flash[16]`: 16 floats
 
 ### Real-time Processing
 
-- All operations completed within audio block time
-- No blocking operations or waits
-- Sample-accurate timing using `args.sampleTime`
+- All loops bounded by 16
+- No allocation, no blocking
+- RNG is `random::uniform()` which is fast
 
 ### Thread Safety
 
-- Module state accessed only from audio thread
-- UI thread reads display data (torn reads are cosmetic)
-- No synchronization primitives required
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Uses standard floating-point arithmetic
-- Proper clamping of values to valid ranges
-- No recursive or iterative algorithms that could accumulate errors
+- All values are clamped to safe ranges
+- Quantization is deterministic
 
 ## 10. Dependencies
 
-### Libraries
+### Libraries/Headers
 
-- `rack.hpp` - VCV Rack core library
-- Standard C++ libraries: `<vector>`, `<string>`, `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
-- JSON handling via `json_t` (from VCV Rack)
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<vector>`, `<string>`, `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### Classes and Headers
+### External Classes
 
-- `rack::Module` - Base module class
-- `rack::ModuleWidget` - UI widget base class
-- `rack::ParamQuantity` - Parameter handling
-- `rack::Input`/`Output` - I/O port handling
-- `rack::Light` - Light indicator handling
-- `rack::random::uniform()` - Random number generation
-- `json_t` - JSON serialization support
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::dim`, `agmm::bright`, `agmm::warm`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`, `agmm::VioletLight`
 
 ## 11. Summary
 
-The Dice module is a polyphonic random voltage generator that produces gate signals and V/Oct outputs based on clock inputs. It features:
+`Dice` is a polyphonic random-gate generator that rolls a die for each voice on every clock edge. It's the simplest of the "random melody" modules in this collection — no random-walk modes, no Euclidean patterns, no pattern recorder — and that's its strength: it does one thing (probabilistic gates + random voltages) and does it well.
 
-- 16-channel polyphony with configurable voice count (1-16)
-- Clock-triggered gate generation with adjustable probability (0-100%)
-- Configurable gate duration (5ms to 500ms)
-- Four random voltage ranges (-5/+5V, -2/+2V, -1/+1V, 0/+1V)
-- 64 predefined musical scales for quantization
-- Visual display showing current configuration and output waveforms
-- Preset saving/loading capabilities
+The quantization to 60+ scales makes it usable as a random melody generator, while the raw RANDOM output makes it usable as a modulation source. The probability knob is the key creative control: at 50% you get a half-time feel, at 100% every step fires, at 10% you get sparse bursts.
 
-The implementation uses efficient algorithms for random voltage generation and scale quantization, with minimal CPU overhead suitable for real-time audio processing in VCV Rack.
+The main limitations are: the dice roll is per-voice independent (not a shared roll), and the gate time is only changeable via the menu. For a more featured version, see `DiceOnSteroids`.
