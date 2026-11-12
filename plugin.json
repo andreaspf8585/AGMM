@@ -453,6 +453,15 @@
         "generative",
         "ambient"
       ]
+    },
+    {
+      "slug": "Galton",
+      "name": "Galton",
+      "description": "Polyphonic random gates simulating Galton Board",
+      "tags": [
+        "Gate",
+        "trigger"
+      ]
     }
   ]
 }

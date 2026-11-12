@@ -7,7 +7,7 @@
 #include <algorithm>
 
 // ============================================================================
-// TritoneParadox — Shepard‑tone pair generator for the tritone paradox
+// TritoneParadox - Shepard-tone pair generator for the tritone paradox
 // ============================================================================
 //
 // OVERVIEW
@@ -15,70 +15,83 @@
 // The tritone paradox (Deutsch, 1986) is an auditory illusion in which two
 // Shepard tones separated by a tritone (6 semitones) are heard as ascending
 // by some listeners and descending by others. The direction of perceived
-// motion depends on the absolute frequencies of the tones and on the position
-// of the fixed spectral envelope that weights the octave‑spaced partials.
+// motion depends on the absolute pitch classes of the tones and on the
+// position of the fixed spectral envelope that weights the octave-spaced
+// partials.
 //
-// This module generates exactly that stimulus: a pair of Shepard tones whose
-// pitch classes differ by a tritone. The spectral envelope is a Gaussian in
-// log‑frequency space, centred at a user‑adjustable frequency. Shifting the
-// envelope centre changes the perceptual bias, allowing you to explore the
-// paradox yourself.
+// The spectral envelope is a Gaussian in log-frequency space, centred at a
+// user-adjustable frequency. Shifting the envelope centre changes the
+// perceptual bias. An optional context tone can be played before the pair
+// (Chambers et al., 2017).
 //
-// A context tone (optional) can be played before the pair, as in recent
-// studies showing that a preceding lower or higher tone biases the perceived
-// direction (Chambers et al., 2017).
+// Controls
+//   PITCH       pitch class of the first tone (shown as a note name)
+//   TRITONE     interval between the two tones (5..7 semitones)
+//   PARTIALS    octave-spaced partials per tone (1..20)
+//   ENV CENTER  centre frequency of the Gaussian envelope
+//   ENV WIDTH   width of the envelope in octaves
+//   SWEEP       depth of a slow automatic sweep of the envelope centre
+//   MODE        Manual (trigger) or Auto (free-running cycle)
+//   CONTEXT     Off / Lower / Higher context tone before the pair
+//   RATE        cycle speed (0.1 .. 200 Hz, exponential)
+//   FADE        cross-fade time between the tones
+//   SPREAD      stereo spread of the partials
+//   LEVEL       output level
+//   PLAY        manual start button
 //
-// Controls:
-//   PITCH      pitch class of the first tone (default C4). Shown as note name.
-//   ENV CENTER centre frequency of the Gaussian spectral envelope (Hz).
-//   ENV WIDTH  width (sigma) of the envelope in octaves.
-//   PARTIALS   number of octave‑spaced partials per tone (1..20, default 6).
-//   TRITONE    interval between the two tones (default 6 semitones).
-//   MODE       Manual (trigger/gate) or Auto‑cycle.
-//   RATE       speed of the auto‑cycle (0.1..200 Hz, exponential).
-//   CONTEXT    Off / Lower / Higher – adds a context tone before the pair.
+// Inputs
+//   TRIG        rising edge starts a sequence (Manual mode)
+//   V/OCT       transposes the pair in semitone steps
+//   ENV CV      1 V/oct modulation of the envelope centre
+//   RATE CV     1 V/oct modulation of the cycle rate
 //
-// Inputs:
-//   TRIG       rising edge starts a sequence in Manual mode.
-//
-// Outputs:
-//   OUT L / OUT R  stereo (partials panned by their position in the envelope).
-//
-// Display:
-//   – Gaussian envelope curve over log frequency.
-//   – Partials of Tone A (blue) and Tone B (orange) with their amplitudes.
-//   – Chroma circle showing the two pitch classes.
+// Outputs
+//   OUT L / OUT R   stereo audio
+//   GATE A / GATE B high while tone A / tone B sounds
+//   EOC             trigger at the end of every A-B cycle
 // ============================================================================
 
 // ------------------------------------------------------------
-// Layout constants (24 HP = 360 px wide)
+// Layout constants (28 HP = 420 px wide)
 // ------------------------------------------------------------
-static const float TP_PANEL_W = RACK_GRID_WIDTH * 24; // 360
+static const float TP_PANEL_W = RACK_GRID_WIDTH * 28; // 420
 static const float TP_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Display (320 x 140)
-static const float TP_DISP_W = 320.f;
-static const float TP_DISP_H = 140.f;
+// Display (380 x 110), bezel adds 4 px on every side
+static const float TP_DISP_W = 380.f;
+static const float TP_DISP_H = 110.f;
 static const float TP_DISP_X = (TP_PANEL_W - TP_DISP_W) / 2.f; // 20
 static const float TP_DISP_Y = 24.f;
 
-// Row 1 (PITCH, ENV CENTER, ENV WIDTH, PARTIALS) — 4 knobs
-static const float TP_CELL_W = 76.f;
-static const float TP_CELL_H = 58.f;
-static const float TP_ROW1_TOP = 174.f;
-static const float TP_ROW1_Y = TP_ROW1_TOP + 32.f; // 206
-static const float TP_ROW1_X[4] = {45.f, 135.f, 225.f, 315.f};
+// Inside the display (local coordinates)
+static const float TP_HDR_H = 18.f; // header strip
+static const float TP_PLOT_Y = 22.f;
+static const float TP_PLOT_H = 72.f;
+static const float TP_ENV_X = 8.f; // envelope plot
+static const float TP_ENV_W = 236.f;
+static const float TP_CHR_X = 252.f; // chroma plot
+static const float TP_CHR_W = 120.f;
+static const float TP_LOG_MIN = 5.64386f;  // log2(50 Hz)
+static const float TP_LOG_MAX = 11.96578f; // log2(4000 Hz)
 
-// Row 2 (TRITONE, MODE, RATE, CONTEXT) — 4 controls
-static const float TP_ROW2_TOP = 248.f;
-static const float TP_ROW2_Y = TP_ROW2_TOP + 32.f; // 280
-static const float TP_ROW2_X[4] = {45.f, 135.f, 225.f, 315.f};
+// Control rows: every row spans x = 10 .. 410
+static const float TP_ROW_X0 = 10.f;
+static const float TP_ROW_W = 400.f;
+static const float TP_CELL_H = 54.f;
+static const float TP_KNOB_DY = 34.f; // control centre below the cell top
 
-// I/O row (TRIG, L OUT, R OUT) — 3 jacks
-static const float TP_IO_TOP = 324.f;
-static const float TP_IO_H = 46.f;
-static const float TP_IO_Y = TP_IO_TOP + 26.f; // 350
-static const float TP_IO_X[3] = {90.f, 180.f, 270.f};
+static const float TP_R1_HDR = 147.f; // SHEPARD TONES
+static const float TP_R1_TOP = 155.f;
+static const float TP_R2_HDR = 217.f; // SEQUENCE / OUTPUT
+static const float TP_R2_TOP = 225.f;
+static const float TP_R3_HDR = 287.f; // I / O
+static const float TP_R3_TOP = 295.f;
+
+// Centre of cell i of n equal cells in a row.
+static inline float tpCellX(int i, int n)
+{
+    return TP_ROW_X0 + TP_ROW_W / (float)n * ((float)i + 0.5f);
+}
 
 // ------------------------------------------------------------
 // Shared helpers
@@ -102,7 +115,7 @@ namespace
         static const char *names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
         float midiNote = 69.f + 12.f * std::log2(hz / 440.f);
         int midiInt = (int)std::round(midiNote);
-        int octave = midiInt / 12 - 1;
+        int octave = (int)std::floor(midiInt / 12.0) - 1;
         int pc = midiInt % 12;
         if (pc < 0)
             pc += 12;
@@ -119,7 +132,7 @@ namespace
         return std::exp(-(log2Ratio * log2Ratio) / (2.f * sigma * sigma));
     }
 
-    // Sine‑only waveform (Shepard tones are traditionally pure sinusoids).
+    // Sine-only waveform (Shepard tones are traditionally pure sinusoids).
     inline float tpWaveSample(float ph)
     {
         return std::sin(2.f * (float)M_PI * ph);
@@ -131,6 +144,8 @@ namespace
 // ------------------------------------------------------------
 struct TritoneParadox : Module
 {
+    // New parameters, inputs and outputs are appended after the original ones
+    // so that existing patches keep loading correctly.
     enum ParamId
     {
         PITCH_PARAM,
@@ -138,28 +153,42 @@ struct TritoneParadox : Module
         ENV_WIDTH_PARAM,
         PARTIALS_PARAM,
         TRITONE_PARAM,
-        MODE_PARAM,    // 0 = Manual, 1 = Auto
+        MODE_PARAM, // 0 = Manual, 1 = Auto
         RATE_PARAM,
         CONTEXT_PARAM, // 0 = Off, 1 = Lower, 2 = Higher
+        SWEEP_PARAM,
+        FADE_PARAM,
+        SPREAD_PARAM,
+        LEVEL_PARAM,
+        PLAY_PARAM,
         PARAMS_LEN
     };
     enum InputId
     {
         TRIG_INPUT,
+        VOCT_INPUT,
+        ENV_CV_INPUT,
+        RATE_CV_INPUT,
         INPUTS_LEN
     };
     enum OutputId
     {
         OUT_L_OUTPUT,
         OUT_R_OUTPUT,
+        GATE_A_OUTPUT,
+        GATE_B_OUTPUT,
+        EOC_OUTPUT,
         OUTPUTS_LEN
     };
     enum LightId
     {
+        PLAY_LIGHT,
         LIGHTS_LEN
     };
 
     static const int TP_MAX_PARTIALS = 20;
+    static const int TP_CTRL_DIV = 16;             // control-rate divider (samples)
+    static constexpr float TP_SWEEP_PERIOD = 20.f; // seconds per sweep cycle
 
     // ── Custom ParamQuantity for PITCH (shows note name) ──────────────
     struct PitchQuantity : ParamQuantity
@@ -207,10 +236,22 @@ struct TritoneParadox : Module
         }
     };
 
+    // One Shepard tone: octave-spaced partials with their envelope weights
+    // and constant-power pan gains. Rebuilt at control rate.
+    struct ToneBank
+    {
+        float freq[TP_MAX_PARTIALS] = {};
+        float amp[TP_MAX_PARTIALS] = {};
+        float gl[TP_MAX_PARTIALS] = {};
+        float gr[TP_MAX_PARTIALS] = {};
+        float norm = 1.f;
+    };
+
     // ── DSP state ────────────────────────────────────────────────────
-    // Phase accumulators for Tone A and Tone B (interleaved for simplicity)
-    float phases[2 * TP_MAX_PARTIALS] = {};
-    float phasesContext[TP_MAX_PARTIALS] = {}; // for context tone
+    ToneBank bankA, bankB, bankC;
+    float phasesA[TP_MAX_PARTIALS] = {};
+    float phasesB[TP_MAX_PARTIALS] = {};
+    float phasesC[TP_MAX_PARTIALS] = {}; // context tone
 
     // Sequencer state
     enum SeqState
@@ -230,19 +271,29 @@ struct TritoneParadox : Module
     float gainB = 0.f;
     float gainCtx = 0.f;
 
-    // Display snapshot
+    // Control-rate values
+    int ctrlCount = 0;
+    float rateHz = 1.f;
+    float smoothK = 0.01f;
+    float levelGain = 1.f;
+    float sweepPhase = 0.f;
+
+    dsp::PulseGenerator eocPulse;
+
+    // Options (saved with the patch)
+    bool monoOut = false;
+
+    // Display snapshot (written by the audio thread, read by the display)
     float dispPitchSemis = 0.f;
     float dispEnvCenterHz = 370.f;
     float dispEnvWidth = 1.5f;
     int dispPartials = 6;
     float dispTritoneSemis = 6.f;
-    float dispToneAFreq[TP_MAX_PARTIALS] = {};
-    float dispToneAAmp[TP_MAX_PARTIALS] = {};
-    float dispToneBFreq[TP_MAX_PARTIALS] = {};
-    float dispToneBAmp[TP_MAX_PARTIALS] = {};
+    float dispGainA = 0.f;
+    float dispGainB = 0.f;
     int dispSeqState = SEQ_IDLE;
-    float dispEnvCurve[64] = {};
-    float dispEnvCurveFreq[64] = {};
+    int dispContextMode = 0;
+    bool dispAuto = false;
 
     TritoneParadox()
     {
@@ -250,7 +301,6 @@ struct TritoneParadox : Module
 
         auto *pq = configParam<PitchQuantity>(PITCH_PARAM, -48.f, 48.f, 0.f, "Pitch", " st");
         pq->snapEnabled = true;
-        paramQuantities[PITCH_PARAM]->snapEnabled = true;
 
         configParam(ENV_CENTER_PARAM, 65.f, 2000.f, 370.f, "Envelope centre", " Hz");
         configParam(ENV_WIDTH_PARAM, 0.5f, 3.f, 1.5f, "Envelope width", " oct");
@@ -260,32 +310,183 @@ struct TritoneParadox : Module
         paramQuantities[TRITONE_PARAM]->snapEnabled = true;
         configSwitch(MODE_PARAM, 0.f, 1.f, 0.f, "Mode", {"Manual", "Auto"});
 
-        // RATE: exponential 0.1 .. 200 Hz (raw 0..1). Default raw 0.303 ≈ 1 Hz.
+        // RATE: exponential 0.1 .. 200 Hz (raw 0..1). Default raw 0.303 = about 1 Hz.
         configParam<RateQuantity>(RATE_PARAM, 0.f, 1.f, 0.303f, "Cycle rate");
 
         configSwitch(CONTEXT_PARAM, 0.f, 2.f, 0.f, "Context tone", {"Off", "Lower", "Higher"});
 
+        configParam(SWEEP_PARAM, 0.f, 2.f, 0.f, "Envelope sweep depth", " oct");
+        configParam(FADE_PARAM, 1.f, 50.f, 5.f, "Cross-fade time", " ms");
+        configParam(SPREAD_PARAM, 0.f, 1.f, 0.55f, "Stereo spread", "%", 0.f, 100.f);
+        configParam(LEVEL_PARAM, 0.f, 1.5f, 1.f, "Output level", "%", 0.f, 100.f);
+        configButton(PLAY_PARAM, "Play sequence");
+
         configInput(TRIG_INPUT, "Trigger");
+        configInput(VOCT_INPUT, "Pitch (1 V/oct, semitone steps)");
+        configInput(ENV_CV_INPUT, "Envelope centre (1 V/oct)");
+        configInput(RATE_CV_INPUT, "Cycle rate (1 V/oct)");
         configOutput(OUT_L_OUTPUT, "L out");
         configOutput(OUT_R_OUTPUT, "R out");
+        configOutput(GATE_A_OUTPUT, "Tone A gate");
+        configOutput(GATE_B_OUTPUT, "Tone B gate");
+        configOutput(EOC_OUTPUT, "End of cycle");
+    }
+
+    void onReset(const ResetEvent &e) override
+    {
+        Module::onReset(e);
+        seqState = SEQ_IDLE;
+        seqTimer = 0.f;
+        gainA = gainB = gainCtx = 0.f;
+        sweepPhase = 0.f;
+        ctrlCount = 0;
+        for (int i = 0; i < TP_MAX_PARTIALS; ++i)
+            phasesA[i] = phasesB[i] = phasesC[i] = 0.f;
+    }
+
+    // Builds one tone bank: partial frequencies, envelope weights, pan gains
+    // and the RMS normalisation factor.
+    static void buildBank(ToneBank &b, float baseSemis, float envCenterHz, float envWidth,
+                          float spread, int partials, float sr)
+    {
+        const float base = tpSemisToHz(baseSemis);
+        float sumSq = 0.f;
+        for (int i = 0; i < TP_MAX_PARTIALS; ++i)
+        {
+            if (i >= partials)
+            {
+                b.freq[i] = 0.f;
+                b.amp[i] = 0.f;
+                b.gl[i] = 0.f;
+                b.gr[i] = 0.f;
+                continue;
+            }
+            float f = base * (float)(1 << i);
+            float a = tpEnvelopeWeight(f, envCenterHz, envWidth);
+            float fc = rack::math::clamp(f, 10.f, sr * 0.45f);
+
+            float log2Ratio = std::log2(std::max(fc, 1.f) / envCenterHz);
+            float pan = rack::math::clamp(log2Ratio / envWidth * spread, -1.f, 1.f);
+            float ang = (pan + 1.f) * 0.25f * (float)M_PI;
+
+            b.freq[i] = fc;
+            b.amp[i] = a;
+            b.gl[i] = std::cos(ang);
+            b.gr[i] = std::sin(ang);
+            if (a >= 1e-4f)
+                sumSq += a * a;
+        }
+        // Normalise each tone independently so its RMS is consistent
+        // across partial counts.
+        b.norm = (sumSq > 0.001f) ? 1.8f / std::sqrt(sumSq) : 1.f;
+    }
+
+    // Adds one tone to the output pair.
+    static void renderBank(const ToneBank &b, float *phase, float gain, float dt,
+                           float &outL, float &outR)
+    {
+        if (gain < 1e-5f)
+            return;
+        float tL = 0.f, tR = 0.f;
+        for (int i = 0; i < TP_MAX_PARTIALS; ++i)
+        {
+            float amp = b.amp[i];
+            if (amp < 1e-4f)
+                continue;
+            phase[i] += b.freq[i] * dt;
+            phase[i] -= std::floor(phase[i]);
+            float s = tpWaveSample(phase[i]) * amp;
+            tL += s * b.gl[i];
+            tR += s * b.gr[i];
+        }
+        outL += tL * b.norm * gain;
+        outR += tR * b.norm * gain;
+    }
+
+    // Everything that does not need to run every sample.
+    void updateControl(float sr)
+    {
+        const float dt = 1.f / sr;
+
+        // Pitch: knob plus V/OCT quantised to semitones.
+        float pitchSemis = params[PITCH_PARAM].getValue();
+        if (inputs[VOCT_INPUT].isConnected())
+            pitchSemis += std::round(inputs[VOCT_INPUT].getVoltage() * 12.f);
+        pitchSemis = rack::math::clamp(pitchSemis, -96.f, 96.f);
+
+        // Envelope centre: knob, CV (1 V/oct) and automatic sweep.
+        float envCv = 0.f;
+        if (inputs[ENV_CV_INPUT].isConnected())
+            envCv = rack::math::clamp(inputs[ENV_CV_INPUT].getVoltage(), -6.f, 6.f);
+        float sweepOct = params[SWEEP_PARAM].getValue() * std::sin(2.f * (float)M_PI * sweepPhase);
+        float envCenterHz = params[ENV_CENTER_PARAM].getValue() * std::pow(2.f, envCv + sweepOct);
+        envCenterHz = rack::math::clamp(envCenterHz, 30.f, 6000.f);
+
+        float envWidth = std::max(params[ENV_WIDTH_PARAM].getValue(), 0.1f);
+        int partials = rack::math::clamp((int)std::round(params[PARTIALS_PARAM].getValue()), 1, TP_MAX_PARTIALS);
+        float tritoneSemis = params[TRITONE_PARAM].getValue();
+        int contextMode = rack::math::clamp((int)std::round(params[CONTEXT_PARAM].getValue()), 0, 2);
+        float spread = params[SPREAD_PARAM].getValue();
+
+        // Cycle rate: knob plus CV (1 V/oct).
+        float rateCv = 0.f;
+        if (inputs[RATE_CV_INPUT].isConnected())
+            rateCv = rack::math::clamp(inputs[RATE_CV_INPUT].getVoltage(), -6.f, 6.f);
+        rateHz = RateQuantity::rawToHz(params[RATE_PARAM].getValue()) * std::pow(2.f, rateCv);
+        rateHz = rack::math::clamp(rateHz, 0.05f, 400.f);
+
+        // Cross-fade smoother coefficient.
+        float tau = std::max(params[FADE_PARAM].getValue(), 1.f) * 0.001f;
+        smoothK = 1.f - std::exp(-dt / tau);
+
+        levelGain = params[LEVEL_PARAM].getValue();
+
+        // Tone banks
+        buildBank(bankA, pitchSemis, envCenterHz, envWidth, spread, partials, sr);
+        buildBank(bankB, pitchSemis + tritoneSemis, envCenterHz, envWidth, spread, partials, sr);
+        if (contextMode > 0)
+        {
+            float shift = (contextMode == 1) ? -12.f : 12.f;
+            buildBank(bankC, pitchSemis + shift, envCenterHz, envWidth, spread, partials, sr);
+        }
+        else
+        {
+            for (int i = 0; i < TP_MAX_PARTIALS; ++i)
+                bankC.amp[i] = 0.f;
+        }
+
+        // Display snapshot
+        dispPitchSemis = pitchSemis;
+        dispEnvCenterHz = envCenterHz;
+        dispEnvWidth = envWidth;
+        dispPartials = partials;
+        dispTritoneSemis = tritoneSemis;
+        dispContextMode = contextMode;
+        dispAuto = params[MODE_PARAM].getValue() > 0.5f;
+        dispGainA = gainA;
+        dispGainB = gainB;
+        dispSeqState = (int)seqState;
     }
 
     void process(const ProcessArgs &args) override
     {
-        const float sr = args.sampleRate;
+        const float dt = args.sampleTime;
 
-        // ── Read controls ────────────────────────────────────────────
-        float pitchSemis = params[PITCH_PARAM].getValue();
-        float envCenterHz = params[ENV_CENTER_PARAM].getValue();
-        float envWidth = params[ENV_WIDTH_PARAM].getValue();
-        int partials = rack::math::clamp((int)std::round(params[PARTIALS_PARAM].getValue()), 1, TP_MAX_PARTIALS);
-        float tritoneSemis = params[TRITONE_PARAM].getValue();
+        sweepPhase += dt / TP_SWEEP_PERIOD;
+        if (sweepPhase >= 1.f)
+            sweepPhase -= 1.f;
+
+        if (--ctrlCount <= 0)
+        {
+            ctrlCount = TP_CTRL_DIV;
+            updateControl(args.sampleRate);
+        }
+
         bool autoMode = params[MODE_PARAM].getValue() > 0.5f;
-        float rate = RateQuantity::rawToHz(params[RATE_PARAM].getValue());
-        int contextMode = (int)std::round(params[CONTEXT_PARAM].getValue());
+        int contextMode = rack::math::clamp((int)std::round(params[CONTEXT_PARAM].getValue()), 0, 2);
 
         // ── Sequencer (timing only, gains handle the smooth transitions) ──
-        bool trig = inputs[TRIG_INPUT].getVoltage() > 1.f;
+        bool trig = inputs[TRIG_INPUT].getVoltage() > 1.f || params[PLAY_PARAM].getValue() > 0.5f;
         if (trig && !lastTrig && seqState == SEQ_IDLE)
             startSequence();
         lastTrig = trig;
@@ -295,8 +496,8 @@ struct TritoneParadox : Module
 
         if (seqState != SEQ_IDLE)
         {
-            seqTimer += args.sampleTime;
-            float stateDuration = 1.f / rate;
+            seqTimer += dt;
+            float stateDuration = 1.f / rateHz;
             if (seqState == SEQ_CONTEXT)
                 stateDuration *= 0.8f;
             if (seqTimer >= stateDuration)
@@ -311,6 +512,7 @@ struct TritoneParadox : Module
                     seqState = SEQ_TONE_B;
                     break;
                 case SEQ_TONE_B:
+                    eocPulse.trigger(1e-3f);
                     if (contextMode == 0)
                         seqState = autoMode ? SEQ_TONE_A : SEQ_IDLE;
                     else
@@ -322,48 +524,14 @@ struct TritoneParadox : Module
             }
         }
 
-        // ── Compute tone frequencies and amplitudes (also feeds display) ──
-        float toneAFreq[TP_MAX_PARTIALS] = {};
-        float toneAAmp[TP_MAX_PARTIALS] = {};
-        float toneBFreq[TP_MAX_PARTIALS] = {};
-        float toneBAmp[TP_MAX_PARTIALS] = {};
-        float ctxFreq[TP_MAX_PARTIALS] = {};
-        float ctxAmp[TP_MAX_PARTIALS] = {};
-
-        for (int i = 0; i < partials; ++i)
-        {
-            float fA = tpSemisToHz(pitchSemis) * std::pow(2.f, (float)i);
-            toneAFreq[i] = fA;
-            toneAAmp[i] = tpEnvelopeWeight(fA, envCenterHz, envWidth);
-
-            float fB = tpSemisToHz(pitchSemis + tritoneSemis) * std::pow(2.f, (float)i);
-            toneBFreq[i] = fB;
-            toneBAmp[i] = tpEnvelopeWeight(fB, envCenterHz, envWidth);
-
-            if (contextMode > 0)
-            {
-                float contextShift = (contextMode == 1) ? -12.f : 12.f;
-                float fC = tpSemisToHz(pitchSemis + contextShift) * std::pow(2.f, (float)i);
-                ctxFreq[i] = fC;
-                ctxAmp[i] = tpEnvelopeWeight(fC, envCenterHz, envWidth);
-            }
-        }
-
         // ── Anti-click: smoothed per-state gains ─────────────────────
-        // Each state has a target gain (1 if active, 0 otherwise). A
-        // one-pole smoother with a ~5 ms time constant crossfades
-        // between states, eliminating discontinuities at transitions
-        // and at rate changes mid-playback.
         float targetA = (seqState == SEQ_TONE_A) ? 1.f : 0.f;
         float targetB = (seqState == SEQ_TONE_B) ? 1.f : 0.f;
         float targetCtx = (seqState == SEQ_CONTEXT && contextMode > 0) ? 1.f : 0.f;
 
-        const float fadeTau = 0.005f; // 5 ms
-        const float kSmooth = 1.f - std::exp(-args.sampleTime / fadeTau);
-
-        gainA += (targetA - gainA) * kSmooth;
-        gainB += (targetB - gainB) * kSmooth;
-        gainCtx += (targetCtx - gainCtx) * kSmooth;
+        gainA += (targetA - gainA) * smoothK;
+        gainB += (targetB - gainB) * smoothK;
+        gainCtx += (targetCtx - gainCtx) * smoothK;
 
         // Snap tiny residuals to zero so we can skip work and avoid
         // denormal issues.
@@ -376,90 +544,30 @@ struct TritoneParadox : Module
 
         // ── Render each active tone ──────────────────────────────────
         float outL = 0.f, outR = 0.f;
+        renderBank(bankA, phasesA, gainA, dt, outL, outR);
+        renderBank(bankB, phasesB, gainB, dt, outL, outR);
+        if (contextMode > 0)
+            renderBank(bankC, phasesC, gainCtx, dt, outL, outR);
 
-        auto renderOneTone = [&](float *freqs, float *amps, float *phaseArr,
-                                 int offset, float gain)
+        if (monoOut)
         {
-            if (gain < 1e-5f)
-                return;
-            float tL = 0.f, tR = 0.f, sumSq = 0.f;
-            for (int i = 0; i < partials; ++i)
-            {
-                float amp = amps[i];
-                if (amp < 1e-4f)
-                    continue;
+            float m = 0.5f * (outL + outR);
+            outL = m;
+            outR = m;
+        }
 
-                float fc = rack::math::clamp(freqs[i], 10.f, sr * 0.45f);
-                phaseArr[offset + i] += fc * args.sampleTime;
-                phaseArr[offset + i] -= std::floor(phaseArr[offset + i]);
-
-                float s = tpWaveSample(phaseArr[offset + i]);
-
-                float log2Ratio = std::log2(std::max(fc, 1.f) / envCenterHz);
-                float pan = rack::math::clamp(log2Ratio / envWidth * 0.55f, -1.f, 1.f);
-                float ang = (pan + 1.f) * 0.25f * (float)M_PI;
-
-                tL += s * amp * std::cos(ang);
-                tR += s * amp * std::sin(ang);
-                sumSq += amp * amp;
-            }
-            // Normalise this tone independently so its RMS is consistent
-            // across partial counts, then apply its smoothed gain.
-            if (sumSq > 0.001f)
-            {
-                float inv = 1.8f / std::sqrt(sumSq);
-                tL *= inv;
-                tR *= inv;
-            }
-            outL += tL * gain;
-            outR += tR * gain;
-        };
-
-        if (gainA > 0.f)
-            renderOneTone(toneAFreq, toneAAmp, phases, 0, gainA);
-        if (gainB > 0.f)
-            renderOneTone(toneBFreq, toneBAmp, phases, TP_MAX_PARTIALS, gainB);
-        if (gainCtx > 0.f && contextMode > 0)
-            renderOneTone(ctxFreq, ctxAmp, phasesContext, 0, gainCtx);
-
-        // Soft saturation
-        outL = 5.f * std::tanh(outL * 0.8f);
-        outR = 5.f * std::tanh(outR * 0.8f);
+        // Soft saturation, then output level
+        outL = 5.f * std::tanh(outL * 0.8f) * levelGain;
+        outR = 5.f * std::tanh(outR * 0.8f) * levelGain;
 
         outputs[OUT_L_OUTPUT].setVoltage(outL);
         outputs[OUT_R_OUTPUT].setVoltage(outR);
 
-        // ── Display snapshot ────────────────────────────────────────
-        dispPitchSemis = pitchSemis;
-        dispEnvCenterHz = envCenterHz;
-        dispEnvWidth = envWidth;
-        dispPartials = partials;
-        dispTritoneSemis = tritoneSemis;
-        dispSeqState = (int)seqState;
+        outputs[GATE_A_OUTPUT].setVoltage(seqState == SEQ_TONE_A ? 10.f : 0.f);
+        outputs[GATE_B_OUTPUT].setVoltage(seqState == SEQ_TONE_B ? 10.f : 0.f);
+        outputs[EOC_OUTPUT].setVoltage(eocPulse.process(dt) ? 10.f : 0.f);
 
-        for (int i = 0; i < partials; ++i)
-        {
-            dispToneAFreq[i] = toneAFreq[i];
-            dispToneAAmp[i] = toneAAmp[i];
-            dispToneBFreq[i] = toneBFreq[i];
-            dispToneBAmp[i] = toneBAmp[i];
-        }
-        for (int i = partials; i < TP_MAX_PARTIALS; ++i)
-        {
-            dispToneAFreq[i] = 0.f;
-            dispToneAAmp[i] = 0.f;
-            dispToneBFreq[i] = 0.f;
-            dispToneBAmp[i] = 0.f;
-        }
-
-        for (int k = 0; k < 64; ++k)
-        {
-            float t = (float)k / 63.f;
-            float logF = std::log2(50.f) + t * (std::log2(4000.f) - std::log2(50.f));
-            float f = std::pow(2.f, logF);
-            dispEnvCurveFreq[k] = f;
-            dispEnvCurve[k] = tpEnvelopeWeight(f, envCenterHz, envWidth);
-        }
+        lights[PLAY_LIGHT].setBrightness(seqState != SEQ_IDLE ? 1.f : 0.f);
     }
 
     void startSequence()
@@ -467,17 +575,22 @@ struct TritoneParadox : Module
         seqTimer = 0.f;
         int contextMode = (int)std::round(params[CONTEXT_PARAM].getValue());
         seqState = (contextMode > 0) ? SEQ_CONTEXT : SEQ_TONE_A;
-        // Note: phases and gains are NOT reset — the smoothed gains
+        // Note: phases and gains are NOT reset - the smoothed gains
         // automatically fade in from silence without a click.
     }
 
     json_t *dataToJson() override
     {
-        return json_object();
+        json_t *root = json_object();
+        json_object_set_new(root, "monoOut", json_boolean(monoOut));
+        return root;
     }
 
     void dataFromJson(json_t *root) override
     {
+        json_t *m = json_object_get(root, "monoOut");
+        if (m)
+            monoOut = json_is_true(m);
     }
 };
 
@@ -499,27 +612,30 @@ namespace
             ag::panelBase(vg, TP_PANEL_W, TP_PANEL_H, "TRITONE PARADOX");
             ag::bezel(vg, TP_DISP_X, TP_DISP_Y, TP_DISP_W, TP_DISP_H);
 
-            ag::sectionHeader(vg, TP_PANEL_W, 166.f, "SHEPARD TONES", 10.f);
-            const char *row1Labels[4] = {"PITCH", "ENV CENTER", "ENV WIDTH", "PARTIALS"};
-            for (int i = 0; i < 4; ++i)
-                ag::cell(vg, TP_ROW1_X[i], TP_ROW1_TOP, TP_CELL_W, TP_CELL_H, row1Labels[i]);
+            // Row 1: the tone pair and its spectral envelope
+            ag::sectionHeader(vg, TP_PANEL_W, TP_R1_HDR, "SHEPARD TONES", 10.f);
+            const char *row1[6] = {"PITCH", "TRITONE", "PARTIALS", "ENV CENTER", "ENV WIDTH", "SWEEP"};
+            for (int i = 0; i < 6; ++i)
+                ag::cell(vg, tpCellX(i, 6), TP_R1_TOP, 62.f, TP_CELL_H, row1[i]);
 
-            ag::sectionHeader(vg, TP_PANEL_W, 240.f, "PARADOX", 10.f);
-            const char *row2Labels[4] = {"TRITONE", "MODE", "RATE", "CONTEXT"};
-            for (int i = 0; i < 4; ++i)
-                ag::cell(vg, TP_ROW2_X[i], TP_ROW2_TOP, TP_CELL_W, TP_CELL_H, row2Labels[i]);
+            // Row 2: sequencing and output
+            ag::sectionHeader(vg, TP_PANEL_W, TP_R2_HDR, "SEQUENCE / OUTPUT", 10.f);
+            const char *row2[7] = {"MODE", "CONTEXT", "RATE", "FADE", "SPREAD", "LEVEL", "PLAY"};
+            for (int i = 0; i < 7; ++i)
+                ag::cell(vg, tpCellX(i, 7), TP_R2_TOP, 54.f, TP_CELL_H, row2[i]);
 
-            ag::sectionHeader(vg, TP_PANEL_W, 316.f, "I / O", 10.f);
-            ag::cell(vg, TP_IO_X[0], TP_IO_TOP, TP_CELL_W, TP_IO_H, "TRIG");
-            ag::cell(vg, TP_IO_X[1], TP_IO_TOP, TP_CELL_W, TP_IO_H, "OUT L", true);
-            ag::cell(vg, TP_IO_X[2], TP_IO_TOP, TP_CELL_W, TP_IO_H, "OUT R", true);
+            // Row 3: inputs on the left, outputs (tinted) on the right
+            ag::sectionHeader(vg, TP_PANEL_W, TP_R3_HDR, "I / O", 10.f);
+            const char *row3[9] = {"TRIG", "V/OCT", "ENV CV", "RATE CV", "OUT L", "OUT R", "GATE A", "GATE B", "EOC"};
+            for (int i = 0; i < 9; ++i)
+                ag::cell(vg, tpCellX(i, 9), TP_R3_TOP, 41.f, TP_CELL_H, row3[i], i >= 4, 7.f);
 
             Widget::draw(args);
         }
     };
 
     // ------------------------------------------------------------
-    // Display: envelope, partials, chroma circle
+    // Display: spectral envelope with partials, and pitch-class circle
     // ------------------------------------------------------------
     struct TPDisplay : TransparentWidget
     {
@@ -531,21 +647,50 @@ namespace
             box.size = Vec(TP_DISP_W, TP_DISP_H);
         }
 
+        // Frequency to x position inside the envelope plot (display coordinates).
+        static float mapX(float hz)
+        {
+            float t = (std::log2(std::max(hz, 1.f)) - TP_LOG_MIN) / (TP_LOG_MAX - TP_LOG_MIN);
+            return TP_ENV_X + t * TP_ENV_W;
+        }
+
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
 
             ag::screen(vg, 0.f, 0.f, TP_DISP_W, TP_DISP_H);
 
+            // Header separator
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 8.f, 15.5f);
-            nvgLineTo(vg, TP_DISP_W - 8.f, 15.5f);
+            nvgMoveTo(vg, 8.f, TP_HDR_H + 0.5f);
+            nvgLineTo(vg, TP_DISP_W - 8.f, TP_HDR_H + 0.5f);
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            ag::plotFrame(vg, 8.f, 20.f, 200.f, 100.f);
-            ag::plotFrame(vg, 216.f, 20.f, 96.f, 100.f);
+            ag::plotFrame(vg, TP_ENV_X, TP_PLOT_Y, TP_ENV_W, TP_PLOT_H);
+            ag::plotFrame(vg, TP_CHR_X, TP_PLOT_Y, TP_CHR_W, TP_PLOT_H);
+
+            // Octave grid and axis labels (labels sit below the plot frame)
+            static const float gridHz[6] = {100.f, 200.f, 400.f, 800.f, 1600.f, 3200.f};
+            static const char *gridTxt[6] = {"100", "200", "400", "800", "1.6k", "3.2k"};
+            nvgBeginPath(vg);
+            for (int i = 0; i < 6; ++i)
+            {
+                float x = std::floor(mapX(gridHz[i])) + 0.5f;
+                nvgMoveTo(vg, x, TP_PLOT_Y + 1.f);
+                nvgLineTo(vg, x, TP_PLOT_Y + TP_PLOT_H - 1.f);
+            }
+            float midY = std::floor(TP_PLOT_Y + TP_PLOT_H * 0.5f) + 0.5f;
+            nvgMoveTo(vg, TP_ENV_X + 1.f, midY);
+            nvgLineTo(vg, TP_ENV_X + TP_ENV_W - 1.f, midY);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 14));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            for (int i = 0; i < 6; ++i)
+                ag::text(vg, mapX(gridHz[i]), TP_PLOT_Y + TP_PLOT_H + 9.f, gridTxt[i], 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, TP_ENV_X + TP_ENV_W, TP_PLOT_Y + TP_PLOT_H + 9.f, "Hz", 7.f, ag::dim(), ag::ALIGN_R, 0.f);
 
             Widget::draw(args);
         }
@@ -559,18 +704,17 @@ namespace
             }
             NVGcontext *vg = args.vg;
 
+            // Snapshot (defaults give a sensible preview in the module browser)
             float pitchSemis = 0.f;
             float envCenterHz = 370.f;
             float envWidth = 1.5f;
             int partials = 6;
             float tritoneSemis = 6.f;
-            float toneAFreq[TritoneParadox::TP_MAX_PARTIALS] = {};
-            float toneAAmp[TritoneParadox::TP_MAX_PARTIALS] = {};
-            float toneBFreq[TritoneParadox::TP_MAX_PARTIALS] = {};
-            float toneBAmp[TritoneParadox::TP_MAX_PARTIALS] = {};
-            int seqState = TritoneParadox::SEQ_IDLE;
-            float envCurve[64] = {};
-            float envCurveFreq[64] = {};
+            float gainA = 1.f;
+            float gainB = 0.35f;
+            int seqState = TritoneParadox::SEQ_TONE_A;
+            int contextMode = 0;
+            bool autoMode = false;
 
             if (module)
             {
@@ -579,167 +723,188 @@ namespace
                 envWidth = module->dispEnvWidth;
                 partials = module->dispPartials;
                 tritoneSemis = module->dispTritoneSemis;
+                gainA = module->dispGainA;
+                gainB = module->dispGainB;
                 seqState = module->dispSeqState;
-                for (int i = 0; i < TritoneParadox::TP_MAX_PARTIALS; ++i)
-                {
-                    toneAFreq[i] = module->dispToneAFreq[i];
-                    toneAAmp[i] = module->dispToneAAmp[i];
-                    toneBFreq[i] = module->dispToneBFreq[i];
-                    toneBAmp[i] = module->dispToneBAmp[i];
-                }
-                for (int k = 0; k < 64; ++k)
-                {
-                    envCurve[k] = module->dispEnvCurve[k];
-                    envCurveFreq[k] = module->dispEnvCurveFreq[k];
-                }
+                contextMode = module->dispContextMode;
+                autoMode = module->dispAuto;
             }
-            else
-            {
-                envCenterHz = 370.f;
-                envWidth = 1.5f;
-                for (int k = 0; k < 64; ++k)
-                {
-                    float t = (float)k / 63.f;
-                    float logF = std::log2(50.f) + t * (std::log2(4000.f) - std::log2(50.f));
-                    envCurveFreq[k] = std::pow(2.f, logF);
-                    envCurve[k] = tpEnvelopeWeight(envCurveFreq[k], envCenterHz, envWidth);
-                }
-            }
+            partials = rack::math::clamp(partials, 1, TritoneParadox::TP_MAX_PARTIALS);
+            seqState = rack::math::clamp(seqState, 0, 3);
+            envWidth = std::max(envWidth, 0.1f);
 
-            char buf[64];
-            char note[16];
-            tpFreqToNote(tpSemisToHz(pitchSemis), note, sizeof(note));
-            snprintf(buf, sizeof(buf), "%s  |  %.0f Hz  |  σ=%.2f oct", note, envCenterHz, envWidth);
-            ag::text(vg, 8.f, 8.f, buf, 10.f, ag::bright(), ag::ALIGN_L, 0.5f);
+            // ── Header: pitch pair, envelope and state chips ───────────
+            char noteA[16], noteB[16], buf[64];
+            tpFreqToNote(tpSemisToHz(pitchSemis), noteA, sizeof(noteA));
+            tpFreqToNote(tpSemisToHz(pitchSemis + tritoneSemis), noteB, sizeof(noteB));
+            snprintf(buf, sizeof(buf), "%s > %s   ENV %.0f Hz   W %.2f", noteA, noteB, envCenterHz, envWidth);
+            ag::text(vg, 8.f, TP_HDR_H * 0.5f, buf, 9.f, ag::bright(), ag::ALIGN_L, 0.5f);
 
-            const char *stateNames[] = {"IDLE", "CONTEXT", "TONE A", "TONE B"};
-            ag::text(vg, TP_DISP_W - 8.f, 8.f, stateNames[seqState], 8.f,
-                     seqState == TritoneParadox::SEQ_TONE_A ? ag::accent() : ag::warm(),
-                     ag::ALIGN_R, 0.5f);
+            const float chipY = 3.f, chipH = 12.f, gap = 4.f;
+            float x = TP_DISP_W - 8.f;
+            x -= 20.f;
+            ag::chip(vg, x, chipY, 20.f, chipH, "B", seqState == TritoneParadox::SEQ_TONE_B, ag::warm());
+            x -= gap + 20.f;
+            ag::chip(vg, x, chipY, 20.f, chipH, "A", seqState == TritoneParadox::SEQ_TONE_A, ag::accent());
+            x -= gap + 32.f;
+            const char *ctxTxt = contextMode == 1 ? "CTX-" : (contextMode == 2 ? "CTX+" : "CTX");
+            ag::chip(vg, x, chipY, 32.f, chipH, ctxTxt, seqState == TritoneParadox::SEQ_CONTEXT, ag::violet());
+            x -= gap + 30.f;
+            ag::chip(vg, x, chipY, 30.f, chipH, autoMode ? "AUTO" : "MAN", autoMode, ag::accent());
 
-            // ── Envelope + partials plot (left sub‑frame) ──────────────
+            // ── Envelope plot ──────────────────────────────────────────
             {
                 nvgSave(vg);
-                const float plotX = 8.f, plotY = 20.f, plotW = 200.f, plotH = 100.f;
+                const float plotX = TP_ENV_X, plotY = TP_PLOT_Y, plotW = TP_ENV_W, plotH = TP_PLOT_H;
+                const float bottom = plotY + plotH;
+                const float scale = plotH - 6.f;
                 nvgScissor(vg, plotX, plotY, plotW, plotH);
 
-                auto mapFreqToX = [&](float f) -> float
+                // Envelope curve: flat translucent area plus a 1 px line
+                const int N = 118;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, plotX, bottom);
+                for (int k = 0; k <= N; ++k)
                 {
-                    float logF = std::log2(std::max(f, 1.f));
-                    float logMin = std::log2(50.f);
-                    float logMax = std::log2(4000.f);
-                    float t = (logF - logMin) / (logMax - logMin);
-                    return plotX + t * plotW;
-                };
+                    float t = (float)k / (float)N;
+                    float f = std::pow(2.f, TP_LOG_MIN + t * (TP_LOG_MAX - TP_LOG_MIN));
+                    float w = tpEnvelopeWeight(f, envCenterHz, envWidth);
+                    nvgLineTo(vg, plotX + t * plotW, bottom - 1.f - w * scale);
+                }
+                nvgLineTo(vg, plotX + plotW, bottom);
+                nvgClosePath(vg);
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.10f));
+                nvgFill(vg);
 
                 nvgBeginPath(vg);
-                for (int k = 0; k < 64; ++k)
+                for (int k = 0; k <= N; ++k)
                 {
-                    float x = mapFreqToX(envCurveFreq[k]);
-                    float y = plotY + plotH - envCurve[k] * (plotH - 4.f);
+                    float t = (float)k / (float)N;
+                    float f = std::pow(2.f, TP_LOG_MIN + t * (TP_LOG_MAX - TP_LOG_MIN));
+                    float w = tpEnvelopeWeight(f, envCenterHz, envWidth);
+                    float px = plotX + t * plotW;
+                    float py = bottom - 1.f - w * scale;
                     if (k == 0)
-                        nvgMoveTo(vg, x, y);
+                        nvgMoveTo(vg, px, py);
                     else
-                        nvgLineTo(vg, x, y);
+                        nvgLineTo(vg, px, py);
                 }
-                nvgStrokeColor(vg, ag::withA(ag::bright(), 0.5f));
-                nvgStrokeWidth(vg, 1.5f);
+                nvgStrokeColor(vg, ag::withA(ag::bright(), 0.75f));
+                nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
+                // Envelope centre marker
+                float cxm = std::floor(mapX(envCenterHz)) + 0.5f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, cxm, plotY + 1.f);
+                nvgLineTo(vg, cxm, bottom - 1.f);
+                nvgStrokeColor(vg, ag::withA(ag::bright(), 0.30f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+
+                // Partial bars: tone A cyan, tone B orange. A sounding tone
+                // is drawn solid, a silent one dimmed.
+                float baseA = tpSemisToHz(pitchSemis);
+                float baseB = tpSemisToHz(pitchSemis + tritoneSemis);
+                float alphaA = 0.30f + 0.70f * rack::math::clamp(gainA, 0.f, 1.f);
+                float alphaB = 0.30f + 0.70f * rack::math::clamp(gainB, 0.f, 1.f);
                 for (int i = 0; i < partials; ++i)
                 {
-                    if (toneAAmp[i] > 0.005f)
+                    float fA = baseA * (float)(1 << i);
+                    float fB = baseB * (float)(1 << i);
+                    float aA = tpEnvelopeWeight(fA, envCenterHz, envWidth);
+                    float aB = tpEnvelopeWeight(fB, envCenterHz, envWidth);
+                    if (aA > 0.005f)
                     {
-                        float x = mapFreqToX(toneAFreq[i]);
-                        float h = toneAAmp[i] * (plotH - 4.f);
+                        float h = aA * scale;
                         nvgBeginPath(vg);
-                        nvgRect(vg, x - 1.f, plotY + plotH - 1.f - h, 2.f, h);
-                        nvgFillColor(vg, ag::withA(ag::bright(), 0.8f));
+                        nvgRect(vg, mapX(fA) - 1.5f, bottom - 1.f - h, 3.f, h);
+                        nvgFillColor(vg, ag::withA(ag::accent(), alphaA));
                         nvgFill(vg);
                     }
-                    if (toneBAmp[i] > 0.005f)
+                    if (aB > 0.005f)
                     {
-                        float x = mapFreqToX(toneBFreq[i]);
-                        float h = toneBAmp[i] * (plotH - 4.f);
+                        float h = aB * scale;
                         nvgBeginPath(vg);
-                        nvgRect(vg, x - 1.f, plotY + plotH - 1.f - h, 2.f, h);
-                        nvgFillColor(vg, ag::withA(ag::warm(), 0.8f));
+                        nvgRect(vg, mapX(fB) - 1.5f, bottom - 1.f - h, 3.f, h);
+                        nvgFillColor(vg, ag::withA(ag::warm(), alphaB));
                         nvgFill(vg);
                     }
                 }
 
+                // Baseline
                 nvgBeginPath(vg);
-                nvgMoveTo(vg, plotX + 1.f, plotY + plotH - 1.f);
-                nvgLineTo(vg, plotX + plotW - 1.f, plotY + plotH - 1.f);
-                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+                nvgMoveTo(vg, plotX + 1.f, bottom - 0.5f);
+                nvgLineTo(vg, plotX + plotW - 1.f, bottom - 0.5f);
+                nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 60));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
                 nvgRestore(vg);
             }
 
-            // ── Chroma circle (right sub‑frame) ────────────────────────
+            // ── Pitch-class circle ─────────────────────────────────────
             {
                 nvgSave(vg);
-                const float cx = 216.f + 48.f;
-                const float cy = 20.f + 50.f;
-                const float r = 36.f;
+                const float cx = TP_CHR_X + TP_CHR_W * 0.5f;
+                const float cy = TP_PLOT_Y + TP_PLOT_H * 0.5f;
+                const float r = 21.f;
 
                 nvgBeginPath(vg);
                 nvgCircle(vg, cx, cy, r);
-                nvgStrokeColor(vg, ag::withA(ag::bright(), 0.3f));
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 40));
                 nvgStrokeWidth(vg, 1.f);
                 nvgStroke(vg);
 
-                auto pitchClassAngle = [&](float semis) -> float
+                auto pcAngle = [](float semis) -> float
                 {
                     float pc = std::fmod(semis, 12.f);
-                    if (pc < 0)
+                    if (pc < 0.f)
                         pc += 12.f;
-                    return -M_PI / 2.f + (pc / 12.f) * 2.f * (float)M_PI;
+                    return -(float)M_PI * 0.5f + (pc / 12.f) * 2.f * (float)M_PI;
                 };
 
-                float angleA = pitchClassAngle(pitchSemis);
-                float angleB = pitchClassAngle(pitchSemis + tritoneSemis);
-
-                auto drawRadius = [&](float angle, NVGcolor color)
+                // 12 pitch-class ticks
+                for (int i = 0; i < 12; ++i)
                 {
+                    float a = pcAngle((float)i);
                     nvgBeginPath(vg);
-                    nvgMoveTo(vg, cx, cy);
-                    nvgLineTo(vg, cx + r * std::cos(angle), cy + r * std::sin(angle));
-                    nvgStrokeColor(vg, color);
-                    nvgStrokeWidth(vg, 2.f);
-                    nvgStroke(vg);
-                };
-
-                drawRadius(angleA, ag::bright());
-                drawRadius(angleB, ag::warm());
-
-                auto drawMarker = [&](float angle, NVGcolor color)
-                {
-                    nvgBeginPath(vg);
-                    nvgCircle(vg, cx + r * std::cos(angle), cy + r * std::sin(angle), 4.f);
-                    nvgFillColor(vg, color);
+                    nvgCircle(vg, cx + r * std::cos(a), cy + r * std::sin(a), i == 0 ? 2.f : 1.2f);
+                    nvgFillColor(vg, i == 0 ? ag::withA(ag::textCol(), 0.7f) : ag::withA(ag::dim(), 0.7f));
                     nvgFill(vg);
-                };
-                drawMarker(angleA, ag::bright());
-                drawMarker(angleB, ag::warm());
+                }
 
-                char labelA[8], labelB[8];
-                tpFreqToNote(tpSemisToHz(pitchSemis), labelA, sizeof(labelA));
-                tpFreqToNote(tpSemisToHz(pitchSemis + tritoneSemis), labelB, sizeof(labelB));
+                float angA = pcAngle(pitchSemis);
+                float angB = pcAngle(pitchSemis + tritoneSemis);
+                float ax = cx + r * std::cos(angA), ay = cy + r * std::sin(angA);
+                float bx = cx + r * std::cos(angB), by = cy + r * std::sin(angB);
 
-                float bA[4] = {0.f, 0.f, 0.f, 0.f};
-                float bB[4] = {0.f, 0.f, 0.f, 0.f};
-                nvgTextBounds(vg, 0.f, 0.f, labelA, nullptr, bA);
-                nvgTextBounds(vg, 0.f, 0.f, labelB, nullptr, bB);
-                float wA = bA[2] - bA[0];
-                float wB = bB[2] - bB[0];
+                // Chord between the two pitch classes
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, ax, ay);
+                nvgLineTo(vg, bx, by);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 55));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
 
-                ag::text(vg, cx - wA * 0.5f, cy - r - 6.f,  labelA, 7.f, ag::bright(), ag::ALIGN_L, 0.f);
-                ag::text(vg, cx - wB * 0.5f, cy + r + 10.f, labelB, 7.f, ag::warm(),   ag::ALIGN_L, 0.f);
+                // Markers (solid when that tone sounds)
+                nvgBeginPath(vg);
+                nvgCircle(vg, ax, ay, 4.f);
+                nvgFillColor(vg, ag::withA(ag::accent(), 0.45f + 0.55f * rack::math::clamp(gainA, 0.f, 1.f)));
+                nvgFill(vg);
+                nvgBeginPath(vg);
+                nvgCircle(vg, bx, by, 4.f);
+                nvgFillColor(vg, ag::withA(ag::warm(), 0.45f + 0.55f * rack::math::clamp(gainB, 0.f, 1.f)));
+                nvgFill(vg);
+
+                // Note names just outside the circle
+                ag::text(vg, cx + (r + 9.f) * std::cos(angA), cy + (r + 9.f) * std::sin(angA), noteA, 7.f, ag::bright(), ag::ALIGN_C, 0.f);
+                ag::text(vg, cx + (r + 9.f) * std::cos(angB), cy + (r + 9.f) * std::sin(angB), noteB, 7.f, ag::warm(), ag::ALIGN_C, 0.f);
 
                 nvgRestore(vg);
+
+                snprintf(buf, sizeof(buf), "INTERVAL %.0f ST", tritoneSemis);
+                ag::text(vg, cx, TP_PLOT_Y + TP_PLOT_H + 9.f, buf, 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
             }
 
             Widget::drawLayer(args, layer);
@@ -766,19 +931,47 @@ struct TritoneParadoxWidget : ModuleWidget
 
         addChild(new TPDisplay(module));
 
-        addParam(createParamCentered<RoundBlackKnob>(Vec(TP_ROW1_X[0], TP_ROW1_Y), module, TritoneParadox::PITCH_PARAM));
-        addParam(createParamCentered<RoundBlackKnob>(Vec(TP_ROW1_X[1], TP_ROW1_Y), module, TritoneParadox::ENV_CENTER_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(TP_ROW1_X[2], TP_ROW1_Y), module, TritoneParadox::ENV_WIDTH_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(TP_ROW1_X[3], TP_ROW1_Y), module, TritoneParadox::PARTIALS_PARAM));
+        // Row 1: PITCH, TRITONE, PARTIALS, ENV CENTER, ENV WIDTH, SWEEP
+        const float y1 = TP_R1_TOP + TP_KNOB_DY;
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(0, 6), y1), module, TritoneParadox::PITCH_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(1, 6), y1), module, TritoneParadox::TRITONE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(2, 6), y1), module, TritoneParadox::PARTIALS_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(3, 6), y1), module, TritoneParadox::ENV_CENTER_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(4, 6), y1), module, TritoneParadox::ENV_WIDTH_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(5, 6), y1), module, TritoneParadox::SWEEP_PARAM));
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(TP_ROW2_X[0], TP_ROW2_Y), module, TritoneParadox::TRITONE_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(TP_ROW2_X[1], TP_ROW2_Y), module, TritoneParadox::MODE_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(TP_ROW2_X[2], TP_ROW2_Y), module, TritoneParadox::RATE_PARAM));
-        addParam(createParamCentered<CKSSThree>(Vec(TP_ROW2_X[3], TP_ROW2_Y), module, TritoneParadox::CONTEXT_PARAM));
+        // Row 2: MODE, CONTEXT, RATE, FADE, SPREAD, LEVEL, PLAY
+        const float y2 = TP_R2_TOP + TP_KNOB_DY;
+        addParam(createParamCentered<CKSS>(Vec(tpCellX(0, 7), y2), module, TritoneParadox::MODE_PARAM));
+        addParam(createParamCentered<CKSSThree>(Vec(tpCellX(1, 7), y2), module, TritoneParadox::CONTEXT_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(2, 7), y2), module, TritoneParadox::RATE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(3, 7), y2), module, TritoneParadox::FADE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(4, 7), y2), module, TritoneParadox::SPREAD_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(tpCellX(5, 7), y2), module, TritoneParadox::LEVEL_PARAM));
+        addParam(createParamCentered<LEDButton>(Vec(tpCellX(6, 7), y2), module, TritoneParadox::PLAY_PARAM));
+        addChild(createLightCentered<MediumLight<agmm::CyanLight>>(Vec(tpCellX(6, 7), y2), module, TritoneParadox::PLAY_LIGHT));
 
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(TP_IO_X[0], TP_IO_Y), module, TritoneParadox::TRIG_INPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(TP_IO_X[1], TP_IO_Y), module, TritoneParadox::OUT_L_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(TP_IO_X[2], TP_IO_Y), module, TritoneParadox::OUT_R_OUTPUT));
+        // Row 3: inputs left, outputs right
+        const float y3 = TP_R3_TOP + TP_KNOB_DY;
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(tpCellX(0, 9), y3), module, TritoneParadox::TRIG_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(tpCellX(1, 9), y3), module, TritoneParadox::VOCT_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(tpCellX(2, 9), y3), module, TritoneParadox::ENV_CV_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(tpCellX(3, 9), y3), module, TritoneParadox::RATE_CV_INPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(4, 9), y3), module, TritoneParadox::OUT_L_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(5, 9), y3), module, TritoneParadox::OUT_R_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(6, 9), y3), module, TritoneParadox::GATE_A_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(7, 9), y3), module, TritoneParadox::GATE_B_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(8, 9), y3), module, TritoneParadox::EOC_OUTPUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        ModuleWidget::appendContextMenu(menu);
+        TritoneParadox *m = dynamic_cast<TritoneParadox *>(module);
+        if (!m)
+            return;
+        menu->addChild(new MenuSeparator);
+        menu->addChild(createBoolPtrMenuItem("Mono output (sum L + R)", "", &m->monoOut));
     }
 };
 

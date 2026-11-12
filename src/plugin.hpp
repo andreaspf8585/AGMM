@@ -61,3 +61,4 @@ extern Model* modelXBodyProblem;
 extern Model* modelLadder;  
 extern Model* modelTritoneParadox;
 extern Model* modelAMB;
+extern Model* modelGalton;
