@@ -1,14 +1,27 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: PsySeq.cpp
-Generated: 2026-11-04 06:28
 -->
 
 # PsySeq
 
 ## 1. Overview
 
-PsySeq is a step sequencer module for VCV Rack that allows users to create and manipulate sequences of voltages over time. It features an 8x8 grid layout with 64 programmable steps, configurable sequence length, start position, and direction (forward, reverse, or random). The module supports both fixed voltage settings per step and random voltage generation per step. Additionally, it includes mutation capabilities that can randomly modify step voltages after complete cycle repetitions.
+`PsySeq` is a 38 HP 8×8 step sequencer with probabilistic node visiting and periodic mutation. Each of the 64 cells has a voltage trimpot (0..1, scaled into a user-selectable voltage range) and a probability trimpot (0..1) that decides whether the step is visited on that clock. The sequencer supports forward, reverse and random directions, a configurable start step, and a "random voltage per step" mode.
+
+Key features:
+- 8×8 grid of steps (up to 64)
+- Per-step voltage and probability trimpots
+- Forward, reverse, random directions
+- Configurable start step (1–64)
+- Random voltage per step mode
+- Periodic mutation (with configurable wait cycles)
+- Randomize button + trigger
+- Clear, set all probabilities 100%, randomize all probabilities
+- Polyphonic CV output + inverted CV
+- Step trigger, cycle gate
+- Live 8×8 grid with playhead, voltage bars, probability bars, skip crosses, start marker
+- Status screen with current step, HIT/SKIP flag, direction/RAND V/MUT chips
 
 ## Module Screenshot
 
@@ -17,229 +30,333 @@ PsySeq is a step sequencer module for VCV Rack that allows users to create and m
 ## 2. Architecture
 
 ### Main Classes
-- **PsySeq**: The core module class inheriting from `rack::engine::Module`
-- **WaitCyclesParamQuantity**: Custom parameter quantity for discrete wait cycle values (0, 4, 8, 16)
-- **PsySeqWidget**: UI widget class inheriting from `rack::engine::ModuleWidget`
-- Anonymous namespace containing:
-  - Panel background drawing helpers
-  - Grid visualization components (`PSGridWidget`, `PSStatusWidget`)
-  - Theme color definitions and drawing utilities
+
+- `PsySeq`: Core module class inheriting from `rack::Module`
+- `WaitCyclesParamQuantity`: Custom ParamQuantity that snaps to 0/4/8/16
+- `PSPanelBackground`: Static panel artwork
+- `PSGridWidget`: Live 8×8 grid
+- `PSStatusWidget`: Status screen
 
 ### Inheritance
-- `PsySeq` inherits from `rack::engine::Module`
-- `PsySeqWidget` inherits from `rack::engine::ModuleWidget`
-- `TPSCyanLight` template inherits from `GrayModuleLightWidget`
+
+- `PsySeq` inherits from `rack::Module`
+- All UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
-- Enumerations for parameters, inputs, outputs, and lights
-- State variables for position tracking, voltage ranges, and cycle counters
-- DSP trigger objects (`SchmittTrigger`, `PulseGenerator`)
-- Data structures for UI display (flash states, current index)
 
-### Relationships
-- `PsySeqWidget` owns and manages `PSGridWidget` and `PSStatusWidget`
-- `PsySeq` maintains state and processes audio samples
-- Custom parameter quantities override value setting behavior to enforce discrete values
+- `WaitCyclesParamQuantity`: snaps to `{0, 4, 8, 16}`
 
-### Module Organization
-The module is organized into:
-1. Core logic in `PsySeq` class
-2. UI components in anonymous namespace
-3. Widget layout in `PsySeqWidget` class
-4. Parameter definitions and configuration
-5. Input/output handling and signal processing pipeline
+### State (grouped)
+
+| Group | Storage |
+|-------|---------|
+| Playhead | `int position`, `float voltMin, voltMax`, `float heldVoltage` |
+| Cycle | `int cycleCounter` |
+| Triggers | `dsp::SchmittTrigger clockTrigger, resetTrigger, randomizeTrigger, randomizeInputTrigger` |
+| Pulses | `dsp::PulseGenerator cyclePulse, stepPulse` |
+| Transport | `float lastSteps, lastStart` |
+| Display | `int curIndex`, `bool curVisited`, `float stepFlash, mutFlash` |
 
 ## 3. DSP Theory
 
-### Algorithms
-- **Step sequencing**: Implements a state machine to traverse sequence steps based on direction settings
-- **Clock synchronization**: Uses Schmitt triggers for reliable clock detection
-- **Randomization**: Utilizes `random::uniform()` for generating uniform random numbers in [0,1)
-- **Mutation**: Periodic modification of step voltages with configurable probability and wait cycles
+### Grid to index mapping
 
-### Filters
-None explicitly implemented.
+The `mapIndex(pos)` function maps a sequence position (0..63) to a cell in the 8×8 grid, offset by the current start step:
 
-### Oscillators
-None explicitly implemented.
+$$
+\text{idx} = ((\text{start} - 1 + \text{pos}) \bmod 64 + 64) \bmod 64
+$$
 
-### Delay Lines
-None explicitly implemented.
+### Clock stepping
 
-### Feedback Systems
-None explicitly implemented.
+On each clock edge, the position advances according to the direction:
 
-### Modulation
-- Voltage modulation through 64 knob parameters (0.0 to 1.0)
-- Direction switching via parameter input
-- Random voltage generation mode
+- **Forward**: `position++`, wrap to 0 at `steps`
+- **Reverse**: `position--`, wrap to `steps-1`
+- **Random**: `position = floor(random * steps)`, clamped to `[0, steps-1]`
 
-### Random Processes
-The module implements a random process for:
-1. **Step voltage generation** when `RANDOM_VOLTAGE_PARAM` is enabled
-2. **Mutation attempts** with configurable probability
-3. **Random direction selection** when `DIRECTION_PARAM` is set to "Random"
+### Probability gate
+
+For each step, a probability is read from the cell's probability trimpot:
+
+$$
+\text{visited} = (\text{prob} > 10^{-4}) \land (u < \text{prob})
+$$
+
+where $u \sim \text{Uniform}[0, 1]$.
+
+If visited:
+- Fire the step trigger
+- Update the held voltage to the current cell's value
+
+If skipped:
+- Do not fire the trigger
+- Keep the held voltage (hold the previous value)
+
+### Voltage per step
+
+If `RANDOM_VOLTAGE` is on:
+
+$$
+\text{voltage} = u \cdot (\text{voltMax} - \text{voltMin}) + \text{voltMin}
+$$
+
+If off:
+
+$$
+\text{voltage} = \text{voltMin} + \text{knob} \cdot (\text{voltMax} - \text{voltMin})
+$$
+
+where `knob` is the cell's voltage trimpot (0..1).
+
+### Periodic mutation
+
+When a forward/reverse cycle completes, the module may attempt a mutation:
+
+- `waitCycles = 0, 4, 8, 16`
+- `mutationProb = knob value`
+
+If `cycleCounter >= waitCycles`:
+- With probability `mutationProb`, randomize all **active** step voltages (all steps in the sequence, not all 64)
+- Reset `cycleCounter = 0`
+
+### Inverted CV output
+
+$$
+\text{inv} = \text{voltMin} + \text{voltMax} - \text{heldVoltage}
+$$
+
+This flips the voltage range, which can be useful for patching.
+
+### Cycle gate
+
+A 1 ms pulse on the cycle output whenever a full cycle completes.
+
+### Step trigger
+
+A 5 ms pulse whenever a step is visited.
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **STEPS_PARAM**: 1 to 64 steps, default 8
-- **START_PARAM**: 1 to 64 start step, default 1
-- **MUTATION_PARAM**: Mutation probability (0.0 to 1.0), default 0.0
-- **MUTATION_WAIT_PARAM**: Wait cycles before mutation attempt (0, 4, 8, 16), default 0
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `STEPS_PARAM` | 1 | 64 | 8 | Steps |
+| `START_PARAM` | 1 | 64 | 1 | Start step |
+| `MUTATION_PARAM` | 0 | 1 | 0 | Mutation probability |
+| `MUTATION_WAIT_PARAM` | 0, 4, 8, 16 | 0 | 0 | Wait cycles before mutation |
 
 ### Switches
-- **DIRECTION_PARAM**: Direction selection (0 = Forward, 1 = Reverse, 2 = Random)
-- **RANDOM_VOLTAGE_PARAM**: Random voltage per step mode (0 = Off, 1 = On)
+
+| Parameter | Description |
+|-----------|-------------|
+| `DIRECTION_PARAM` | Forward / Reverse / Random |
+| `RANDOM_VOLTAGE_PARAM` | Random voltage per step |
 
 ### Buttons
-- **RANDOMIZE_BUTTON**: Manual randomize all steps button
 
-### CV Inputs
-- **CLOCK_INPUT**: Clock signal for advancing sequence
-- **RESET_INPUT**: Reset position and cycle counter
-- **RANDOMIZE_TRIGGER_INPUT**: External trigger to randomize all steps
+| Button | Description |
+|--------|-------------|
+| `RANDOMIZE_BUTTON` | Randomize all step voltages |
 
-### Gates
-- **CYCLE_GATE_OUTPUT**: Gate output triggered at end of cycle (10V when active)
-- **STEP_TRIGGER_OUTPUT**: Trigger output on each step (10V when active)
+### Per-step trimpots (64 × 2)
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `KNOB_OFFSET + 0..63` | 0 | 1 | 0 | Voltage trimpot |
+| `PROB_OFFSET + 0..63` | 0 | 1 | 1 | Probability trimpot |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `CLOCK_INPUT` | Clock |
+| `RESET_INPUT` | Reset |
+| `RANDOMIZE_TRIGGER_INPUT` | Randomize trigger |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_OUT` | CV out |
+| `CYCLE_GATE_OUTPUT` | Cycle gate |
+| `STEP_TRIGGER_OUTPUT` | Step trigger |
+| `INV_OUTPUT` | Inverted CV |
+
+### Lights
+
+- `LIGHT_OFFSET + 0..63` — per-cell gate LEDs
+
+### Menu
+
+- Voltage range (0..1, −1..1, −2..2, −5..5, 0..5, 0..10, −10..10)
+- Randomize all step voltages
+- Clear all step voltages
+- All probabilities 100%
+- Randomize all probabilities
 
 ### Enumerations
-- `ParamId`: Parameter identifiers for all controls
-- `InputId`: Input identifiers
-- `OutputId`: Output identifiers
-- `LightId`: Light identifiers
 
-### Parameter Ranges and Default Values
-| Parameter | Range | Default |
-|-----------|-------|---------|
-| STEPS_PARAM | 1 to 64 | 8 |
-| START_PARAM | 1 to 64 | 1 |
-| DIRECTION_PARAM | 0 to 2 | 0 (Forward) |
-| RANDOM_VOLTAGE_PARAM | 0 to 1 | 0 (Off) |
-| MUTATION_PARAM | 0.0 to 1.0 | 0.0 |
-| MUTATION_WAIT_PARAM | {0, 4, 8, 16} | 0 |
+- `ParamId`: Steps, Start, Direction, RandomVoltage, RandomizeButton, KnobOffset..KnobMax, Mutation, MutationWait, ProbOffset..ProbMax
+- `InputId`: Clock, Reset, RandomizeTrigger
+- `OutputId`: Out, CycleGate, StepTrigger, InvOut
+- `LightId`: LightOffset..LightMax
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-- **CLOCK_INPUT**: Voltage input for clock signal (typically 0V or 10V)
-- **RESET_INPUT**: Voltage input to reset sequence position and cycle counter
-- **RANDOMIZE_TRIGGER_INPUT**: Voltage trigger input to randomize all step voltages
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `CLOCK_INPUT` | Gate | > 1 V | Clock edge steps the sequencer |
+| `RESET_INPUT` | Gate | > 1 V | Reset to step 0 |
+| `RANDOMIZE_TRIGGER_INPUT` | Gate | > 1 V | Randomize all voltages |
 
 ### Outputs
-- **OUTPUT_OUT**: CV output with current step voltage
-- **CYCLE_GATE_OUTPUT**: Gate output (10V when cycle completes)
-- **STEP_TRIGGER_OUTPUT**: Trigger output (10V on each step)
-- **INV_OUTPUT**: Inverted CV output (voltMin + voltMax - heldVoltage)
 
-### Voltage Ranges
-- All CV inputs: 0.0 to 10.0 volts
-- All CV outputs: -10.0 to 10.0 volts (configurable voltage range)
-- Gate outputs: 0.0 or 10.0 volts
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_OUT` | CV | see range | Current held voltage |
+| `CYCLE_GATE_OUTPUT` | Gate | 0/10 V | 1 ms pulse at cycle end |
+| `STEP_TRIGGER_OUTPUT` | Gate | 0/10 V | 5 ms pulse on visited step |
+| `INV_OUTPUT` | CV | see range | Inverted voltage |
 
 ## 6. Signal Processing Pipeline
 
-1. **Input processing**: Clock, reset, and randomize triggers are processed using Schmitt triggers
-2. **State update**: Sequence position is updated based on clock input and direction setting
-3. **Step voltage calculation**: Current step voltage computed from knob values or random generation
-4. **Mutation logic**: Periodic mutation attempt when cycle completes and wait cycles have elapsed
-5. **Output generation**: CV output, inverted CV, gate, and trigger outputs are set based on current state
-6. **UI updates**: Display data (current index, flash states) updated for visualization
+1. **Randomize button** — On rising edge, randomize all 64 voltage trimpots.
+2. **Randomize input** — Same.
+3. **Read params** — Steps, start, direction.
+4. **Steps/start change** — Reset cycle counter.
+5. **Reset input** — Reset position and cycle counter.
+6. **Clock edge**:
+   - Advance position according to direction.
+   - Read probability of the current cell.
+   - Roll probability; if visited, fire step trigger, update held voltage. If skipped, do not update.
+   - If a cycle completed, increment cycle counter. If `waitCycles == 0` or `cycleCounter >= waitCycles`, attempt mutation.
+   - Fire cycle pulse on cycle completion.
+7. **Write outputs** — CV, inverted CV, cycle gate, step trigger.
+8. **Update LEDs** — Light the current cell if visited.
+9. **Update display** — Flash step, flash mutation.
 
 ## 7. Important Functions
 
-- `process()`: Main audio processing function that handles clocking, reset, randomization, and output generation
-- `computeVoltageForStep()`: Calculates voltage for a given step based on mode (knob or random)
-- `updateHeldVoltage()`: Updates the current held voltage value
-- `randomizeAllStepKnobs()`: Sets all 64 step parameters to random values
-- `clearAllStepKnobs()`: Sets all 64 step parameters to zero
-- `mapIndex()`: Maps sequence position to actual knob index with start step consideration
-- `dataToJson()` and `dataFromJson()`: Serialization for saving/loading module state
+### `mapIndex(int pos)`
+
+Maps a sequence position to a grid index.
+
+### `computeVoltageForStep(int stepIndex, bool randomMode)`
+
+Returns the voltage for the given cell.
+
+### `updateHeldVoltage()`
+
+Recomputes the held CV output from the current position and settings.
+
+### `setVoltageRange(float min, float max)`
+
+Sets the voltage range and refreshes the held CV.
+
+### `randomizeAllStepKnobs()`
+
+Randomizes all 64 voltage trimpots.
+
+### `clearAllStepKnobs()`
+
+Sets all voltage trimpots to 0.
+
+### `setAllProbabilities(float v)`
+
+Sets all 64 probability trimpots to `v`.
+
+### `randomizeAllProbabilities()`
+
+Randomizes all 64 probability trimpots.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Voltage Calculation
-$$ V_{step} = \begin{cases}
-\text{random}(0,1) \times (V_{max} - V_{min}) + V_{min} & \text{if random mode} \\
-V_{min} + K_i \times (V_{max} - V_{min}) & \text{otherwise}
-\end{cases} $$
+### Index mapping
 
-Where:
-- $K_i$ is the knob value for step $i$
-- $V_{min}, V_{max}$ are configurable voltage range limits
+$$
+\text{idx} = ((\text{start} - 1 + \text{pos}) \bmod 64 + 64) \bmod 64
+$$
 
-### Direction Logic
-$$ \text{next\_pos} = \begin{cases}
-(\text{pos} + 1) \bmod \text{steps} & \text{if forward (direction = 0)} \\
-(\text{pos} - 1 + \text{steps}) \bmod \text{steps} & \text{if reverse (direction = 1)} \\
-\lfloor \text{random}(0,1) \times \text{steps} \rfloor & \text{if random (direction = 2)}
-\end{cases} $$
+### Voltage per step
 
-### Mutation Probability
-Mutation occurs with probability $P_{mut}$ when:
-$$ \text{cycleCounter} \geq \text{waitCycles} \quad \text{or} \quad \text{waitCycles} = 0 $$
+$$
+v = \text{randomMode} ? u \cdot (\text{max} - \text{min}) + \text{min} : \text{min} + k \cdot (\text{max} - \text{min})
+$$
+
+### Inverted CV
+
+$$
+\text{inv} = \text{min} + \text{max} - v
+$$
+
+### Probability gate
+
+$$
+\text{visited} = (\text{prob} > 10^{-4}) \land (u < \text{prob})
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Uses efficient state machine for step sequencing
-- Minimal floating-point operations per sample
-- Optimized trigger detection with Schmitt triggers
-- Limited memory usage (64 parameters, small state variables)
+### CPU Usage
+
+- Per clock edge: 1 random roll + 1 probability read + 1 voltage read ≈ 20 flops
+- Per sample: 4 output writes + 16 LED updates ≈ 50 flops
+- Display: 64 cell renders per frame ≈ 500 flops/frame
+- Total: ~50 flops/sample
 
 ### Memory Allocation
-- Static allocation for all parameters and state variables
-- No dynamic memory allocation in audio thread
-- Preallocated arrays for UI display data
+
+- No allocation in `process()`
+- All state is fixed-size
+- 64 trimpots × 2 (voltage + probability) = 128 floats
+- `ruleset[8]`: 8 ints
 
 ### Buffers
-- Uses `dsp::PulseGenerator` for gate/trigger outputs
-- No large buffers required
+
+- `ruleset[8]`: 8 ints
 
 ### Real-time Processing
-- All processing occurs within the audio thread
-- No blocking operations or external synchronization
-- Efficient use of VCV Rack's built-in DSP utilities
+
+- All loops bounded
+- No allocation, no blocking
+- `random::uniform()` used for randomize
 
 ### Thread Safety
-- Module state is accessed only from audio thread
-- UI thread reads display data (torn reads are cosmetic)
-- No explicit thread synchronization required
+
+- All state written by audio thread, read by UI thread via torn reads
+- The 64 trimpots are writable from the UI thread (drag) and readable from the audio thread; a torn read is only cosmetic
 
 ### Numerical Stability
-- Uses standard floating-point arithmetic
-- Proper handling of modulo operations for wraparound
-- Clamp values to valid ranges where necessary
+
+- All values clamped to safe ranges
+- No numerical issues
 
 ## 10. Dependencies
 
-### Libraries and Headers
-- `rack.hpp`: VCV Rack core library
-- `<vector>`, `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`: Standard C++ libraries
-- `dsp::SchmittTrigger`: VCV Rack DSP utilities
-- `dsp::PulseGenerator`: VCV Rack DSP utilities
-- `random::uniform()`: VCV Rack random number generation
-- `json_t`: JSON serialization support
+### Libraries/Headers
 
-### Classes and Types
-- `rack::engine::Module`
-- `rack::engine::ParamQuantity`
-- `rack::engine::ModuleWidget`
-- `dsp::SchmittTrigger`
-- `dsp::PulseGenerator`
-- `window::Font`
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `rack::dsp::SchmittTrigger`, `rack::dsp::PulseGenerator`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::chip`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-PsySeq is a feature-rich step sequencer module for VCV Rack with an 8x8 grid layout supporting up to 64 steps. It provides forward, reverse, and random direction modes, along with configurable voltage ranges and random voltage generation per step. The module includes mutation capabilities that can periodically modify step voltages after complete cycle repetitions. Key features include:
-- 64 programmable step knobs with LED indicators
-- Configurable sequence length and start position
-- Multiple direction modes (forward, reverse, random)
-- Random voltage generation mode
-- Mutation system with configurable probability and wait cycles
-- Comprehensive UI with grid visualization and status display
-- External trigger inputs for clock, reset, and randomization
-- Multiple output signals including CV, gate, and trigger outputs
-- Preset voltage range configurations
-- Save/load functionality for module state
+`PsySeq` is an 8×8 step sequencer with per-cell voltage and probability. The probability feature is what makes it distinctive: each step has a chance of being skipped, which turns a simple sequence into a probabilistic one. Combined with the mutation feature, the sequence evolves over time.
+
+The display is excellent: the 8×8 grid shows the current step, the voltage bars and probability bars, the start marker, and the skip crosses. The status screen shows the current step, the HIT/SKIP flag, and the direction/mode chips. The voltage range can be set from 0..1 up to ±10 V, and the inverted CV output makes it easy to patch inverted melodies.
+
+The main limitations are: only 8×8 (64 steps), no per-step gate length, and the mutation only affects voltages (not probabilities). For a more flexible sequencer, see `DiceOnSteroids` (which has a pattern recorder) or `ExpressArpeggiator` (which has an interactive display).
