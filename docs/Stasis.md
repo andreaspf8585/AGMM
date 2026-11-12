@@ -1,22 +1,28 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Stasis.cpp
-Generated: 2026-11-04 06:35
 -->
 
 # Stasis
 
 ## 1. Overview
 
-The **Stasis** module is a polyphonic signal delay and memory register system designed for VCV Rack. It functions as an 8-stage signal storage system where each stage can hold a sampled voltage value, with the ability to sample inputs based on probability, loop back to previous stages, and apply slew filtering to outputs.
+`Stasis` is a 24 HP 8-stage clocked sample-and-hold "shift register" with probability and slew. On each clock edge every stage samples a new value:
 
-Key features include:
-- 8 independent stages of signal storage
-- Probability-based sampling (0-100%)
-- Loop mode that feeds the last active stage back to the first
-- Slew rate control for smooth output transitions
-- Visual display showing current values, history, and system state
-- Polyphonic output capability
+- Stage 1 takes its input from a patched jack, or (if unpatched) either an internal white-noise source or, with LOOP on, the last active stage's previous value (a feedback loop).
+- Stages 2..8 take the previous stage's previous value (a shift register).
+- A patched input at stage i breaks the chain at that point.
+- With PROB below 100%, each stage independently decides whether to sample or hold (and flashes a skipped outline).
+
+Key features:
+- 8-stage shift register with per-stage input (breaking the chain)
+- Per-stage probability (sample or hold)
+- Per-stage slew (1 ms .. 2 s)
+- Loop mode (last active stage feeds stage 1)
+- Bipolar level
+- Polyphonic 8-channel output
+- Live display: bars, chain arrows, loop bus, 24-column history heat map
+- 24 HP panel with side knobs, control row, channels rows
 
 ## Module Screenshot
 
@@ -26,301 +32,263 @@ Key features include:
 
 ### Main Classes
 
-**`Stasis`**: The core module class inheriting from `rack::Module`. It manages all internal state, DSP processing, and handles user interactions.
-
-**`StasisWidget`**: The visual representation of the module in the Rack UI, inheriting from `rack::ModuleWidget`. It constructs the panel layout, controls, and display elements.
+- `Stasis`: Core module class inheriting from `rack::Module`
+- `STPanelBackground`: Static panel artwork
+- `STKnobArcs`: Live value arcs
+- `STDisplayWidget`: Live display (bars + chain + heat map)
 
 ### Inheritance
 
 - `Stasis` inherits from `rack::Module`
-- `StasisWidget` inherits from `rack::ModuleWidget`
+- All UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-The module uses several internal data structures:
-
-1. **State arrays**:
-   - `held[ST_N]`: Current held values for each stage
-   - `outv[ST_N]`: Smoothed output values for each stage
-   - `flash[ST_N]`: Flash indicators for sampled stages
-   - `skip[ST_N]`: Skip indicators for probability-based sampling
-   - `linked[ST_N]`: Boolean indicating if input is normalled
-
-2. **History tracking**:
-   - `hist[ST_N][ST_HN]`: 24-column history buffer for each stage
-   - `histUpd[ST_N][ST_HN]`: Boolean flags indicating if a stage was updated in that column
-   - `histHead`, `histCount`: Circular buffer management
-
-3. **Control state**:
-   - `stepCount`: Total step count since reset
-   - `vLen`, `vProb`, `vTau`: Cached parameter values for display
-   - `loopOn`: Loop mode flag
-
-### Relationships
-
-- `StasisWidget` owns and manages the `Stasis` module instance
-- The widget creates all UI elements (knobs, buttons, ports) that interact with the module
-- The module processes audio samples in real-time through its `process()` method
-- Visual display (`STDisplayWidget`) reads from the module's internal state for rendering
+| Group | Storage |
+|-------|---------|
+| Register | `float held[8]`, `float outv[8]` |
+| Display | `float flash[8]`, `float skip[8]`, `bool linked[8]`, `float clockFlash`, `float hist[8][24]`, `bool histUpd[8][24]`, `int histHead`, `int histCount`, `uint32_t stepCount` |
+| Settings | `int vLen`, `float vProb`, `float vTau`, `bool loopOn` |
+| Triggers | `dsp::SchmittTrigger clockTrig, stepTrig, resetTrig, loopTrig` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Shift register
 
-**Slew Rate Filtering**: 
-The module implements first-order low-pass filtering with a time constant τ:
+The module has 8 sample-and-hold stages, each with its own input jack and output jack. On each clock:
+
+- Stage 0: samples from `CH_INPUT[0]` if patched; otherwise from noise or (if LOOP) from the last active stage's old value.
+- Stage i (i > 0): samples from `CH_INPUT[i]` if patched; otherwise from stage i−1's old value.
+
+This makes it a shift register, where the chain shifts right by one stage per clock.
+
+### Probability
+
+Each stage independently decides whether to sample or hold:
 
 $$
-a = 1 - e^{-\frac{dt}{\tau}}
+\text{visited} = (u < \text{prob})
 $$
 
-Where:
-- $ dt $ is the sample time (in seconds)
-- $ \tau $ is the time constant in seconds
+If visited, the stage updates its held value and flashes. Otherwise, it holds (and flashes a skip outline).
 
-The filtered output is computed as:
-$$
-y[n] = y[n-1] + a \cdot (x[n] - y[n-1])
-$$
+### Slew
 
-**Probability Sampling**:
-A stage is sampled with probability $ p $, where:
+The output of each stage is a one-pole smoothing of the held value:
+
 $$
-\text{take} = \text{random\_uniform()} < p
+\text{out} \leftarrow \text{out} + (\text{held} - \text{out}) \cdot a
 $$
 
-### Algorithms
+where $a = 1 - e^{-\Delta t/\tau}$ and $\tau = 1 \text{ ms} \cdot 2000^{\text{knob}}$ (1 ms .. 2 s).
 
-1. **Clock Processing**: 
-   - For each stage, determine source voltage (loop tap, noise, or previous stage)
-   - Apply probability sampling to decide whether to update the held value
-   - Update history buffer with current values
+### Loop
 
-2. **Slew Filtering**:
-   - Calculate time constant from SLEW parameter using exponential mapping
-   - Apply first-order filter to smooth transitions between values
+When LOOP is on, stage 0 samples from the last active stage (`len−1`) instead of noise. This creates a feedback loop where the value travels through all stages, then wraps back to stage 0.
 
-3. **Loop Mode**:
-   - When enabled, stage 1 receives input from the last active stage
-   - The loop connection is visualized in the display with a curved arrow
+### Chain detection
 
-### Filters
+The `linked[i]` boolean records whether stage i is normalled (its input jack is unpatched). The display uses this to draw chain arrows (cyan when linked, orange when broken).
 
-- First-order low-pass filter for slew rate control
-- Exponential mapping for time constant calculation (1ms to 2s range)
+### History heat map
 
-### Oscillators
-
-- No dedicated oscillators; uses `random::uniform()` for noise generation
-
-### Delay Lines
-
-- Circular buffer history tracking with 24 columns per stage
-- 8-stage register system with optional loop connection
-
-### Feedback Systems
-
-- Loop mode creates a feedback path from last stage to first stage
-- Normalled inputs create chain connections between stages
-
-### Modulation
-
-- All parameters are modulatable via CV inputs
-- SLEW, PROB, LENGTH, and LEVEL parameters can be modulated
-
-### Random Processes
-
-- White noise generation for stage 1 in loop mode (when not connected)
-- Probability-based sampling using `random::uniform()`
+A 24-column ring buffer stores the held values over time. Each column is one clock, each row is one stage. The colour shows polarity (cyan positive, violet negative), and the alpha shows magnitude. The white left edge marks the samples that landed (visited).
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-| Parameter | Name | Range | Default | Description |
-|-----------|------|-------|---------|-------------|
-| SLEW_PARAM | Slew | 0.0 - 1.0 | 0.0 | Controls output slew rate (1ms to 2s) |
-| PROB_PARAM | Sample probability | 0.0 - 1.0 | 1.0 | Probability of sampling each stage (0-100%) |
-| LENGTH_PARAM | Loop length | 1.0 - 8.0 | 8.0 | Number of stages in loop (snap enabled) |
-| LEVEL_PARAM | Output level | -1.0 - 1.0 | 1.0 | Output voltage scaling |
-
-### Switches
-
-| Parameter | Name | Description |
-|-----------|------|-------------|
-| LOOP_PARAM | Loop | Toggles loop mode on/off |
-| STEP_PARAM | Manual clock step | Triggers manual clock step |
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `SLEW_PARAM` | 0 | 1 | 0 | Slew (1 ms .. 2 s) |
+| `PROB_PARAM` | 0 | 1 | 1 | Sample probability |
+| `LENGTH_PARAM` | 1 | 8 | 8 | Loop length |
+| `LEVEL_PARAM` | −1 | 1 | 1 | Output level |
 
 ### Buttons
 
-- **LOOP**: Toggle button for loop mode
-- **STEP**: Manual clock step button
+| Button | Description |
+|--------|-------------|
+| `LOOP_PARAM` | Loop (last stage feeds stage 1) |
+| `STEP_PARAM` | Manual clock step |
 
-### CV Inputs
+### Inputs
 
-| Input | Name | Description |
-|-------|------|-------------|
-| CLOCK_INPUT | Clock | Clock signal to advance stages |
-| RESET_INPUT | Reset | Resets all stages and history |
-| CH_INPUT + i | Channel i input | Input for stage i (normalled) |
+| Input | Description |
+|-------|-------------|
+| `CLOCK_INPUT` | Clock |
+| `RESET_INPUT` | Reset |
+| `CH_INPUT + 0..7` | 8 stage inputs |
 
-### Gates
+### Outputs
 
-- No dedicated gate inputs; uses clock/reset inputs as triggers
+| Output | Description |
+|--------|-------------|
+| `CH_OUTPUT + 0..7` | 8 stage outputs |
+| `POLY_OUTPUT` | Polyphonic 8-channel |
+
+### Lights
+
+- `LOOP_LIGHT` — Loop active
+- `STEP_LIGHT` — Clock flash
 
 ### Enumerations
 
-- `ParamId`: SLEW_PARAM, PROB_PARAM, LENGTH_PARAM, LEVEL_PARAM, LOOP_PARAM, STEP_PARAM
-- `InputId`: CLOCK_INPUT, RESET_INPUT, CH_INPUT + 0..7
-- `OutputId`: CH_OUTPUT + 0..7, POLY_OUTPUT
-- `LightId`: LOOP_LIGHT, STEP_LIGHT
-
-### Parameter Ranges
-
-- SLEW: 0.0 - 1.0 (mapped to 1ms - 2s)
-- PROB: 0.0 - 1.0 (0% - 100%)
-- LENGTH: 1.0 - 8.0 (integer values, snap enabled)
-- LEVEL: -1.0 - 1.0
-
-### Default Values
-
-- SLEW: 0.0
-- PROB: 1.0
-- LENGTH: 8.0
-- LEVEL: 1.0
+- `ParamId`: Slew, Prob, Length, Level, Loop, Step
+- `InputId`: Clock, Reset, CH_INPUT (8)
+- `OutputId`: CH_OUTPUT (8), Poly
+- `LightId`: Loop, Step
 
 ## 5. Inputs and Outputs
 
 ### Inputs
 
-| Input | Voltage Range | Description |
-|-------|---------------|-------------|
-| CLOCK_INPUT | -5V to +10V | Clock signal (triggered on rising edge) |
-| RESET_INPUT | -5V to +10V | Reset signal (triggered on rising edge) |
-| CH_INPUT + i | -10V to +10V | Input for stage i (normalled to previous stage or noise) |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `CLOCK_INPUT` | Gate | > 1 V | Clock |
+| `RESET_INPUT` | Gate | > 1 V | Reset |
+| `CH_INPUT + 0..7` | CV | ±10 V | 8 stage inputs |
 
 ### Outputs
 
-| Output | Voltage Range | Description |
-|--------|---------------|-------------|
-| CH_OUTPUT + i | -10V to +10V | Individual output for stage i |
-| POLY_OUTPUT | -10V to +10V | Polyphonic output (8 channels) |
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `CH_OUTPUT + 0..7` | CV | ±10 V | 8 stage outputs |
+| `POLY_OUTPUT` | Poly CV | ±10 V | Polyphonic 8-channel |
 
 ## 6. Signal Processing Pipeline
 
-1. **Clock Detection**: Detect rising edges on clock input
-2. **Manual Step**: Process manual step button press
-3. **Stage Sampling**:
-   - Determine source voltage for each stage
-   - Apply probability sampling decision
-   - Update held values if sampled
-4. **History Tracking**: Store current values in history buffer
-5. **Slew Filtering**: Apply first-order filter to smooth output transitions
-6. **Output Generation**: Generate individual and polyphonic outputs
-7. **Display Updates**: Update visual state for UI elements
+1. **Read params** — Slew, probability, length, level.
+2. **Loop button** — Toggle loopOn.
+3. **Reset button** — Clear register.
+4. **Clock/step edge**:
+   - Save all held values (`old[]`).
+   - For each stage:
+     - Read input (or noise/loop if unpatched).
+     - Roll probability: sample or hold.
+     - Record to history.
+5. **Slew** — Update `outv` toward `held`.
+6. **Outputs** — Write stage outputs and poly output (× level).
+7. **Display** — Flash/skip decay, clock flash decay.
+8. **LEDs** — Loop and step.
 
 ## 7. Important Functions
 
-### `doClock()`
-- Processes a clock event
-- Determines source voltage for each stage (loop tap, noise, or previous stage)
-- Applies probability sampling to decide whether to update held values
-- Updates history buffer with current values
+### `doClock(int len, float prob)`
 
-### `process()`
-- Main DSP processing function called every sample
-- Handles parameter updates and control logic
-- Processes clock/reset/step triggers
-- Applies slew filtering to outputs
-- Updates display state variables
+Performs one clock step over the first `len` stages.
 
-### `doReset()`
-- Resets internal state arrays
-- Clears history buffers
-- Resets step counter
+```cpp
+float old[8];
+for (int i = 0; i < 8; ++i) old[i] = held[i];
+
+for (int i = 0; i < 8; ++i) {
+    bool conn = inputs[CH_INPUT + i].isConnected();
+    float src;
+    if (conn) src = inputs[CH_INPUT + i].getVoltage();
+    else if (i == 0) src = loopOn ? old[len - 1] : (random::uniform() * 10.f - 5.f);
+    else src = old[i - 1];
+    linked[i] = !conn;
+
+    bool take = (prob >= 0.999f) || (random::uniform() < prob);
+    if (take) {
+        held[i] = src;
+        flash[i] = 1.f;
+    } else {
+        skip[i] = 1.f;
+    }
+    hist[i][histHead] = held[i];
+    histUpd[i][histHead] = take;
+}
+histHead = (histHead + 1) % 24;
+if (histCount < 24) histCount++;
+stepCount++;
+clockFlash = 1.f;
+```
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Slew Rate Calculation
+### Slew
 
-```cpp
-float tau = (slewK < 0.002f) ? 0.f : 0.001f * std::pow(2000.f, slewK);
-float a = (tau > 0.f) ? (1.f - std::exp(-dt / tau)) : 1.f;
-```
+$$
+\tau = 0.001 \cdot 2000^{\text{knob}} \text{ s}
+$$
 
-### Probability Sampling
+$$
+a = 1 - e^{-\Delta t/\tau}, \quad \text{out} \leftarrow \text{out} + a(\text{held} - \text{out})
+$$
 
-```cpp
-bool take = (prob >= 0.999f) || (random::uniform() < prob);
-if (take) {
-    held[i] = src;
-    flash[i] = 1.f;
-} else {
-    skip[i] = 1.f;
-}
-```
+### Probability
 
-### History Buffer Management
+$$
+\text{take} = (u < \text{prob})
+$$
 
-```cpp
-histHead = (histHead + 1) % ST_HN;
-if (histCount < ST_HN) histCount++;
-```
+### Loop source
+
+$$
+\text{src}_0 = \begin{cases} \text{noise} & \text{loop off} \\ \text{old}[\text{len} - 1] & \text{loop on} \end{cases}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Minimal computational overhead per sample
-- Uses efficient first-order filtering
-- Circular buffer for history tracking reduces memory operations
+- Per clock edge: 8 stages × ~10 flops = 80 flops
+- Per sample: 8 slew updates + 8 outputs = ~50 flops
+- Display: 8 bars + 8 chain arrows + 24×8 heat map ≈ 500 flops/frame
+- Total: ~50 flops/sample
 
 ### Memory Allocation
 
-- Fixed-size arrays with compile-time constants
-- No dynamic allocation during processing
-- Stack-based local variables
+- All state fixed-size
+- `hist[8][24]` = 192 floats ≈ 768 bytes
+- `held[8]`, `outv[8]` = 64 bytes
 
 ### Buffers
 
-- History buffer: 8 stages × 24 columns = 192 floats
-- Stage buffers: 8 floats each (held, outv, flash, skip, linked)
+- `hist[8][24]`: 768 bytes
 
 ### Real-time Processing
 
-- All operations are designed for real-time audio processing
-- No blocking or time-consuming operations
-- Efficient use of VCV Rack's sample-time based processing
+- All loops bounded
+- No allocation, no blocking
+- `random::uniform()` used for probability and noise
 
 ### Thread Safety
 
-- Module state is accessed only from the main audio thread
-- No multi-threading concerns in this implementation
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Uses standard floating-point arithmetic
-- Proper handling of edge cases (zero time constants, extreme values)
-- Clamp operations prevent out-of-bounds access
+- All values clamped to ±10 V by Rack output
+- Slew prevents clicks
+- No feedback loops (except in loop mode, which is bounded by probability)
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `rack.hpp`: VCV Rack core library
-- `dsp::SchmittTrigger`: Trigger detection utilities
-- `random::uniform()`: Random number generation
-- `std::pow()`, `std::exp()`, `std::round()`: Standard C++ math functions
-- `std::memset()`, `std::memcpy()`: Memory operations
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstdint>`, `<cstring>`, `<algorithm>`, `<memory>`
 
 ### External Classes
 
-- `Module`: Base VCV Rack module class
-- `ModuleWidget`: Base widget class for module UI
-- `dsp::SchmittTrigger`: Trigger detection implementation
-- `TransparentWidget`: Base class for custom drawing widgets
-- `DarkPJ301MPort`, `RoundSmallBlackKnob`, `LEDButton`: UI components
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `rack::dsp::SchmittTrigger`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::plate`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::chip`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-The **Stasis** module is a sophisticated polyphonic signal memory system that implements an 8-stage register with probability-based sampling, loop mode, and slew filtering. It provides a visual display showing current values, history, and system state. The implementation uses efficient first-order filtering for smooth transitions, circular buffers for history tracking, and probability sampling to create interesting modulation patterns. The module supports both manual clock stepping and external clock inputs, with comprehensive visual feedback through its custom display widget.
+`Stasis` is an 8-stage clocked shift register with per-stage probability, slew, and loop. It's the kind of module you patch when you want a "sequence" that evolves: each clock, the values shift through the register, but with probability they might hold, and with loop they might feed back to stage 1.
+
+The **per-stage input** is the key feature: by patching a different signal into stage 4, you break the chain at that point and inject a new value. This lets you construct complex "modulation" patterns from simple components.
+
+The display is excellent: the bars show the current values, the chain arrows show whether the register is linked or broken, the loop bus shows the feedback path, and the heat map shows 24 clocks of history. You can understand exactly what's happening at a glance.
+
+The main limitations are: 8 stages is a small register, and there are no CV inputs for the controls (everything is manual). But for a "hands-on" shift register, this is excellent.

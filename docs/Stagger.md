@@ -1,23 +1,24 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Stagger.cpp
-Generated: 2026-11-04 06:34
 -->
 
 # Stagger
 
 ## 1. Overview
 
-The **Stagger** module is a stereo voltage-controlled oscillator (VCO) with chaotic pitch modulation capabilities. It generates four standard waveforms (sine, triangle, sawtooth, square) and provides independent stereo pitch drift controlled by a chaos parameter. The module supports polyphonic inputs and outputs, allowing multiple channels to be driven simultaneously.
+`Stagger` is a 20 HP polyphonic VCO with a stereo "chaos" pitch drift. Each voice runs two independent oscillators (L and R) whose pitch is the base pitch plus a slow, filtered random drift — so the two channels slowly detune against each other, giving a wide, unstable, "staggering" tone.
 
-Key features include:
-- Four waveform selection options
-- Independent left/right stereo pitch modulation with chaotic drift
-- CV inputs for pitch, chaos depth, waveform, and pulse width
-- Reset input for chaos drift
-- Visual display showing current frequency, waveform, pulse width, and chaos history
-- Attenuverter controls for all CV inputs
-- CV range selection (±5V or ±10V)
+Key features:
+- Polyphonic VCO with independent L/R drift
+- 4 waveforms: Sine, Triangle, Saw, Square (minBLEP anti-aliased)
+- Pulse-width control for square
+- Chaos multiplier (×1, ×2, ×3, ×5, ×10)
+- CV range selectable (±5 V or ±10 V)
+- CV + attenuverter on pitch, chaos, waveform and pulse width
+- Reset input for the chaos drift
+- Editable frequency field (Hz or note name)
+- Scope + chaos drift history display
 
 ## Module Screenshot
 
@@ -27,315 +28,309 @@ Key features include:
 
 ### Main Classes
 
-- **`StFreqQ`**: Custom `ParamQuantity` class that implements logarithmic frequency mapping for the pitch knob with custom display formatting.
-- **`Stagger`**: Main module class inheriting from `rack::engine::Module`.
-- **`Voice`**: Inner struct representing a single voice/channel, containing phase and BLEP generators for each channel.
+- `Stagger`: Core module class inheriting from `rack::Module`
+- `StFreqQ`: Custom ParamQuantity for the frequency knob
+- `STPanel`: Static panel artwork
+- `STDisplay`: Live scope + drift history display
 
 ### Inheritance
 
-The `StFreqQ` class inherits from `rack::engine::ParamQuantity`, providing custom parameter display and value mapping for the frequency knob.
+- `Stagger` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
 
-- **`Voice`**: Contains per-channel state including:
-  - Phase tracking (`phase`, `lastPhase`)
-  - BLEP generators for waveform discontinuities (`blepRising`, `blepFalling`, `blepSaw`)
-  - Right channel variants (`phaseR`, `lastPhaseR`, `blepRisingR`, etc.)
+- `Voice { phase, lastPhase, blepRising, blepFalling, blepSaw, phaseR, lastPhaseR, blepRisingR, blepFallingR, blepSawR }` — one voice with L and R channels
 
-### Relationships
+### State (grouped)
 
-- The `Stagger` module contains a vector of `Voice` objects, one per channel.
-- Each `Voice` has independent phase and BLEP state for left and right channels.
-- The `StFreqQ` class is used as the parameter quantity for the pitch knob.
-
-### Module Organization
-
-The module is organized into:
-1. Parameter definitions (enum `ParamId`)
-2. Input definitions (enum `InputId`)
-3. Output definitions (enum `OutputId`)
-4. Light definitions (enum `LightId`)
-5. Internal state management
-6. Audio processing in `process()` method
-7. UI components in `StaggerWidget`
+| Group | Storage |
+|-------|---------|
+| Voices | `std::vector<Voice> voices` |
+| Chaos drift | `float chaosDrift`, `chaosDriftR` |
+| RNG | `std::mt19937 rng`, `std::uniform_real_distribution<float> dist` |
+| Transport | `bool cvRangeTenVolt`, `float lastResetVoltage` |
+| Display | `float dispFreq, dispPw, dispPhase, dispChaos`, `int dispWave`, `int dispChannels`, `float driftHist[128]`, `int driftHead`, `float driftTimer, driftPeak` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Stagger concept
 
-The core frequency calculation uses the relationship:
-$$ f = f_0 \cdot 2^{V} $$
+The name "Stagger" refers to the way the two channels slowly drift apart in pitch. Each voice runs two oscillators — one for L, one for R — with independent filtered random drift:
 
-Where:
-- $ f $ is the output frequency
-- $ f_0 = 261.6\,Hz $ (C4 note)
-- $ V $ is the voltage in octaves
+$$
+f_L = f_{\text{base}} + \text{chaos}_L \cdot \text{mult}
+$$
 
-The pitch modulation is implemented using:
-$$ f_{actual} = f_0 \cdot 2^{V_{base} + V_{CV}} $$
+$$
+f_R = f_{\text{base}} + \text{chaos}_R \cdot \text{mult}
+$$
 
-### Algorithms
+where $\text{chaos}_L$ and $\text{chaos}_R$ are independent one-pole filtered white noise:
 
-#### Fast Exponential
-A fast approximation of $ 2^x $ is used:
-```cpp
-auto fastExp2 = [](float x) {
-    if (x == 0.0f) return 1.0f;
-    union { float f; uint32_t i; } u;
-    u.i = (uint32_t)((1 << 23) * (x + 126.94269504f));
-    return u.f;
-};
-```
+$$
+\text{chaos}_L \leftarrow (1 - \alpha) \cdot \text{chaos}_L + \alpha \cdot w_L
+$$
 
-#### Phase Accumulation
-For each waveform, the phase is incremented by:
-$$ \Delta\phi = f \cdot \Delta t $$
+with $\alpha = \min(2\pi f_c/f_s, 0.5)$ and $f_c = 1.5$ Hz. The slow filter makes the drift smooth (like tape wow/flutter).
 
-Where $ \Delta t $ is the sample time.
+### Pitch computation
 
-### Filters
+$$
+\text{pitch} = \text{basePitch} + \text{V/Oct} + \text{pitchCV} \cdot \text{atten} + \text{chaos} \cdot \text{depth} \cdot \text{mult}
+$$
 
-A first-order low-pass filter is used to smooth chaotic noise:
-$$ y[n] = (1 - \alpha) \cdot y[n-1] + \alpha \cdot x[n] $$
+### Fast 2^x approximation
 
-With cutoff frequency:
-$$ \alpha = 2\pi f_c \Delta t $$
+Instead of `pow(2, x)`, the module uses a bit-twiddling approximation:
 
-### Oscillators
-
-The module supports four waveform types with different generation methods:
-
-1. **Sine**: Direct sine wave calculation
-2. **Triangle**: Piecewise linear interpolation
-3. **Sawtooth**: Linear ramp with discontinuity correction using BLEP
-4. **Square**: Pulse wave with discontinuity correction using BLEP
-
-### Delay Lines
-
-No explicit delay lines are used, but the chaotic drift is implemented as a filtered noise process.
-
-### Feedback Systems
-
-The chaotic pitch modulation uses feedback from a filtered noise source to create time-varying pitch modulation.
-
-### Modulation
-
-All parameters can be modulated via CV inputs with attenuverter controls. The modulation is applied in the following way:
-$$ V_{mod} = V_{base} + (V_{CV} \cdot A) $$
-
-Where $ A $ is the attenuverter value.
-
-### Random Processes
-
-White noise is generated using `std::mt19937` with a uniform distribution over [-1, 1]. This noise is filtered to create low-frequency chaotic drift.
-
-## 4. Parameters and Controls
-
-### Knobs
-
-- **PITCH_PARAM** (Frequency): 10 Hz - 6000 Hz, logarithmic scale
-- **CHAOS_PARAM** (Chaos depth): 0% - 100%
-- **WAVE_PARAM** (Waveform): 0-3 (Sine, Triangle, Saw, Square)
-- **PW_PARAM** (Pulse width): 0% - 100% (Square wave only)
-
-### Switches
-
-- **CHAOS_MULT_PARAM**: Chaos multiplier (x1, x2, x3, x5, x10)
-- **CV_RANGE_PARAM**: CV range selection (±5V or ±10V)
-
-### Buttons
-
-None
-
-### CV Inputs
-
-- **CV_INPUT**: 1V/octave pitch input
-- **PITCH_CV_INPUT**: Pitch modulation CV
-- **CHAOS_CV_INPUT**: Chaos depth modulation CV
-- **WAVE_CV_INPUT**: Waveform selection CV
-- **PW_CV_INPUT**: Pulse width modulation CV
-- **CHAOS_RESET_INPUT**: Reset chaos drift (trigger)
-
-### Gates
-
-None
-
-### Enumerations
-
-- **Waveform types**: 0=Sine, 1=Triangle, 2=Saw, 3=Square
-- **Chaos multipliers**: 0=x1, 1=x2, 2=x3, 3=x5, 4=x10
-
-### Parameter Ranges and Default Values
-
-| Parameter | Range | Default |
-|-----------|-------|---------|
-| PITCH_PARAM | 0.0 - 1.0 | FREQ_C4 (261.6 Hz) |
-| CHAOS_PARAM | 0.0 - 1.0 | 0.0 |
-| CHAOS_MULT_PARAM | 0.0 - 4.0 | 0.0 |
-| WAVE_PARAM | 0.0 - 3.0 | 0.0 |
-| PW_PARAM | 0.0 - 1.0 | 0.5 |
-| PITCH_ATTEN_PARAM | -1.0 - 1.0 | 0.0 |
-| CHAOS_ATTEN_PARAM | -1.0 - 1.0 | 0.0 |
-| WAVE_ATTEN_PARAM | -1.0 - 1.0 | 0.0 |
-| PW_ATTEN_PARAM | -1.0 - 1.0 | 0.0 |
-| CV_RANGE_PARAM | 0.0 - 1.0 | 0.0 |
-
-## 5. Inputs and Outputs
-
-### Inputs
-
-- **CV_INPUT**: 1V/octave pitch input (0V = C4)
-- **PITCH_CV_INPUT**: Pitch modulation CV
-- **CHAOS_CV_INPUT**: Chaos depth modulation CV
-- **WAVE_CV_INPUT**: Waveform selection CV
-- **PW_CV_INPUT**: Pulse width modulation CV
-- **CHAOS_RESET_INPUT**: Reset chaos drift (trigger, >1.0V to reset)
-
-### Outputs
-
-- **VCO_L_OUTPUT**: Left channel output voltage (±5V)
-- **VCO_R_OUTPUT**: Right channel output voltage (±5V)
-
-## 6. Signal Processing Pipeline
-
-1. **Initialization**:
-   - Set up parameter configurations
-   - Initialize random number generator
-   - Clear voice vector
-
-2. **Reset Handling**:
-   - Check for trigger on chaos reset input
-   - Reset chaos drift if triggered
-
-3. **Noise Generation and Filtering**:
-   - Generate white noise samples
-   - Apply first-order low-pass filter to create chaotic drift
-
-4. **Channel Processing Loop**:
-   - For each channel:
-     - Read CV inputs
-     - Apply attenuverters
-     - Calculate total pitch voltage
-     - Apply chaos modulation
-     - Calculate frequency using fast exponential
-     - Generate waveform using appropriate method
-     - Output voltage (multiplied by 5.0)
-
-5. **Display Update**:
-   - Update display data for UI
-   - Update chaos LED brightness
-
-6. **History Tracking**:
-   - Store chaos drift values in circular buffer
-   - Update peak-hold value for visual representation
-
-## 7. Important Functions
-
-### `StFreqQ::mapToFreq`
-Converts normalized parameter value to frequency using logarithmic mapping:
-$$ f = 10 \cdot 600^{v} $$
-
-### `StFreqQ::mapFromFreq`
-Converts frequency back to normalized parameter value:
-$$ v = \frac{\log(f/10)}{\log(600)} $$
-
-### `process()`
-Main audio processing function that:
-- Reads parameters and CV inputs
-- Generates filtered noise for chaos drift
-- Processes each channel through waveform generation
-- Updates display data
-- Controls LED brightness
-
-### `genWave`
-Lambda function that generates waveforms with appropriate discontinuity handling using BLEP generators.
-
-## 8. Mathematical Implementation
-
-### Fast Exponential Approximation
-
-The fast exponential implementation uses bit manipulation:
 ```cpp
 union { float f; uint32_t i; } u;
 u.i = (uint32_t)((1 << 23) * (x + 126.94269504f));
 return u.f;
 ```
 
-This approximates $ 2^x $ with good accuracy for audio frequencies.
+This is accurate to ~1e-3 relative error, which is good enough for pitch.
 
-### Low-Pass Filter
+### Waveforms
 
-First-order low-pass filter:
-$$ y[n] = (1 - \alpha) \cdot y[n-1] + \alpha \cdot x[n] $$
+- **Sine**: $\sin(2\pi\phi)$
+- **Triangle**: $1 - 4|\phi - 0.5|$ with a 90° phase shift (so it starts at 0)
+- **Saw**: $1 - 2\phi$, with minBLEP correction at wrap
+- **Square**: $(\phi < pw ? 1 : -1)$, with minBLEP correction at both edges
 
-Where:
-$$ \alpha = 2\pi f_c \Delta t $$
+### minBLEP
 
-With $ f_c = 1.5\,Hz $ and $ \Delta t $ being the sample time.
+The minBLEP (minimum band-limited step) is a correction applied at discontinuities to reduce aliasing. For a saw wrap, it inserts a 2.0 discontinuity; for a square edge, it inserts a ±2.0 discontinuity. The DSP then adds the minBLEP output to the raw waveform.
 
-### BLEP Implementation
+### Chaos multiplier
 
-MinBLEP generators are used to correct discontinuities in sawtooth and square waveforms:
-- `blepRising`: Corrects rising edges
-- `blepFalling`: Corrects falling edges  
-- `blepSaw`: Corrects sawtooth discontinuities
+The multiplier is selected from a discrete table:
+
+$$
+\text{mult} = \{1, 2, 3, 5, 10\}
+$$
+
+So the chaos drift can be subtle (×1) or extreme (×10).
+
+### Pulse width
+
+The square pulse width is adjustable from 0.01 to 0.99:
+
+$$
+\text{pw} = \text{clamp}(\text{knob} + \text{pwCV} \cdot \text{atten} / 10, 0.01, 0.99)
+$$
+
+### CV range
+
+The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). This affects all CV inputs.
+
+## 4. Parameters and Controls
+
+### Knobs
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PITCH_PARAM` | 0 | 1 | 0.5 | Frequency (10 Hz .. 6 kHz) |
+| `CHAOS_PARAM` | 0 | 1 | 0 | Chaos depth |
+| `WAVE_PARAM` | 0 | 3 | 0 | Waveform |
+| `PW_PARAM` | 0 | 1 | 0.5 | Pulse width |
+| `CHAOS_MULT_PARAM` | 0 | 4 | 0 | Chaos multiplier |
+| `PITCH_ATTEN_PARAM` | −1 | 1 | 0 | Pitch CV attenuverter |
+| `CHAOS_ATTEN_PARAM` | −1 | 1 | 0 | Chaos CV attenuverter |
+| `WAVE_ATTEN_PARAM` | −1 | 1 | 0 | Wave CV attenuverter |
+| `PW_ATTEN_PARAM` | −1 | 1 | 0 | Pulse width CV attenuverter |
+
+### Switches
+
+| Parameter | Description |
+|-----------|-------------|
+| `CV_RANGE_PARAM` | ±5 V or ±10 V |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `CV_INPUT` | 1 V/oct pitch |
+| `PITCH_CV_INPUT` | Pitch modulation CV |
+| `CHAOS_CV_INPUT` | Chaos CV |
+| `WAVE_CV_INPUT` | Waveform select CV |
+| `PW_CV_INPUT` | Pulse width CV |
+| `CHAOS_RESET_INPUT` | Reset chaos drift |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `VCO_L_OUTPUT` | Left |
+| `VCO_R_OUTPUT` | Right |
+
+### Lights
+
+- `CHAOS_LIGHT` — Chaos activity
+
+### Menu
+
+- Frequency (Hz or note name)
+- Display mode (Note or Hz)
+
+### Enumerations
+
+- `ParamId`: Pitch, Chaos, ChaosMult, Wave, PW, PitchAtten, ChaosAtten, WaveAtten, PWAtten, CVRange
+- `InputId`: VOct, PitchCV, ChaosCV, WaveCV, PWCV, ChaosReset
+- `OutputId`: OutL, OutR
+- `LightId`: Chaos
+
+## 5. Inputs and Outputs
+
+### Inputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `CV_INPUT` | CV | 1 V/oct | Pitch (polyphonic) |
+| `PITCH_CV_INPUT` | CV | ±10 V | Pitch modulation |
+| `CHAOS_CV_INPUT` | CV | ±10 V | Chaos modulation |
+| `WAVE_CV_INPUT` | CV | ±10 V | Waveform selection |
+| `PW_CV_INPUT` | CV | ±10 V | Pulse width modulation |
+| `CHAOS_RESET_INPUT` | Gate | > 1 V | Reset chaos drift |
+
+### Outputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `VCO_L_OUTPUT` | Poly Audio | ±5 V | Left (polyphonic) |
+| `VCO_R_OUTPUT` | Poly Audio | ±5 V | Right (polyphonic) |
+
+## 6. Signal Processing Pipeline
+
+1. **Read base pitch** from FREQ knob.
+2. **Read controls** — Chaos, wave, pulse width, chaos multiplier, CV attens.
+3. **CV range scale** — 1.0 for ±5 V, 0.5 for ±10 V.
+4. **Chaos reset** — On rising edge, zero both drift values.
+5. **Update chaos** — Two independent one-pole filters on white noise.
+6. **Determine channels** — `max(1, CV_INPUT channels)`.
+7. **Grow voices array** if needed.
+8. **For each voice**:
+   - Read V/Oct, chaos CV, wave CV, PW CV.
+   - Compute total pitch for L and R.
+   - Compute frequency with fast 2^x.
+   - Compute phase increment.
+   - Determine wave index (quantized to 0..3).
+   - Determine PW.
+   - Render L and R with minBLEP.
+   - Write outputs.
+9. **LED** — Chaos drift × depth × gain.
+10. **Display** — History update.
+
+## 7. Important Functions
+
+### `StFreqQ::setDisplayValueString(std::string s)`
+
+Parses note names ("A4", "C#3") or frequencies ("440") into a knob value.
+
+### `genWave(float &phase, float &lastPhase, int waveIdx, float pw, ...)`
+
+Generates one sample of the waveform with minBLEP corrections.
+
+### `Stagger::process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+## 8. Mathematical Implementation
+
+### Fast 2^x
+
+```cpp
+u.i = (uint32_t)((1 << 23) * (x + 126.94269504f));
+```
+
+### Phase increment
+
+$$
+\Delta\phi = f \cdot \Delta t
+$$
+
+### Frequency (from pitch)
+
+$$
+f = 261.626 \cdot 2^{\text{pitch}}
+$$
+
+### Chaos filter
+
+$$
+\text{chaos} \leftarrow (1 - \alpha) \text{chaos} + \alpha w, \quad \alpha = \min(2\pi f_c/f_s, 0.5)
+$$
+
+### Pulse width
+
+$$
+pw = \text{clamp}(\text{knob} + \text{cv} \cdot \text{atten}/10, 0.01, 0.99)
+$$
+
+### Wave selection
+
+$$
+\text{wave} = \text{clamp}(\text{knob} + \text{cv} \cdot \text{atten} \cdot 2/5, 0, 3)
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-The module uses optimized algorithms including:
-- Fast exponential approximation
-- Minimal floating-point operations per sample
-- Efficient vector processing for polyphonic channels
+- Per voice: 2 channels × (phase + wave + minBLEP) ≈ 2 × 30 = 60 flops
+- Max 16 voices × 60 = 960 flops/sample
+- Chaos filters: 4 flops
+- Total: ~1000 flops/sample worst case
 
 ### Memory Allocation
 
-- Uses fixed-size arrays for history tracking (`driftHist`)
-- Pre-allocated voice vector that resizes as needed
-- No dynamic allocation during audio processing
+- `voices` is a `std::vector` that grows to the channel count (max 16)
+- `Voice` contains 6 minBLEP generators (each ~64 floats) ≈ 400 bytes/voice
+- Total: ~6.4 KB
 
 ### Buffers
 
-- Circular buffer of size `ST_DRIFT_N` (128) for chaos history display
-- Voice vector that grows with number of channels
+- `driftHist[128]`: 512 bytes
+- Per-voice state: ~400 bytes × 16 = 6.4 KB
 
 ### Real-time Processing
 
-All operations are designed to be real-time safe:
-- No blocking operations
-- Fixed-size memory allocations
-- Efficient algorithms
+- All loops bounded by 16 (voices)
+- No allocation after the vector has grown once
+- minBLEP is a fixed-size ring buffer
 
 ### Thread Safety
 
-The module is designed for single-threaded audio processing. Display data is written by audio thread and read by UI thread, but no synchronization is implemented.
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Uses `std::nearbyint` for rounding to avoid floating-point precision issues
-- Clamps values to prevent out-of-bounds errors
-- Uses `math::clamp` for all parameter ranges
+- `fastExp2` is accurate for `x ∈ [-4, 4]` (which covers the pitch range)
+- `!std::isfinite` on output resets voice state
+- minBLEP keeps the square and saw bounded
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `rack.hpp`: VCV Rack core library
-- `<cmath>`: Standard math functions
-- `<cstdio>`, `<cstring>`: Standard C I/O and string operations
-- `<cstdint>`: Fixed-width integer types
-- `<vector>`, `<map>`, `<string>`, `<regex>`, `<algorithm>`, `<random>`: STL containers and algorithms
-- `"dsp/minblep.hpp"`: MinBLEP DSP utilities
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<cstdint>`, `<vector>`, `<map>`, `<string>`, `<regex>`, `<algorithm>`, `<random>`
+- `"dsp/minblep.hpp"` — minBLEP generator
 
-### Classes and Types
+### External Classes
 
-- `rack::engine::Module`: Base module class
-- `rack::engine::ParamQuantity`: Parameter quantity base class
-- `dsp::MinBlepGenerator<16, 16>`: BLEP generator class
-- `std::mt19937`: Mersenne Twister random number generator
-- `std::uniform_real_distribution<float>`: Uniform distribution for noise generation
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `rack::dsp::MinBlepGenerator<16, 16>`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-The **Stagger** module is a stereo VCO with chaotic pitch modulation capabilities. It generates four waveform types (sine, triangle, sawtooth, square) with independent left/right channel processing and chaotic drift that creates time-varying pitch modulation. The module supports polyphonic inputs/outputs, CV modulation with attenuverters, and provides visual feedback through a display showing current parameters and chaos history. The implementation uses optimized DSP techniques including fast exponential approximation, first-order filtering for noise shaping, and MinBLEP correction for waveform discontinuities to ensure high-quality audio output while maintaining real-time performance.
+`Stagger` is a VCO whose defining feature is its **dual-channel drift**: each voice runs two independent oscillators with slow filtered random pitch drift, so the two outputs are never perfectly in tune. This gives a "staggering" stereo effect — the pitch slowly wobbles around the base note, and the L/R channels drift in different directions.
+
+The minBLEP anti-aliasing is essential: without it, the saw and square waves would alias badly at high frequencies. The `dsp::MinBlepGenerator` from Rack handles this efficiently.
+
+The chaos multiplier is a nice touch: ×1 gives subtle drift, ×10 gives wild detuning. The reset input lets you snap back to zero if the drift has wandered too far.
+
+The main limitations are: the drift filter is fixed at 1.5 Hz (no rate control), and the chaos CV is a simple offset (no per-voice independence). But for a "drifty" VCO, this is exactly right.

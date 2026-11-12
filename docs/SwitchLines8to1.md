@@ -1,14 +1,23 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: SwitchLines8to1.cpp
-Generated: 2026-11-04 06:37
 -->
 
 # SwitchLines8to1
 
 ## 1. Overview
 
-The `SwitchLines8to1` module is a multi-channel switch matrix that selects one of eight input signals to route to a single output. It features sequenced switching with configurable direction, length, and crossfade behavior. The module supports both automatic clocked stepping and manual step triggering, with visual feedback showing the current selection, history, and signal levels.
+`SwitchLines8to1` is a 24 HP 8-to-1 sequential switch. Eight signal inputs (CH_INPUT 1..8); exactly one is routed to OUT. A clocked step sequencer (LENGTH, START, DIR: forward/reverse/pendulum/random) selects the input. FADE adds a short crossfade between the previous and the new selection (implemented by blending `fromV` → live input value over `fadeT`).
+
+Key features:
+- 8 signal inputs → 1 output (one at a time)
+- Clocked step sequencer with LENGTH, START, DIR
+- 4 direction modes: forward, reverse, pendulum, random
+- Crossfade between old and new selection
+- One gate per input (high when selected)
+- EOC trigger at end of cycle
+- Manual STEP button
+- Live routing display: input meters, converging curves, output bar, history strip
 
 ## Module Screenshot
 
@@ -17,210 +26,220 @@ The `SwitchLines8to1` module is a multi-channel switch matrix that selects one o
 ## 2. Architecture
 
 ### Main Classes
-- **`SwitchLines8to1`**: Core module class inheriting from `rack::Module`
-- **`SwitchLines8to1Widget`**: UI widget class inheriting from `rack::ModuleWidget`
-- **Anonymous namespace helpers**: Drawing utilities and custom widgets
+
+- `SwitchLines8to1`: Core module class inheriting from `rack::Module`
+- `SWPanelBackground`: Static panel artwork
+- `SWKnobArcs`: Live value arcs
+- `SWDisplayWidget`: Live routing display
 
 ### Inheritance
+
 - `SwitchLines8to1` inherits from `rack::Module`
-- `SwitchLines8to1Widget` inherits from `rack::ModuleWidget`
+- All UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
-- **Parameter IDs**: Enumerated parameters for LENGTH, START, DIR, FADE, STEP
-- **Input IDs**: Clock, Reset, 8 channel inputs (CH_INPUT + i)
-- **Output IDs**: Single output, End-of-cycle trigger, 8 gate outputs (GATE_OUTPUT + i)
-- **Light IDs**: Step light indicator
+### State (grouped)
 
-### Relationships
-- `SwitchLines8to1Widget` owns and manages:
-  - `SWPanelBackground`
-  - `SWKnobArcs`
-  - `SWDisplayWidget`
-  - All controls (knobs, buttons, ports)
-- `SwitchLines8to1` maintains state for:
-  - Sequencer position and direction
-  - Crossfade progress
-  - Input voltage history
-  - Trigger generators
+| Group | Storage |
+|-------|---------|
+| Playhead | `int pos`, `dirSign` |
+| Selection | `int curCh`, `prevCh` |
+| Crossfade | `float fromV`, `xf` |
+| Output | `float outV` |
+| Display | `float vin[8]`, `bool linked[8]`, `float pulse`, `clockFlash`, `eocFlash` |
+| History | `int hist[16]`, `histHead`, `histCount`, `stepCount` |
+| Settings | `int vLen, vStart, vDir`, `float vFadeT` |
+| Triggers | `dsp::SchmittTrigger clockTrig, stepTrig, resetTrig`, `dsp::PulseGenerator eocPulse` |
 
 ## 3. DSP Theory
 
-### Algorithms
-- **Sequencer Logic**: Implements four switching directions:
-  - Forward (linear)
-  - Reverse (linear)
-  - Pendulum (bidirectional)
-  - Random (uniform distribution)
+### Clocked step sequencer
 
-### Mathematical Equations
-Crossfade progression:
-$$
-xf_{n+1} = \min(1.0, xf_n + \frac{\Delta t}{\tau})
-$$
+Same as `SwitchLines1to8`: on each clock, advance position according to direction (forward/reverse/pendulum/random). The actual channel is `curCh = (S + pos) % 8`.
 
-Where $\tau$ is the fade time constant calculated as:
+### Crossfade
+
+When the selection changes:
+
 $$
-\tau = 0.002 + \text{FADE}^2 \times 0.4
+\text{fromV} = \text{outV}, \quad \text{xf} = 0
 $$
 
-### Filters
-None explicitly implemented.
+Each sample, `xf` increases by `Δt / T_fade` (clamped to 1), and the output is:
 
-### Oscillators
-None explicitly implemented.
+$$
+\text{out} = \text{fromV} \cdot (1 - \text{xf}) + \text{vin}[\text{curCh}] \cdot \text{xf}
+$$
 
-### Delay Lines
-- History buffer: 16-element circular buffer storing past channel selections
-- Input voltage history for display purposes
+So the old value fades out while the new input fades in.
 
-### Feedback Systems
-- Crossfade feedback from previous to current input
-- Clock and reset trigger detection using Schmitt triggers
+### Signal routing
 
-### Modulation
-- Parameters modulated via CV inputs (LENGTH, START, DIR, FADE)
-- Manual step button triggers sequencing
+All 8 inputs are read every sample (because the fade uses `vin[curCh]`, and pre-computing all inputs is cheap). The output is the crossfaded mix.
 
-### Random Processes
-- Random direction uses uniform distribution over [0, L-1] where L is sequence length
-- Excludes current position from selection to avoid staying on same input
+Gates are 1 for `curCh`, 0 otherwise.
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **LENGTH**: 1-8 steps (default: 8)
-- **START**: 1-8 input (default: 1)
-- **DIR**: Direction selector (0=Forward, 1=Reverse, 2=Pendulum, 3=Random)
-- **FADE**: Crossfade time (0-1, default: 0)
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `LENGTH_PARAM` | 1 | 8 | 8 | Sequence length |
+| `START_PARAM` | 1 | 8 | 1 | First input |
+| `DIR_PARAM` | 0 | 3 | 0 | Direction |
+| `FADE_PARAM` | 0 | 1 | 0 | Crossfade (0 = off) |
 
 ### Buttons
-- **STEP**: Manual clock step button
 
-### CV Inputs
-- **CLOCK**: Clock input for automatic stepping
-- **RESET**: Reset input to restart sequence
-- **CH_INPUT + i**: 8 channel inputs (i = 0..7)
+| Button | Description |
+|--------|-------------|
+| `STEP_PARAM` | Manual clock step |
 
-### Gates
-- **GATE_OUTPUT + i**: 8 gate outputs, active when corresponding input is selected
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `CLOCK_INPUT` | Clock |
+| `RESET_INPUT` | Reset |
+| `CH_INPUT + 0..7` | 8 signal inputs |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUT_OUTPUT` | Selected input |
+| `EOC_OUTPUT` | End of cycle |
+| `GATE_OUTPUT + 0..7` | 8 gates |
+
+### Lights
+
+- `STEP_LIGHT` — Clock flash
 
 ### Enumerations
-- `DIR_PARAM`: Direction enum {Forward, Reverse, Pendulum, Random}
 
-### Parameter Ranges and Defaults
-- LENGTH: 1-8 steps, default 8
-- START: 1-8 inputs, default 1
-- DIR: 0-3, default 0 (Forward)
-- FADE: 0.0-1.0, default 0.0
-- STEP: Button (no CV control)
+- `ParamId`: Length, Start, Dir, Fade, Step
+- `InputId`: Clock, Reset, CH_INPUT (8)
+- `OutputId`: Out, EOC, GATE_OUTPUT (8)
+- `LightId`: Step
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-- **CLOCK_INPUT**: Clock signal (0.1V threshold)
-- **RESET_INPUT**: Reset signal (0.1V threshold)
-- **CH_INPUT + i**: 8 channel inputs, voltage range ±10V
-- **(CV inputs)**: Parameters modulated via CV
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `CLOCK_INPUT` | Gate | > 1 V | Clock |
+| `RESET_INPUT` | Gate | > 1 V | Reset |
+| `CH_INPUT + 0..7` | CV/Audio | ±10 V | 8 inputs |
 
 ### Outputs
-- **OUT_OUTPUT**: Selected input signal, voltage range ±10V
-- **EOC_OUTPUT**: End-of-cycle trigger pulse (10V)
-- **GATE_OUTPUT + i**: 8 gate outputs, 10V when corresponding input selected
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUT_OUTPUT` | CV/Audio | ±10 V | Selected input |
+| `EOC_OUTPUT` | Gate | 0/10 V | End of cycle |
+| `GATE_OUTPUT + 0..7` | Gate | 0/10 V | 8 gates |
 
 ## 6. Signal Processing Pipeline
 
-1. **Parameter Processing**: Read and clamp parameter values
-2. **Trigger Detection**: Process clock and reset inputs using Schmitt triggers
-3. **Step Logic**: Execute step function based on trigger or manual button press
-4. **Crossfade Calculation**: Update crossfade progress over time
-5. **Signal Routing**: Select current input and apply crossfade to output voltage
-6. **Gate Generation**: Set gate outputs for currently selected channel
-7. **Trigger Generation**: Generate end-of-cycle pulse when sequence completes
-8. **Display Updates**: Update history buffer and visual state
+1. **Read params** — Length, start, dir, fade.
+2. **Reset detection** — Reset to start.
+3. **Clock edge** — Advance position, capture `fromV`, reset `xf`.
+4. **Read all inputs** — Store in `vin[]`.
+5. **Crossfade** — Update `xf` and compute `outV`.
+6. **Write outputs** — OUT, gates, EOC.
+7. **Update display** — Meter levels, flashes.
 
 ## 7. Important Functions
 
-### `doReset()`
-Resets sequencer position, direction, and clears crossfade state.
+### `doStep(int S, int L, int dir, float fadeT)`
 
-### `doStep()`
-Executes one step in the sequence based on current direction mode:
-- Forward: Increment position
-- Reverse: Decrement position
-- Pendulum: Bidirectional stepping with boundary reversal
-- Random: Uniform random selection excluding current position
+Advances the playhead and starts the crossfade.
 
-### `process()`
-Main processing function that:
-- Reads parameters and inputs
-- Handles trigger detection
-- Updates sequencer state
-- Calculates crossfade progression
-- Routes signals to outputs
+### `doReset(int S, int L, int dir)`
+
+Resets to the start.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Crossfade Time Calculation
+### Position advance
+
+Same as `SwitchLines1to8`.
+
+### Channel mapping
+
 $$
-\tau = 0.002 + \text{FADE}^2 \times 0.4
+\text{curCh} = (S + \text{pos}) \bmod 8
 $$
 
-### Crossfade Progress Update
+### Crossfade
+
 $$
-xf_{n+1} = \min(1.0, xf_n + \frac{\Delta t}{\tau})
+\text{outV} = \text{fromV}(1 - \text{xf}) + \text{vin}[\text{curCh}] \cdot \text{xf}
 $$
 
-### Random Selection
-For random direction:
+### Fade time
+
 $$
-\text{new\_pos} = \text{clamp}(\text{random\_uniform}(0, L-1), 0, L-1)
+T_{\text{fade}} = \begin{cases} 0 & \text{fade} < 0.01 \\ 0.002 + \text{fade}^2 \cdot 0.4 & \text{fade} \ge 0.01 \end{cases}
 $$
-Where new_pos ≠ current position.
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Minimal computational overhead
-- Efficient parameter clamping and validation
-- Simple arithmetic operations only
+### CPU Usage
+
+- Per sample: 8 input reads + 1 crossfade + 8 gate writes ≈ 30 flops
+- Per clock edge: 1 position advance + 1 history update ≈ 20 flops
+- Total: ~30 flops/sample
 
 ### Memory Allocation
-- Static buffers for history (16 elements)
-- No dynamic allocation in main processing loop
+
+- All state fixed-size
+- No allocation in `process()`
 
 ### Buffers
-- Circular history buffer of 16 integers
-- Input voltage array of 8 floats
-- Display state arrays for rendering
+
+- `vin[8]`, `linked[8]`, `hist[16]`: 32 floats
 
 ### Real-time Processing
-- All operations performed within real-time constraints
-- No blocking operations or heavy computations
+
+- All loops bounded by 8
+- No allocation, no blocking
 
 ### Thread Safety
-- Single-threaded operation (main audio thread)
-- No concurrent access to module state
+
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
-- Parameter clamping prevents out-of-bounds access
-- Proper handling of floating-point arithmetic
-- Clamp values to valid ranges before processing
+
+- `xf` clamped to `[0, 1]`
+- `fadeT = 0` gives instant snap
+- No feedback
 
 ## 10. Dependencies
 
-### Libraries and Headers
-- `rack.hpp`: VCV Rack core library
-- `dsp::SchmittTrigger`: Trigger detection utilities
-- `dsp::PulseGenerator`: Pulse generation for EOC output
-- `string::f`: String formatting utilities
-- `random::uniform()`: Random number generation
-- `math::clamp()`: Value clamping utilities
+### Libraries/Headers
+
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstdint>`, `<cstring>`, `<algorithm>`, `<memory>`
 
 ### External Classes
-- `Module`, `ModuleWidget`: Base VCV Rack classes
-- `ParamQuantity`, `Input`, `Output`, `Light`: VCV Rack I/O management
-- `TransparentWidget`, `DrawArgs`: UI drawing infrastructure
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `rack::dsp::SchmittTrigger`, `rack::dsp::PulseGenerator`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::plate`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::chip`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-The `SwitchLines8to1` module implements a sophisticated 8-to-1 switch matrix with sequenced switching capabilities. It provides four distinct direction modes (forward, reverse, pendulum, random) with configurable sequence length and start position. The module features smooth crossfading between inputs, visual feedback through an integrated display showing input levels, current selection, history, and control status. The design emphasizes real-time performance with minimal CPU usage while providing rich modulation capabilities through CV inputs and manual controls.
+`SwitchLines8to1` is the inverse of `SwitchLines1to8`: it takes 8 inputs and routes one to the output, selecting via a clocked step sequencer. The crossfade works in the opposite direction: instead of fading per-output gains, it fades from the previous output value to the new input value.
+
+The **single-value crossfade** is simpler than the per-output gain approach: it only stores one `fromV` and one `xf`, and the output is a single blend. This is more efficient (30 flops vs 50 flops), but it means there's no way to fade between two simultaneous inputs (only one at a time).
+
+The display is well-designed: the input meters show all 8 input levels, the converging curves show the signal flowing from the selected input to the hub, and the output bar shows the routed level. The history strip shows the last 16 selections.
+
+The main limitations are: no CV inputs, and the crossfade is linear (not equal-power), so at xf = 0.5 the output is `(fromV + vin[curCh])/2`, which is quieter than either endpoint. But for a sequential switch, this is excellent.

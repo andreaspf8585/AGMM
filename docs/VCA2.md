@@ -1,22 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: VCA2.cpp
-Generated: 2026-11-04 06:37
 -->
 
 # VCA2
 
 ## 1. Overview
 
-The **VCA2** module is a dual-channel Voltage-Controlled Amplifier (VCA) designed for the VCV Rack modular synthesizer platform. It allows users to control the amplitude of two independent audio signals using envelope control voltages, with adjustable gain limits per channel.
+`VCA2` is a 12 HP dual VCA with a per-channel gain-limit knob. Each channel has an audio input, an envelope CV input (0–10 V), and a gain-limit knob (0×..2×). The display shows two vertical "limit bars" that double as interactive controls (click/drag to set the limit, double-click to reset to 1×) and as envelope meters.
 
-Each channel supports:
-- Audio input
-- Envelope CV input (0–10V)
-- Output signal
-- Interactive limit bar for setting and visualizing gain limits
-
-The module includes a graphical user interface (GUI) that displays real-time information such as envelope percentage relative to the limit and output peak levels.
+Key features:
+- 2 independent VCA channels
+- Per-channel envelope CV input (unpatched = unity gain)
+- Per-channel gain-limit knob (0×..2×)
+- Interactive limit bars (click/drag to set, double-click to reset)
+- Live output peak meter (thin violet line)
+- CV-able VCA with no distortion (linear)
+- Bypass when unpatched
 
 ## Module Screenshot
 
@@ -26,211 +26,232 @@ The module includes a graphical user interface (GUI) that displays real-time inf
 
 ### Main Classes
 
-| Class | Description |
-|-------|-------------|
-| `VCA2` | Core module class inheriting from `rack::Module`. Implements signal processing logic and parameter handling. |
-| `V2Panel` | Widget for drawing the main panel background including title, bezel, and labels. |
-| `V2Display` | Widget for drawing the screen area with channel labels. |
-| `V2Bar` | Interactive limit bar widget for each channel allowing user adjustment of gain limits via mouse drag or double-click reset. |
-| `VCA2Widget` | Widget container class that assembles all UI elements (`V2Panel`, `V2Display`, `V2Bar`) and connects inputs/outputs to the module. |
+- `VCA2`: Core module class inheriting from `rack::Module`
+- `V2Panel`: Static panel artwork
+- `V2Display`: Static display background (channel captions)
+- `V2Bar`: Interactive vertical limit bar
 
 ### Inheritance
 
-- `VCA2` inherits from `rack::Module`.
-- All GUI widgets inherit from `rack::TransparentWidget`.
+- `VCA2` inherits from `rack::Module`
+- All UI widgets inherit from `rack::TransparentWidget`
 
-### Structures
+### State (grouped)
 
-- `VCA2`: Main module structure with parameters, inputs, outputs, and internal state.
-- `V2Bar`: Interactive limit bar widget with drag/double-click behavior.
-
-### Relationships Between Classes
-
-- `VCA2Widget` owns instances of:
-  - `V2Panel`
-  - `V2Display`
-  - Two `V2Bar` widgets (one per channel)
-  - Input/output ports
-- Each `V2Bar` holds a pointer to its associated `VCA2` module and knows which channel it controls.
-- The `VCA2` module stores:
-  - Parameter values (`PARAM_LIMIT1`, `PARAM_LIMIT2`)
-  - Input voltage data (`INPUT_AUDIO1`, `INPUT_AUDIO2`, `INPUT_ENV1`, `INPUT_ENV2`)
-  - Output voltage data (`OUTPUT_1`, `OUTPUT_2`)
-  - Display-related state: `barFillPercent`, `outPeak`, `envConn`
-
-### Module Organization
-
-The module is organized into:
-- Core DSP logic in the `process()` method of `VCA2`
-- GUI rendering code in anonymous namespace functions
-- Widget assembly logic in `VCA2Widget` constructor
+| Group | Storage |
+|-------|---------|
+| Display | `float barFillPercent[2]`, `float outPeak[2]`, `bool envConn[2]` |
 
 ## 3. DSP Theory
 
-This module implements a basic **voltage-controlled amplifier** with envelope modulation and gain limiting.
+### Per-channel gain
 
-### Algorithm
+If the ENV input is patched:
 
-For each channel (ch = 0 or 1):
+$$
+g = \text{clamp}(\text{env}/10, 0, 1) \cdot \text{limit}
+$$
 
-1. If no envelope is connected:
-   - Output = Input audio signal
-   - Bar fill percentage = 100%
+$$
+\text{out} = \text{in} \cdot g
+$$
 
-2. If envelope is connected:
-   - Normalize envelope voltage from 0–10V to 0–1
-   - Apply gain: `out = in * envNorm * limit`
-   - Calculate bar fill percentage based on normalized envelope and limit:
-     $$
-     \text{fill} = 
-     \begin{cases}
-     \left(\frac{\text{env}}{\text{limit} \cdot 10}\right) \times 100\%, & \text{if } \text{limit} > 0 \\
-     0, & \text{otherwise}
-     \end{cases}
-     $$
+If the ENV input is NOT patched:
 
-### Filters
+$$
+\text{out} = \text{in}
+$$
 
-None implemented.
+(unity gain, full bar).
 
-### Oscillators
+### Bar fill
 
-None implemented.
+The bar fill is calculated relative to the limit:
 
-### Delay Lines
+$$
+\text{fill} = \frac{\text{env}}{\text{limit} \cdot 10}
+$$
 
-None implemented.
+clamped to `[0, 1]`. So when env = limit*10, the bar is full.
 
-### Feedback Systems
+### Output peak meter
 
-None implemented.
+A slow-decay peak follower:
 
-### Modulation
+$$
+\text{peak} \leftarrow \max(|\text{out}|, \text{peak} \cdot (1 - 5\Delta t))
+$$
 
-Envelope modulation is used to control gain. The envelope CV input is normalized from 0–10V range to 0–1 before multiplication with the audio signal and limit.
+### Interactive limit bar
 
-### Random Processes
+The `V2Bar` widget converts vertical drag position to a limit value:
 
-None implemented.
+$$
+\text{limit} = \left(1 - \frac{y}{H}\right) \cdot 2
+$$
+
+So y = 0 (top) → limit = 2, y = H (bottom) → limit = 0.
+
+Double-click resets to 1.
 
 ## 4. Parameters and Controls
 
-| Parameter | ID | Description | Range | Default |
-|----------|----|-------------|-------|---------|
-| `PARAM_LIMIT1` | 0 | Channel 1 gain limit | 0–2x | 1x |
-| `PARAM_LIMIT2` | 1 | Channel 2 gain limit | 0–2x | 1x |
+### Knobs
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `PARAM_LIMIT1` | 0 | 2 | 1 | Channel 1 gain limit |
+| `PARAM_LIMIT2` | 0 | 2 | 1 | Channel 2 gain limit |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `INPUT_AUDIO1` | Channel 1 audio |
+| `INPUT_AUDIO2` | Channel 2 audio |
+| `INPUT_ENV1` | Channel 1 envelope CV |
+| `INPUT_ENV2` | Channel 2 envelope CV |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUTPUT_1` | Channel 1 |
+| `OUTPUT_2` | Channel 2 |
 
 ### Enumerations
 
-```cpp
-enum ParamId { PARAM_LIMIT1, PARAM_LIMIT2, PARAMS_LEN };
-enum InputId { INPUT_AUDIO1, INPUT_AUDIO2, INPUT_ENV1, INPUT_ENV2, INPUTS_LEN };
-enum OutputId { OUTPUT_1, OUTPUT_2, OUTPUTS_LEN };
-enum LightId { LIGHTS_LEN };
-```
-
-### Parameter Ranges
-
-- Gain limits are clamped between 0 and 2.
-- Default value for both channels is 1x.
+- `ParamId`: Limit1, Limit2
+- `InputId`: Audio1, Audio2, Env1, Env2
+- `OutputId`: Out1, Out2
 
 ## 5. Inputs and Outputs
 
-| Name | ID | Type | Voltage Range | Description |
-|------|----|------|---------------|-------------|
-| `INPUT_AUDIO1` | 0 | Audio In | ±10V typical | Channel 1 audio input |
-| `INPUT_AUDIO2` | 1 | Audio In | ±10V typical | Channel 2 audio input |
-| `INPUT_ENV1` | 2 | CV In | 0–10V | Channel 1 envelope control voltage |
-| `INPUT_ENV2` | 3 | CV In | 0–10V | Channel 2 envelope control voltage |
-| `OUTPUT_1` | 0 | Audio Out | ±10V typical | Channel 1 output |
-| `OUTPUT_2` | 1 | Audio Out | ±10V typical | Channel 2 output |
+### Inputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `INPUT_AUDIO1` | Audio | ±10 V | Channel 1 audio |
+| `INPUT_AUDIO2` | Audio | ±10 V | Channel 2 audio |
+| `INPUT_ENV1` | CV | 0–10 V | Channel 1 envelope |
+| `INPUT_ENV2` | CV | 0–10 V | Channel 2 envelope |
+
+### Outputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUTPUT_1` | Audio | ±10 V | Channel 1 |
+| `OUTPUT_2` | Audio | ±10 V | Channel 2 |
+
+### Bypass
+
+`configBypass(INPUT_AUDIO1, OUTPUT_1)` and `configBypass(INPUT_AUDIO2, OUTPUT_2)`.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Reading**: Read audio and envelope voltages from corresponding inputs.
-2. **Envelope Normalization**: Convert envelope CV (0–10V) to normalized value (0–1).
-3. **Gain Calculation**:
-   - If no envelope connected: output = input audio
-   - Else: output = input audio × normalized envelope × limit
-4. **Bar Fill Percentage Update**:
-   $$
-   \text{fill} = 
-   \begin{cases}
-   \left(\frac{\text{env}}{\text{limit} \cdot 10}\right) \times 100\%, & \text{if } \text{limit} > 0 \\
-   0, & \text{otherwise}
-   \end{cases}
-   $$
-5. **Peak Detection**: Update peak meter using leaky integrator:
-   $$
-   \text{peak}[ch] = \max(|\text{out}|, \text{peak}[ch] \cdot (1 - 5 \cdot \Delta t))
-   $$
+1. **For each channel**:
+   - Read audio input.
+   - Check if ENV is connected.
+   - If connected: compute `g = clamp(env/10, 0, 1) * limit`, `out = in * g`, `fill = env/(limit*10)`.
+   - If not connected: `out = in`, `fill = 1`.
+   - Write output.
+   - Update peak follower.
 
 ## 7. Important Functions
 
-| Function | Responsibility |
-|---------|----------------|
-| `VCA2::process()` | Main DSP loop; handles input/output processing and bar fill updates |
-| `V2Bar::onButton()` | Handles mouse press to initiate dragging of limit bar |
-| `V2Bar::onDragMove()` | Updates limit value during drag operation |
-| `V2Bar::onDoubleClick()` | Resets limit to 1x on double-click |
-| `VCA2Widget::VCA2Widget()` | Assembles UI components and connects ports |
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+### `V2Bar::apply()`
+
+Converts `dragY` to a limit value and writes it to the module.
+
+### `V2Bar::drawLayer(NVGcontext *vg, int layer)`
+
+Draws the interactive bar.
 
 ## 8. Mathematical Implementation
 
-### Gain Calculation
-
-For channel `ch`:
-$$
-\text{out} = 
-\begin{cases}
-\text{in}, & \text{if } \text{envConn}[ch] == \text{false} \\
-\text{in} \times \left(\frac{\text{env}}{10}\right) \times \text{limit}, & \text{if } \text{envConn}[ch] == \text{true}
-\end{cases}
-$$
-
-### Bar Fill Percentage
+### Gain
 
 $$
-\text{fill} = 
-\begin{cases}
-\left(\frac{\text{env}}{\text{limit} \cdot 10}\right) \times 100\%, & \text{if } \text{limit} > 0 \\
-0, & \text{otherwise}
-\end{cases}
+g = \text{clamp}(\text{env}/10, 0, 1) \cdot \text{limit}
 $$
 
-### Peak Detection
+### Output
 
-Leaky integrator:
 $$
-\text{peak}[ch] = \max(|\text{out}|, \text{peak}[ch] \cdot (1 - 5 \cdot \Delta t))
+\text{out} = \text{in} \cdot g
+$$
+
+### Bar fill
+
+$$
+\text{fill} = \text{clamp}\left(\frac{\text{env}}{\text{limit} \cdot 10}, 0, 1\right)
+$$
+
+### Peak follower
+
+$$
+\text{peak} \leftarrow \max(|\text{out}|, \text{peak} \cdot (1 - 5\Delta t))
+$$
+
+### Interactive limit
+
+$$
+\text{limit} = (1 - y/H) \cdot 2
 $$
 
 ## 9. Performance and Optimization
 
-- **CPU Usage**: Minimal; only performs simple arithmetic operations per sample.
-- **Memory Allocation**: Static allocation used for all data structures.
-- **Buffers**: No dedicated buffers required; uses built-in VCV Rack input/output buffers.
-- **Real-time Processing**: Designed for real-time audio processing with fixed-size loops.
-- **Thread Safety**: Module assumes single-threaded access during `process()` call.
-- **Numerical Stability**: Clamp operations prevent invalid values; normalized envelope ensures bounded gain.
+### CPU Usage
+
+- Per sample: 2 channels × (read + conditional + write) ≈ 20 flops
+- Total: ~20 flops/sample
+
+### Memory Allocation
+
+- No allocation ever
+- Fixed-size state
+
+### Buffers
+
+- 2 × 3 floats for the display state
+
+### Real-time Processing
+
+- O(1) per channel
+- No allocation, no blocking
+
+### Thread Safety
+
+- All state written by audio thread, read by UI thread via torn reads
+- The interactive bar writes to `params[PARAM_LIMIT]` from the UI thread (which is a data race with the audio thread, but Rack's parameters are `std::atomic`-like)
+
+### Numerical Stability
+
+- Gain clamped to `[0, 1]`
+- `limit` clamped to `[0, 2]`
+- No feedback, no accumulation
 
 ## 10. Dependencies
 
 ### Libraries/Headers
 
-- `rack.hpp`: Core VCV Rack API
-- `<cmath>`: Standard math functions (`std::fabs`, `std::max`)
-- `<cstdio>`: Standard I/O (used in `snprintf`)
-- `<cstring>`: String operations (not used directly)
-- `<algorithm>`: Standard algorithms (`std::clamp`)
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### Classes
+### External Classes
 
-- `rack::Module`
-- `rack::TransparentWidget`
-- `rack::Vec`, `rack::NVGcontext`, `rack::DrawArgs`
-- `rack::ButtonEvent`, `rack::DragMoveEvent`, `rack::DoubleClickEvent`
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::plate`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The **VCA2** module is a dual-channel voltage-controlled amplifier with envelope modulation and adjustable gain limits. It provides real-time visualization of envelope percentage relative to the limit and output peak levels through an interactive GUI. The DSP algorithm computes output signals using normalized envelope control voltages multiplied by input audio and channel-specific gain limits, with optional unity gain when no envelope is connected. The module supports both analog-style modulation and digital precision in its calculations, making it suitable for dynamic audio shaping within a modular synthesizer environment.
+`VCA2` is a simple dual VCA with a twist: the gain limit is adjustable, and the limit bars are interactive. This is useful for patches where you want a VCA that can't go above a certain level (e.g., to protect downstream modules or to limit the dynamic range of a modulation source).
+
+The **interactive bars** are the standout feature: instead of a knob, you drag directly on the display to set the limit, and double-click to reset. This is faster and more intuitive than a knob for this particular parameter.
+
+The main limitations are: no CV input for the limit (only manual), and no smoothing on the limit (so fast drags cause zipper noise). But for a simple utility VCA, this is excellent.

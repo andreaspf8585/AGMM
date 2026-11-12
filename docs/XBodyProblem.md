@@ -1,182 +1,299 @@
-# XBodyProblem — N-Body Gravity LFO for VCV Rack
+<!--
+AGMM AUTOMATIC DOCUMENTATION
+Source: XBodyProblem.cpp
+-->
 
-XBodyProblem is a 28 HP generative modulation source that simulates an **N-body gravitational system** in a unit square and turns the bodies' motion into CV. Instead of a fixed waveform, you get chaotic, quasi-periodic, and emergent movement — useful as a slow LFO, a random source, a stereo modulator, or a polyphonic controller for several parameters at once.
+# XBodyProblem
 
-Each body's X position, Y position, speed, and wall-contact events are available as **polyphonic outputs**, so a single module can modulate many targets with correlated but distinct signals.
+## 1. Overview
+
+`XBodyProblem` is a 28 HP N-body gravity LFO that simulates 2 to 10 point masses in a unit square under mutual Newtonian gravity. It is driven as a polyphonic LFO: per-body X, Y, speed, and wall-event triggers are emitted on four separate polyphonic outputs, so a single cable can drive up to 10 independent modulation destinations. The simulation state persists through patch reloads, so a saved patch continues the exact trajectory.
+
+Key features:
+- 2 – 10 point masses under mutual gravity, in a unit square
+- Leapfrog integrator with sub-stepping (up to 16 substeps/sample)
+- Wrap-around or bounce walls
+- Equal or random per-body masses
+- Polyphonic X / Y / SPEED / EVENT outputs
+- Reset and Kick buttons (RESET also on a trigger input)
+- 220 × 220 square display with trails, gravity links, and readouts
 
 ## Module Screenshot
 
-![XBodyProblem VCV Rack Module](images/XBodyProblem.png)
+![XBodyProblem VCV Rack Module](images/xbodyproblem.png)
 
----
+## 2. Architecture
 
-## Features at a glance
+### Main Classes
 
-- **2 to 10 gravitating bodies**, each with its own position, velocity, and (optionally) mass.
-- **Leapfrog integration** with adaptive substepping for stable, energy-conserving motion.
-- **Two wall modes**: wrap-around (Pac-Man) or elastic bounce.
-- **Equal or random masses** — random masses make the system more asymmetric and unpredictable.
-- **Softening** to tame close-encounter singularities.
-- **Live square display** showing bodies, gravity links, velocity vectors, trails, centre of mass, and energy.
-- **Four polyphonic outputs**: X position, Y position, speed (0–10 V), and wall-event triggers.
-- **Five output ranges** from 0 to 1 up to ±10 V.
-- **Reset** and **Kick** buttons (with matching trigger input for reset) to re-randomise or perturb the system.
-- **Fully patch-persistent**: paused flag, momentum setting, body count, positions, velocities, and masses are saved with the patch.
+- `XBodyProblem` — core module class inheriting from `rack::Module`
+- `XBPanelBackground` — static panel artwork
+- `XBKnobArcs` — live value arcs around the six knobs
+- `XBDisplayWidget` — the 220 × 220 simulation display plus 32 px readout strip
 
----
+### Inheritance
 
-## Panel layout
+- `XBodyProblem` inherits from `rack::Module`
+- All three UI widgets inherit from `rack::TransparentWidget`
 
-### Big square display (centre)
+### Structures
 
-A 220 × 220 px screen showing the simulation in a unit square (0…1 in both axes, +Y up).
+- `XBKnob { int param; float x, y; bool bipolar; const char *label; float top; }` — UI-only knob descriptor table
 
-| Element | Meaning |
-|---------|---------|
-| **Coloured spheres** | The bodies. Size scales with mass; the number inside is the body index. |
-| **Thin lines between bodies** | Gravitational links. Brighter/thicker = stronger current force. |
-| **Short line from each body** | Velocity vector (direction and relative speed). |
-| **Fading trails** | Each body's recent path. Length is set by the TRAIL knob. |
-| **Dashed cyan frame** | Wrap mode: leaving one edge re-enters on the opposite edge. |
-| **Solid orange frame** | Bounce mode: bodies reflect off the walls. |
-| **White crosshair** | Bounce mode only — centre of mass of the system. |
-| **Top-left readout** | Body count, wall mode, and whether masses are random. |
-| **Top-right readout** | Current X/Y output range. |
-| **Bottom-left readout** | Simulation speed multiplier and gravity multiplier. |
-| **Bottom-right readout** | Total kinetic energy of the system. |
-| **"PAUSED"** | Shown when the simulation is paused (right-click menu). |
+### State (grouped)
 
-Trails are recorded at 60 Hz, so ~2 seconds of history is visible at full trail length.
+| Group | Storage |
+|-------|---------|
+| Simulation | `float px[10], py[10]`, `float vx[10], vy[10]`, `float ax[10], ay[10]`, `float rm[10]` |
+| Topology | `int n`, `bool needAcc` |
+| Settings (persisted) | `bool paused`, `bool zeroMomentum` |
+| Triggers | `dsp::SchmittTrigger resetBtnTrig, resetJackTrig, kickTrig` |
+| Event pulses | `dsp::PulseGenerator evPulse[10]` |
+| Display — trails | `float trX[10][120]`, `float trY[10][120]`, `int trHead, trCount`, `float trTimer` |
+| Display — readouts | `float vG, vEps, vSpeed, vKE`, `bool vWrap, vRandMass`, `int vRange` |
+| Display — flashes | `float resetFlash, kickFlash`, `float eventFlash[10]` |
 
-### Knobs (three per side)
+## 3. DSP Theory
 
-| Left column | Right column |
-|-------------|--------------|
-| **MASSES** (2–10) | **RANGE** (0–1 … ±10 V) |
-| **SPEED** (×1/16 … ×16) | **SOFTEN** (0–100 %) |
-| **GRAVITY** (×1/16 … ×16) | **TRAIL** (0–100 %) |
+### Gravitational acceleration
 
-Each knob has a cyan arc showing its current value; bipolar knobs (SPEED, GRAVITY) fill from the centre and use orange for negative values.
+For every pair `(i, j)` with `i < j`:
 
-### Control / I/O row (bottom)
+$$
+\mathbf{r} = \mathbf{p}_j - \mathbf{p}_i \quad(\text{folded to }(-0.5, 0.5]\text{ in wrap mode})
+$$
 
-| Control | Type | Function |
-|---------|------|----------|
-| **WALLS** | Switch | Wrap around (Pac-Man) / Bounce |
-| **MASSES** | Switch | Equal / Random masses |
-| **RESET** | Button + LED | Re-randomise positions, velocities, and masses |
-| **RST IN** | Input | Rising edge triggers the same reset |
-| **KICK** | Button + LED | Add a random impulse to every body |
-| **X** | Output | X position, polyphonic |
-| **Y** | Output | Y position, polyphonic |
-| **SPEED** | Output | Speed, 0–10 V, polyphonic |
-| **EVENT** | Output | 1 ms trigger on wall contact, polyphonic |
+$$
+r^2 = |\mathbf{r}|^2 + \epsilon^2, \quad
+\mathbf{a}_i \mathrel{+}= G\, m_j\, \frac{\mathbf{r}}{r^3}, \quad
+\mathbf{a}_j \mathrel{-}= G\, m_i\, \frac{\mathbf{r}}{r^3}
+$$
 
----
+The magnitude of every `a_i` is clamped to 400 units/s² to prevent close encounters from destabilising the integrator.
 
-## Parameters
+### Leapfrog (kick-drift-kick)
 
-| Parameter | Range | Default | Notes |
-|-----------|-------|---------|-------|
-| **MASSES** | 2–10 | 2 | Number of bodies. Snaps to integers. Increasing it while running initialises new bodies at random positions. |
-| **SPEED** | ×2⁻⁴ … ×2⁴ | ×1 | Simulation speed. The integrator substeps adaptively so large speeds remain stable. |
-| **GRAVITY** | ×2⁻⁴ … ×2⁴ | ×1 | Gravitational constant multiplier. ×1 corresponds to G = 0.05 in the module's units. Negative values make gravity repulsive. |
-| **RANGE** | 5 options | −5 to +5 V | Output scaling for X and Y (see table below). |
-| **SOFTEN** | 0–100 % | 40 % | Close-encounter smoothing. Higher values make near-collisions gentler and prevent extreme accelerations. |
-| **TRAIL** | 0–100 % | 60 % | Trail length shown in the display. Does not affect the audio-rate outputs. |
-| **WALLS** | Switch | Wrap | Wrap or Bounce. |
-| **MASSES mode** | Switch | Equal | Equal = every body has mass 1. Random = 0.4 … 2.4 per body. |
+Per substep of size `h`:
 
-### Output ranges
+$$
+\mathbf{v}_i \mathrel{+}= \frac{h}{2}\mathbf{a}_i \quad (\text{first kick, with } |\mathbf{v}_i| \le 3)
+$$
+$$
+\mathbf{p}_i \mathrel{+}= h\,\mathbf{v}_i \quad (\text{drift, then wrap / bounce})
+$$
+$$
+\mathbf{a}_i \leftarrow \text{recomputed}
+$$
+$$
+\mathbf{v}_i \mathrel{+}= \frac{h}{2}\mathbf{a}_i \quad (\text{second kick})
+$$
 
-| Setting | X / Y output voltage |
-|---------|----------------------|
-| 0 to 1 | 0 … +1 V |
-| −1 to 1 | −1 … +1 V |
-| **−5 to 5** | **−5 … +5 V** (default) |
-| 0 to 10 | 0 … +10 V |
-| −10 to 10 | −10 … +10 V |
+The number of substeps is `clamp(ceil(dt · speed / 0.002), 1, 16)`, and `h = (dt · speed) / sub`.
 
-The SPEED output is always 0…+10 V, scaled so that speed 1.5 in simulation units maps to 10 V.
+### Walls
 
----
+- **Wrap**: any `p < 0` or `p ≥ 1` is folded by subtracting its floor, and the wall event fires.
+- **Bounce**: `p` is reflected (`p → −p` or `p → 2 − p`), the velocity component is negated, and the wall event fires.
 
-## Outputs in detail
+### Masses
 
-All four outputs are **polyphonic**, with as many channels as there are bodies.
+`massOf(i)` returns `1` in Equal mode, or the stored random mass `rm[i] ∈ [0.4, 2.4]` in Random mode.
 
-- **X / Y** — the normalised position (0…1) mapped through the selected range. Bodies stay inside the unit square in both wall modes, so these outputs never exceed the selected range.
-- **SPEED** — 0…+10 V, monotonic with the body's current speed. Useful as an envelope follower of the system's activity.
-- **EVENT** — a 1 ms trigger (0 or +10 V) each time the corresponding body crosses or reflects off a wall. In wrap mode this fires on each edge crossing; in bounce mode on each reflection. Good for clocked or rhythmic derivations.
+### Output mapping
 
----
+`xbMap(v, range)` maps a normalised position `v ∈ [0, 1]` to the selected voltage range:
 
-## Typical uses
+| Range index | Mapping |
+|---|---|
+| 0 | `v` (0..1 V) |
+| 1 | `2v − 1` (−1..+1 V) |
+| 2 | `10v − 5` (−5..+5 V, default) |
+| 3 | `10v` (0..10 V) |
+| 4 | `20v − 10` (−10..+10 V) |
 
-- **Slow multi-tap LFO**: with 2–3 bodies and low speed, X/Y give two related, non-repeating slow modulators. Send them to pitch, filter cutoff, or pan.
-- **Polyphonic modulation bus**: increase MASSES to 6–10 and feed X or Y into a polyphonic VCO, filter bank, or a Quad module. Each voice gets a distinct but correlated signal.
-- **Clock source**: EVENT outputs give irregular triggers whenever a body hits a wall — great for random rhythms, sample-and-hold clocks, or burst envelopes.
-- **Energy follower**: SPEED gives a continuous "activity" CV. Use it to open a filter when the system is fast and close it when the system is settling.
-- **Stereo pair**: use X into the left side and Y into the right side of a stereo processor for a naturally decorrelated stereo field.
-- **Chaotic sequence**: patch a RESET trigger at bar boundaries and use X → quantiser → VCO for an ever-changing melody.
+### SPEED output
 
----
+`out = clamp(|v| / 1.5, 0, 1) · 10`, so a body moving at 1.5 units/s reads 10 V.
 
-## Right-click menu
+### Trail sampling
 
-| Item | Effect |
-|------|--------|
-| **Pause simulation** | Freezes the physics. Outputs hold their current values. Useful to freeze a modulation state. |
-| **Zero total momentum on reset** | When on, the total momentum of the system is subtracted after a reset, so the whole cloud doesn't drift. Default: on. |
-| **New random start** | Equivalent to pressing RESET. |
+One point per body is committed to a 120-slot ring buffer at 60 Hz (`1/60 s`), independent of `SPEED`, so the trail geometry is invariant to speed changes.
 
----
+## 4. Parameters and Controls
 
-## Patch state saved
+### Six knobs
 
-The following are stored in the patch JSON:
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `MASSES_PARAM` | 2 | 10 | 2 | Number of bodies (snapped) |
+| `SPEED_PARAM` | −4 | +4 | 0 | Simulation speed, `exp2` octaves |
+| `GRAVITY_PARAM` | −4 | +4 | 0 | Gravity, `exp2` octaves |
+| `RANGE_PARAM` | 0 | 4 | 2 | Output mapping (5 options) |
+| `SOFT_PARAM` | 0 | 1 | 0.4 | Softening length |
+| `TRAIL_PARAM` | 0 | 1 | 0.6 | Fraction of trail drawn |
 
-- `paused` — pause flag
-- `zeroMomentum` — momentum setting
-- `n` — number of bodies
-- `px, py, vx, vy, rm` — full simulation state (positions, velocities, random masses)
+### Buttons and switches
 
-Because the full state is restored, a saved patch resumes the exact motion that was on screen when it was saved, even if the simulation was mid-orbit.
+| Parameter | Description |
+|---|---|
+| `WALL_PARAM` | Wrap-around / Bounce (CKSS) |
+| `MASSMODE_PARAM` | Equal / Random masses (CKSS) |
+| `RESET_PARAM` | Momentary reset |
+| `KICK_PARAM` | Momentary random impulse |
 
----
+## 5. Inputs and Outputs
 
-## How the simulation works
+### Inputs
 
-Each sample:
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `RESET_INPUT` | Trigger | 0..10 V | Rising edge resets the simulation |
 
-1. The body count and all knobs are read.
-2. Reset/kick triggers are processed.
-3. If not paused, the sample time is scaled by SPEED and divided into up to 16 substeps of at most 2 ms each.
-4. Each substep performs one **leapfrog (kick-drift-kick)** integration step:
-   - half velocity update from current accelerations,
-   - position update,
-   - wall handling (wrap or elastic bounce) with event flags,
-   - recompute pairwise gravitational accelerations,
-   - half velocity update from the new accelerations.
-5. Velocities are clamped to 3 units/sample to keep close encounters tame, and accelerations are capped at 400 units to avoid singularities.
-6. If any non-finite value appears, the system resets automatically.
+### Outputs
 
-Pairwise gravity in wrap mode uses the **minimum image convention** (`dx -= round(dx)`), so a body near one edge feels the correct pull from a body near the opposite edge.
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `X_OUTPUT` | CV (poly) | per RANGE | X positions, one channel per body |
+| `Y_OUTPUT` | CV (poly) | per RANGE | Y positions, one channel per body |
+| `VEL_OUTPUT` | CV (poly) | 0..10 V | Per-body speed |
+| `EVENT_OUTPUT` | Trigger (poly) | 0/10 V | 1 ms pulse on each wall event |
 
----
+The poly channel counts track `MASSES` automatically.
 
-## Quick-start recipes
+### Lights
 
-- **Two-body slow LFO**: MASSES = 2, SPEED ×0.25, GRAVITY ×1, RANGE −5…+5. Patch X to filter cutoff and Y to pan.
-- **Bouncing drum clock**: WALLS = Bounce, 4–5 bodies, random masses, EVENT → trigger input of a drum voice.
-- **Orbital drone**: 3 bodies, MASSES mode = Random, SPEED ×0.5, SOFTEN 60 %. X and Y into two VCOs; SPEED into a VCA.
-- **Freeze frame**: set up a nice orbit, then right-click → Pause. Outputs hold; save the patch to freeze it permanently.
+- `RESET_LIGHT`, `KICK_LIGHT`
 
----
+### Menu
 
-## Notes and constraints
+- **Pause simulation**
+- **Zero total momentum on reset** (default on)
+- **New random start**
 
-- The simulation runs in a normalised unit square, so the visual and audio behaviour are independent of the panel size.
-- Trails are visual only; they are not written to the patch.
-- The display demo (in the module browser) shows a synthetic four-body circle so you can see the visual style before placing the module.
-- Polyphony comes from the number of bodies, not from the host's polyphonic input — this module has no audio input.
+## 6. Signal Processing Pipeline
+
+1. **Read params** — MASSES (adapt `n` if changed), WALLS, MASSMODE, SPEED, GRAVITY, SOFT, RANGE.
+2. **Handle RESET** — button OR jack; call `doReset()` and flash `resetFlash`.
+3. **Handle KICK** — random impulse to every body, flash `kickFlash`.
+4. **Initialize accelerations** — if `needAcc`, call `computeAcc`.
+5. **Integrate** — up to 16 leapfrog substeps, collecting wall events in `ev[]`.
+6. **NaN guard** — if any `p` or `v` is non-finite, `doReset()`.
+7. **Write outputs** — poly `X`, `Y`, `VEL`, `EVENT`, each on `n` channels.
+8. **Display feeds** — snapshot `vG, vEps, vSpeed, vWrap, vRange, vKE`; decay flashes; commit trail point at 60 Hz.
+
+## 7. Important Functions
+
+### `void initBody(int i)`
+
+Randomises position, velocity, and mass for body `i`.
+
+### `void doReset()`
+
+Re-initialises all 10 bodies, removes bulk momentum if `zeroMomentum`, clears trails and sets `needAcc = true`.
+
+### `void computeAcc(bool wrap, float G, float eps2)`
+
+Pairwise loop building `ax[]`/`ay[]` (see §3). Applies the per-body acceleration cap.
+
+### `void physicsStep(float h, bool wrap, float G, float eps2, bool *ev)`
+
+One leapfrog step (kick-drift-recompute-kick), with wall handling and `ev[i]` set on wall events.
+
+### `void process(const ProcessArgs &args)`
+
+Main callback described in §6.
+
+### `json_t *dataToJson()` / `void dataFromJson(json_t *)`
+
+Persist `paused`, `zeroMomentum`, `n`, `px`, `py`, `vx`, `vy`, `rm`.
+
+## 8. Mathematical Implementation
+
+### Pairwise acceleration
+
+$$
+\mathbf{a}_i = \sum_{j \ne i} G\, m_j \frac{\mathbf{p}_j - \mathbf{p}_i}{\left(|\mathbf{p}_j - \mathbf{p}_i|^2 + \epsilon^2\right)^{3/2}}
+$$
+
+with minimum-image distance in wrap mode.
+
+### Leapfrog half-kick + drift
+
+$$
+\mathbf{v}_i^{(n+1/2)} = \mathbf{v}_i^{(n)} + \tfrac{h}{2} \mathbf{a}_i^{(n)}
+$$
+$$
+\mathbf{p}_i^{(n+1)} = \mathbf{p}_i^{(n)} + h\, \mathbf{v}_i^{(n+1/2)}
+$$
+
+(After recomputing `a`, apply the second half-kick.)
+
+### Wall handling (bounce)
+
+$$
+p_i \leftarrow |p_i|, \quad v_i \leftarrow -v_i \quad (\text{lower wall})
+$$
+$$
+p_i \leftarrow 2 - p_i, \quad v_i \leftarrow -v_i \quad (\text{upper wall})
+$$
+
+### Sub-step count
+
+$$
+\text{sub} = \text{clamp}\!\left(\left\lceil \frac{dt \cdot \text{speed}}{0.002} \right\rceil, 1, 16\right), \quad h = \frac{dt \cdot \text{speed}}{\text{sub}}
+$$
+
+### Softening
+
+$$
+\epsilon = 0.01 \cdot 15^{\text{SOFTEN}}
+$$
+
+## 9. Performance and Optimization
+
+### CPU Usage
+
+- Pairwise loop: `n(n−1)/2 ≤ 45` pairs per substep
+- Up to 16 substeps: ≤ 720 pair evaluations per sample worst case
+- ≈ 30 flops per pair → ~20 K flops/sample worst case
+
+### Memory Allocation
+
+- All state fixed-size; no allocation in `process()`
+- Trails: `10 × 120 × 2` floats = 2400 floats ≈ 9.6 KB
+
+### Real-time Processing
+
+- All loops bounded by `n ≤ 10` and `sub ≤ 16`
+- Suitable for a handful of instances on one core
+
+### Thread Safety
+
+- Trail arrays and readouts written by the audio thread, read by the UI via torn reads
+
+### Numerical Stability
+
+- Acceleration cap (400) and speed cap (3) bound the integrator
+- Softening ε ≥ 0.01 (from `SOFTEN = 0`) keeps `1/r³` finite
+- NaN guard triggers a full reset on any non-finite state
+- Position clamped to `[0, 1]` after every reflect
+
+## 10. Dependencies
+
+### Libraries/Headers
+
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`, `<string>`
+
+### External Classes
+
+- `rack::Module`, `rack::ModuleWidget`, `rack::TransparentWidget`
+- `dsp::SchmittTrigger`, `dsp::PulseGenerator`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::sectionHeader`, `agmm::screen`, `agmm::text`, `agmm::accent`, `agmm::warm`, `agmm::bright`, `agmm::dim`, `agmm::withA`, `agmm::ALIGN_L/C/R`
+
+## 11. Summary
+
+`XBodyProblem` is a modulation source built on a real N-body physics simulation rather than a mathematical chaos equation. The 2-to-10-body range gives it a whole spectrum of behaviour: a pair of bodies becomes a slow stable LFO, five bodies becomes a chaotic modulation cluster, and ten bodies becomes a wall of independent random-ish modulators that all share the same wall-hit rhythm.
+
+The 220 × 220 display is the star of the show: gravity links show force strength in real time, wrap-mode ghosting makes bodies that cross an edge appear on both sides, and the trail (measured in attractor-space units, not wall-clock time) stays the same shape regardless of `SPEED`. The persisted simulation state means that leaving a patch running between sessions preserves the exact trajectory.

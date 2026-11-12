@@ -1,210 +1,341 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: SpringPendulum.cpp
-Generated: 2026-11-04 06:33
 -->
 
-This code defines a VCV Rack module for a **Spring Pendulum** simulation, which models the physics of a mass attached to a spring that can oscillate in two dimensions. Here's a breakdown of its components and functionality:
+# SpringPendulum
 
----
+## 1. Overview
 
-### 🧠 **Overview**
+`SpringPendulum` is a 24 HP chaotic modulation source based on a physical spring-pendulum: a mass suspended by four linear springs anchored at the four compass points of a circular dial, with optional gravity, damping and a smooth random force. The mass is integrated in real time with RK4 at an adjustable simulation speed, and can be grabbed and dragged with the mouse.
 
-The `SpringPendulum` module simulates a 2D spring pendulum system with:
-- A central anchor point
-- A mass (bob) connected by a spring
-- Physics parameters like mass, spring constant, damping, gravity, etc.
-- Interactive controls for manipulation and visualization
-
-It includes:
-- A **visual display** widget showing the motion of the bob in real-time.
-- **Interactive mouse control**: Clicking and dragging the bob to reposition it manually.
-- **Audio outputs** for position (`X`, `Y`) and voltage-controlled pitch (`V/OCT`), gate output, reset input, and push input.
-- A **context menu** for configuring Voct range and Gate duration.
+Key features:
+- 4-spring pendulum physics (RK4 integration)
+- Mouse-grabbable mass
+- X/Y position outputs (±5 V)
+- Random V/Oct latched on X = 0 crossing
+- Gate output on same crossing
+- Speed, Mass, Rest Length, Spring K, Chaos, Damping, Gravity knobs
+- Push button (random impulse) and Reset button
+- Live 180×188 dial display with anchor posts, springs, bob and trail
 
 ## Module Screenshot
 
 ![SpringPendulum VCV Rack Module](images/springpendulum.png)
 
----
+## 2. Architecture
 
-### 📦 **Key Components**
+### Main Classes
 
-#### 1. **Module Class: `SpringPendulum`**
-This is the core logic class that handles:
-- Simulation of physics (position, velocity, forces)
-- Trail tracking for visual effect
-- Input/output handling
-- Parameter management (`SPEED`, `MASS`, `LENGTH`, etc.)
-- Mouse interaction state (`grabbed`, `grabX`, `grabY`)
-- Randomization and reset behavior
+- `SpringPendulum`: Core module class inheriting from `rack::Module`
+- `SPPanelBackground`: Static panel artwork
+- `SPDisplayWidget`: Live dial display + mouse grab
 
-##### Parameters:
-| Param ID | Name             | Description |
-|----------|------------------|-------------|
-| SPEED_PARAM     | Speed            | Controls simulation speed |
-| MASS_PARAM      | Mass             | Adjusts the mass of the bob |
-| LENGTH_PARAM    | Rest Length      | Sets the rest length of the spring |
-| SPRING_K_PARAM  | Spring K         | Spring stiffness |
-| PUSH_STRENGTH_PARAM | Push Strength | Strength of manual push |
-| CHAOS_PARAM     | Chaos            | Adds chaotic behavior to motion |
-| DAMP_PARAM      | Damping          | Amount of energy loss per frame |
-| GRAVITY_PARAM   | Gravity          | Vertical gravitational force |
-| PUSH_BUTTON     | Push Button      | Triggers a push event |
-| RESET_BUTTON    | Reset Button     | Resets the simulation |
+### Inheritance
 
-##### Outputs:
-| Output ID        | Name         | Description |
-|------------------|--------------|-------------|
-| X_OUTPUT         | X            | Horizontal position output |
-| Y_OUTPUT         | Y            | Vertical position output |
-| VOCT_OUTPUT      | V/OCT        | Voltage-controlled pitch output |
-| GATE_OUTPUT      | Gate         | Trigger gate when bob crosses threshold |
+- `SpringPendulum` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-##### Inputs:
-| Input ID              | Name           | Description |
-|-----------------------|----------------|-------------|
-| RESET_CV_INPUT        | Reset CV       | External reset trigger |
-| PUSH_CV_INPUT         | Push CV        | External push control |
+### Structures
 
----
+- `State { double x, y, vx, vy; }` — physics state
+- `VoctRange`: Range0_1, RangeN1_1, RangeN2_2, RangeN5_5, Range0_5
+- `GateDuration`: Trigger, 5ms, 10ms, 20ms, 50ms, 100ms, 200ms
 
-#### 2. **Display Widget: `SPDisplayWidget`**
-Visualizes the simulation in a dial-like interface:
-- Shows the bob moving within a circular area
-- Displays trails of past positions
-- Draws springs from anchor points to the bob
-- Highlights grabbed state with a ring around the ball
-- Shows real-time values (X, Y, VX, VY, K, G)
-- Includes energy glow effect based on velocity
+### State (grouped)
 
-##### Features:
-- **Interactive dragging**: Click and drag the bob to manually control it.
-- **Trail rendering**: Visual history of motion.
-- **Spring visualization**: Four springs from anchor points with tension-based coloring.
-- **Readouts**: Corner labels showing current values.
+| Group | Storage |
+|-------|---------|
+| Physics | `double x, y, vx, vy` |
+| Params | `double mass, restLen, springK, speedFactor, damping, chaos, g` |
+| Noise | `double noiseAx, noiseAy` |
+| Mouse grab | `std::atomic<bool> grabbed`, `std::atomic<double> grabX, grabY`, `bool handOn`, `double handX, handY, handWn` |
+| V/Oct | `double voctVoltage`, `prevXSign` |
+| Gate | `int gateTimer` |
+| Ranges | `VoctRange voctRange` |
+| Gate durations | `GateDuration gateDuration` |
+| Transport | `dsp::SchmittTrigger resetTrigger, pushTrigger`, `bool lastResetState` |
+| RNG | `std::mt19937 rng`, `std::normal_distribution<double> gauss` |
+| Display | `float trailX[120]`, `trailY[120]`, `trailHead`, `trailCount`, `trailTimer` |
 
----
+## 3. DSP Theory
 
-#### 3. **Panel Background: `SPPanelBackground`**
-Draws the module's panel layout:
-- Gradient background
-- Brushed metal texture
-- Vignette effects
-- Corner accents and edge highlights
-- Labels for knobs and controls
+### Spring forces
 
-##### Layout Constants:
-```cpp
-const float SP_PANEL_W = 300.f;
-const float SP_PANEL_H = 380.f;
+The mass is connected to four anchor points (N, E, S, W) at distance D = 1.0 from the origin. Each spring's force is linear (Hooke's law):
 
-// Display area
-const float SP_DISP_X = 150.f - 90.f;
-const float SP_DISP_Y = 120.f;
-const float SP_DISP_W = 180.f;
-const float SP_DISP_H = 180.f;
+$$
+\mathbf{F}_i = k(| \mathbf{r}_i | - L_0) \cdot \frac{\mathbf{r}_i}{| \mathbf{r}_i |}
+$$
 
-// Knob positions
-const float SP_LKNOB_X = 60.f;
-const float SP_RKNOB_X = 240.f;
-const float SP_KNOB_Y1 = 50.f;
-const float SP_KNOB_Y2 = 90.f;
+where $\mathbf{r}_i = \mathbf{a}_i - \mathbf{p}$ is the vector from the mass to anchor $i$, $k$ is the spring constant, and $L_0$ is the rest length.
 
-// Control row
-const float SP_CTRL_SECTION_Y = 230.f;
-const float SP_CTRL_Y = 260.f;
-const float SP_CTRL_LBL_Y = 280.f;
+The total force on the mass is:
 
-// I/O section
-const float SP_IO_SECTION_Y = 310.f;
-const float SP_IO_Y = 340.f;
-```
+$$
+\mathbf{F}_{\text{total}} = \sum_{i=1}^{4} \mathbf{F}_i
+$$
 
----
+### Equation of motion
 
-#### 4. **Context Menu Options**
-Adds configuration options via right-click menu:
-- **Voct Range**: Choose how the `V/OCT` output maps to pitch (e.g., 0–1, -2 to 2).
-- **Gate Duration**: Set how long the gate output stays active after triggering.
+$$
+\ddot{\mathbf{p}} = \frac{\mathbf{F}_{\text{total}}}{m} - d \dot{\mathbf{p}} + \mathbf{g} + \mathbf{a}_{\text{noise}}
+$$
 
----
+where $m$ is the mass, $d$ is the damping, $\mathbf{g}$ is gravity (downward), and $\mathbf{a}_{\text{noise}}$ is the random force.
 
-### 🎮 **Usage Instructions**
+### Ornstein-Uhlenbeck noise
 
-#### Controls:
-- **Knobs**:
-  - **Speed**: Adjust simulation speed.
-  - **Mass**: Change the mass of the bob.
-  - **Rest Length**: Modify spring rest length.
-  - **Spring K**: Tune spring stiffness.
-  - **Push Strength**: Control how hard a push is applied.
-  - **Chaos**: Introduce randomness into motion.
-  - **Damp**: Add damping to reduce oscillation.
-  - **Gravity**: Apply vertical gravity force.
+The random force is a **smooth** noise (Ornstein-Uhlenbeck process), not white noise:
 
-- **Buttons**:
-  - **Push**: Instantly apply a push to the bob.
-  - **Reset**: Reset the simulation state.
-  - **Energy Light**: Indicates when energy is high (e.g., fast movement).
+$$
+\mathbf{a}_{\text{noise}} \leftarrow \mathbf{a}_{\text{noise}} \cdot e^{-\Delta t/\tau} + \sigma \sqrt{1 - e^{-2\Delta t/\tau}} \cdot \mathbf{g}
+$$
 
-#### I/O:
-- **Outputs**:
-  - `X`, `Y`: Position in normalized coordinates.
-  - `V/OCT`: Voltage representing pitch based on position.
-  - `Gate`: Triggered when the bob crosses a threshold.
-- **Inputs**:
-  - `Reset CV`: External trigger to reset simulation.
-  - `Push CV`: Apply push force via CV.
+where $\tau = 0.12$ s, $\sigma = \text{chaos} \cdot 6$, and $\mathbf{g} \sim \mathcal{N}(0, 1)$. This gives a slowly-varying random force, which makes the motion more "organic" than pure white noise.
 
----
+### RK4 integration
 
-### 🔧 **Technical Notes**
+The state is advanced by `dt = sampleTime * speedFactor` (capped at 0.001) using the classical 4th-order Runge-Kutta.
 
-#### Physics Simulation
-The module uses a simplified physics engine:
-- Position and velocity update using Euler integration.
-- Spring force calculation: $ F = k(x - x_0) $
-- Gravity applied as a constant downward acceleration.
-- Damping reduces velocity over time.
-- Chaos introduces small random perturbations.
+### Soft wall
 
-#### Visualization
-- Uses NanoVG for vector graphics rendering.
-- Trails are stored in a circular buffer (`trailX`, `trailY`).
-- Springs drawn using custom `drawSpring()` function with multiple segments.
-- Bob size scales with mass using cube root mapping.
+If the mass strays too far, it's clamped to a soft wall at r = 2.5 D:
 
----
+$$
+r > 2.5 \implies \mathbf{p} \leftarrow \frac{\mathbf{p}}{r} \cdot 2.5, \quad \text{remove outward velocity}
+$$
 
-### 🖼️ **Visual Design**
+This prevents the mass from flying away.
 
-The UI features:
-- Metallic panel with brushed texture
-- Circular display with radial ticks and crosshair
-- Glowing energy effect during fast motion
-- Scanlines for CRT-like feel
-- Glass reflection overlay
-- Color-coded readouts (cyan for position, orange for velocity, gray for parameters)
+### Mouse grab
 
----
+When the mouse grabs the mass, a critically-damped spring pulls the mass toward the cursor:
 
-### 🧪 **Example Use Cases**
+$$
+\ddot{\mathbf{p}} + = \omega_n^2 (\mathbf{p}_{\text{cursor}} - \mathbf{p}) - 2\omega_n \dot{\mathbf{p}}
+$$
 
-1. **Modular Synthesis**: Use `X/Y` outputs to modulate filter cutoffs or LFO rates.
-2. **Audio Generation**: Route `V/OCT` to a VCO for evolving pitch sequences.
-3. **Performance Art**: Drag the bob manually to create interactive soundscapes.
-4. **Educational Tool**: Visualize spring-mass systems in physics classes.
+where $\omega_n = 25 \cdot \text{speedFactor}$. The damping is critical (2·ω_n), so the mass follows the cursor without overshooting.
 
----
+### Zero-crossing detection
 
-### 🧰 **Dependencies**
+When the mass crosses X = 0:
 
-This module requires:
-- [VCV Rack SDK](https://vcvrack.com/)
-- NanoVG for vector graphics
-- Standard C++17 features
+$$
+\text{sign}(x_{n-1}) \ne \text{sign}(x_n) \implies \text{latch V/Oct, fire gate}
+$$
 
----
+### V/Oct ranges
 
-Let me know if you'd like help compiling this, modifying it, or understanding specific parts like the physics engine or drawing functions!
+Same as `PsyLFO`: 0..1, −1..1, −2..2, −5..5, 0..5.
+
+## 4. Parameters and Controls
+
+### Knobs
+
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `SPEED_PARAM` | 0 | 1 | 0.5 | Speed (0.2–10×) |
+| `MASS_PARAM` | 0.1 | 10 | 1 | Mass (kg) |
+| `LENGTH_PARAM` | 0.1 | 0.9 | 0.5 | Rest length (m) |
+| `SPRING_K_PARAM` | 1 | 100 | 10 | Spring constant (N/m) |
+| `CHAOS_PARAM` | 0 | 1 | 0.35 | Chaos (random force) |
+| `DAMP_PARAM` | 0.02 | 2 | 0.3 | Damping (1/s) |
+| `GRAVITY_PARAM` | 0 | 40 | 0 | Gravity (m/s²) |
+
+### Buttons
+
+| Button | Description |
+|--------|-------------|
+| `PUSH_BUTTON` | Random push |
+| `RESET_BUTTON` | Reset |
+
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `RESET_CV_INPUT` | Reset gate |
+| `PUSH_CV_INPUT` | Push trigger |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `X_OUTPUT` | Mass X |
+| `Y_OUTPUT` | Mass Y |
+| `VOCT_OUTPUT` | V/Oct (random on X=0 crossing) |
+| `GATE_OUTPUT` | Gate (trigger on V/Oct change) |
+
+### Lights
+
+- `MASS_LIGHT` — Current speed
+
+### Enumerations
+
+- `VoctRange`: Range0_1, RangeN1_1, RangeN2_2, RangeN5_5, Range0_5
+- `GateDuration`: Trigger, 5ms, 10ms, 20ms, 50ms, 100ms, 200ms
+- `ParamId`: Speed, Mass, Length, SpringK, Reset, PushStrength, Push, Chaos, Damp, Gravity
+- `InputId`: ResetCV, PushCV
+- `OutputId`: X, Y, VOct, Gate
+- `LightId`: Mass
+
+### Menu
+
+- V/Oct range (5 options)
+- Gate duration (7 options)
+
+## 5. Inputs and Outputs
+
+### Inputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `RESET_CV_INPUT` | Gate | > 1 V | Reset |
+| `PUSH_CV_INPUT` | Gate | > 1 V | Random push |
+
+### Outputs
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `X_OUTPUT` | CV | ±5 V | Mass X |
+| `Y_OUTPUT` | CV | ±5 V | Mass Y |
+| `VOCT_OUTPUT` | CV | see range | Random V/Oct |
+| `GATE_OUTPUT` | Gate | 0/10 V | Gate |
+
+## 6. Signal Processing Pipeline
+
+1. **Read params** — Speed, mass, rest length, spring K, chaos, damping, gravity.
+2. **Reset detection** — Button or CV → reset state.
+3. **Push detection** — Button or CV → add random impulse.
+4. **Mouse grab** — Copy atomics to local.
+5. **Compute `dt`** — `sampleTime * speedFactor`, capped at 0.001.
+6. **Update noise** — OU process.
+7. **RK4** — Integrate physics.
+8. **NaN guard** — Reset if non-finite.
+9. **Soft wall** — Clamp to 2.5 D.
+10. **Zero-crossing detection** — Latch V/Oct, fire gate.
+11. **Write outputs**.
+12. **LED** — Speed brightness.
+13. **Trail sampling**.
+
+## 7. Important Functions
+
+### `deriv(const State &s, State &d)`
+
+Computes the derivative of the physics state.
+
+### `rk4(double dt)`
+
+RK4 integration step.
+
+### `resetState()`
+
+Randomises the initial state.
+
+### `kick()`
+
+Adds a random angular impulse.
+
+### `generateRandomVoct()`
+
+Generates a new random V/Oct value in the current range.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+## 8. Mathematical Implementation
+
+### Spring force
+
+$$
+\mathbf{F}_i = k(| \mathbf{r}_i | - L_0) \frac{\mathbf{r}_i}{| \mathbf{r}_i |}
+$$
+
+### Equation of motion
+
+$$
+\ddot{\mathbf{p}} = \frac{\sum_i \mathbf{F}_i}{m} - d \dot{\mathbf{p}} + \mathbf{g} + \mathbf{a}_{\text{noise}}
+$$
+
+### OU noise
+
+$$
+\mathbf{a}_{\text{noise}} \leftarrow \mathbf{a}_{\text{noise}} e^{-\Delta t/\tau} + \sigma \sqrt{1 - e^{-2\Delta t/\tau}} \mathbf{g}
+$$
+
+### Mouse spring
+
+$$
+\ddot{\mathbf{p}} + = \omega_n^2 (\mathbf{p}_{\text{cursor}} - \mathbf{p}) - 2\omega_n \dot{\mathbf{p}}
+$$
+
+### V/Oct ranges
+
+| Range | Formula |
+|-------|---------|
+| 0..1 | $(u+1)/2$ |
+| −1..1 | $u$ |
+| −2..2 | $2u$ |
+| −5..5 | $5u$ |
+| 0..5 | $(u+1)/2 \cdot 5$ |
+
+## 9. Performance and Optimization
+
+### CPU Usage
+
+- RK4: 4 derivative evaluations per sample, each with 4 sqrt + 4 sqrt + trig ≈ 20 transcendentals/sample
+- Plus OU noise, zero-crossing, output writes ≈ 100 flops
+- Total: ~200 flops/sample
+
+### Memory Allocation
+
+- All state fixed-size
+- No allocation in `process()`
+- Trails: 120 × 2 = 240 floats
+
+### Buffers
+
+- `trailX[120]`, `trailY[120]`: 240 floats
+
+### Real-time Processing
+
+- RK4 is deterministic
+- `dt` capped at 0.001
+- Mouse grab is via atomics (lock-free)
+- No allocation, no blocking
+
+### Thread Safety
+
+- Mouse grab is communicated via atomics (`grabbed`, `grabX`, `grabY`)
+- All other state is audio-thread only (except display trail, which is written by audio thread and read by UI thread)
+
+### Numerical Stability
+
+- `dt` capped at 0.001
+- `!std::isfinite` → reset
+- Soft wall at r = 2.5 D
+- V/Oct latched on crossing (doesn't drift)
+
+## 10. Dependencies
+
+### Libraries/Headers
+
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<random>`, `<limits>`, `<memory>`, `<atomic>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `rack::dsp::SchmittTrigger`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
+
+## 11. Summary
+
+`SpringPendulum` is a chaotic modulation source based on a physical spring-pendulum. Unlike `PsyLFO` (a double pendulum, which is purely driven by gravity), this one has four springs anchoring it to a plane, so it can oscillate, orbit, or settle. The mouse grab is a nice touch: you can physically pull the mass to a new position and let it go, and the physics will take over.
+
+The Ornstein-Uhlenbeck noise makes the motion more organic than white noise — the mass wanders slowly rather than jittering. Combined with the spring physics, this gives a very naturalistic output that's good for modulating filters, VCOs, or anything else that benefits from slow, organic movement.
+
+The main limitations are: CPU-heavy (200 flops/sample + 20 transcendentals), and the mouse grab requires the UI thread (can't be automated from a patch). But for a "hands-on" chaotic modulation source, this is excellent.

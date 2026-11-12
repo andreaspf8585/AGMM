@@ -1,14 +1,22 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Spikes.cpp
-Generated: 2026-11-04 06:32
 -->
 
 # Spikes
 
 ## 1. Overview
 
-The **Spikes** module is a VCV Rack plugin that generates chaotic attractor signals using the Lorenz and Rössler systems, with additional fractal noise modulation. It outputs three-dimensional coordinates (X, Y, Z) along with a mixed signal (MIX). The module features a 3D visualization display showing the trajectory of the attractor in real-time.
+`Spikes` is a 16 HP chaotic modulation source that combines two classical strange attractors (Lorenz and Rössler) with a fractal-correlated noise generator. The two attractors are integrated in real time with RK4, blended together per-sample by the BLEND knob, then optionally crossfaded toward a 6-octave fractional Brownian motion noise (FRACTAL knob) before being scaled and written to X / Y / Z / MIX outputs.
+
+Key features:
+- Lorenz + Rössler attractors integrated with RK4
+- Fractal-correlated fBm noise (6 octaves, Hurst = 0.65)
+- Per-sample blend of attractor and noise
+- Speed (with 1 V/oct CV), blend, fractal amount, fractal speed, scale
+- Auto-rotation of the 3D display with manual drag override
+- 3D trail view of the recent trajectory
+- 4 outputs: X, Y, Z, MIX
 
 ## Module Screenshot
 
@@ -17,257 +25,355 @@ The **Spikes** module is a VCV Rack plugin that generates chaotic attractor sign
 ## 2. Architecture
 
 ### Main Classes
+
 - `Spikes`: Core module class inheriting from `rack::Module`
-- `SPPanel`: UI panel widget for the module's front panel
-- `SPDisplay`: 3D visualization display widget
-- `Octave`: Structure for managing fractional Brownian motion octaves
+- `SPPanel`: Static panel artwork
+- `SPDisplay`: Live 3D trail display
 
 ### Inheritance
+
 - `Spikes` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
 ### Structures
-- `Octave`: Contains state for each octave in fractal noise generation:
-  - `current`: Current random value
-  - `target`: Next random value
-  - `phase`: Interpolation phase (0.0 to 1.0)
-  - `initialized`: Boolean flag indicating initialization status
 
-### Relationships
-- `Spikes` contains all state variables and processing logic
-- `SPDisplay` reads data from `Spikes` for visualization
-- `Octave` instances are part of `Spikes`'s internal state
+- `Octave { double current, target, phase; bool initialized; }` — one fBm octave
 
-### Module Organization
-The module is organized into:
-1. Parameter definitions (knobs, switches)
-2. Input/output definitions
-3. State variables for chaotic attractors and fractal noise
-4. DSP processing functions
-5. UI components for display and panel layout
+### State (grouped)
+
+| Group | Storage |
+|-------|---------|
+| Lorenz state | `double lorenzX, lorenzY, lorenzZ` |
+| Rössler state | `double rosslerX, rosslerY, rosslerZ` |
+| Fractal octaves | `Octave octaves[6]` |
+| RNG | `uint32_t rngState` |
+| Display — trail | `float trailX[400]`, `trailY[400]`, `trailZ[400]`, `trailHead`, `trailCount`, `trailAcc` |
+| Display — outputs | `float outX, outY, outZ, outMix`, `dispSpeed, dispBlend, dispFractal` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Lorenz attractor
 
-#### Lorenz Attractor
-The Lorenz system is defined by:
+The Lorenz system is a classic chaotic attractor:
+
 $$
 \begin{aligned}
-\frac{dx}{dt} &= \sigma(y - x) \\
-\frac{dy}{dt} &= x(\rho - z) - y \\
-\frac{dz}{dt} &= xy - \beta z
+\dot{x} &= \sigma(y - x) \\
+\dot{y} &= x(\rho - z) - y \\
+\dot{z} &= xy - \beta z
 \end{aligned}
 $$
 
-Where:
-- $\sigma = 10$
-- $\rho = 28$ 
-- $\beta = \frac{8}{3}$
+with σ = 10, ρ = 28, β = 8/3.
 
-#### Rössler Attractor
-The Rössler system is defined by:
+### Rössler attractor
+
+The Rössler system is another classic chaotic attractor:
+
 $$
 \begin{aligned}
-\frac{dx}{dt} &= -y - z \\
-\frac{dy}{dt} &= x + ay \\
-\frac{dz}{dt} &= b + z(x - c)
+\dot{x} &= -y - z \\
+\dot{y} &= x + a y \\
+\dot{z} &= b + z(x - c)
 \end{aligned}
 $$
 
-Where:
-- $a = 0.2$
-- $b = 0.2$
-- $c = 5.7$
+with a = 0.2, b = 0.2, c = 5.7.
 
-### Algorithms
-1. **Runge-Kutta 4th Order Integration (RK4)**: Used to numerically integrate the attractor differential equations
-2. **Fractional Brownian Motion (fBm)**: Implemented using multiple octaves of interpolated random values with Hurst exponent $H = 0.65$
-3. **Smoothstep Interpolation**: For smooth transitions between random values in fractal noise generation
+### RK4 integration
 
-### Filters and Oscillators
-- No explicit filters or oscillators beyond the chaotic attractors themselves
-- The module uses a custom XORShift32 RNG for noise generation
+Both attractors are integrated with the classical 4th-order Runge-Kutta at audio rate, with 2 sub-steps per sample:
 
-### Delay Lines
-- Uses a circular buffer (`trailX`, `trailY`, `trailZ`) of size 400 for storing attractor trajectory points
-- Implements a time accumulator (`trailAcc`) to control trail point sampling rate
+$$
+\mathbf{s}_{n+1} = \mathbf{s}_n + \frac{h}{6}(\mathbf{k}_1 + 2\mathbf{k}_2 + 2\mathbf{k}_3 + \mathbf{k}_4)
+$$
 
-### Feedback Systems
-- The chaotic attractors themselves are feedback systems with nonlinear dynamics
-- The output signals feed back into the attractor state variables through integration
+where $h = \text{speed}/\text{sampleRate}/2$. The 2 sub-steps give better accuracy for the stiff Lorenz system.
 
-### Modulation
-- All parameters can be modulated via CV inputs:
-  - SPEED_INPUT: Modulates integration speed (1V/octave scaling)
-  - BLEND_INPUT: Mixes between Lorenz and Rössler attractors (10V = 100%)
-  - FRACTAL_INPUT: Controls fractal noise amount (10V = 100%)
+### Fractal noise (fBm)
 
-### Random Processes
-- Implements fractional Brownian motion using multiple octaves of interpolated random values
-- Uses XORShift32 algorithm for high-quality uniform noise generation
+The fractal noise is 6 octaves of smoothed random values, each with a different frequency and amplitude:
+
+$$
+\text{total} = \sum_{i=0}^{5} v_i \cdot a_i
+$$
+
+where each octave has:
+- Frequency $f_i = f_{\text{base}} \cdot 2^i$
+- Amplitude $a_i = 2^{-H \cdot i}$ (H = Hurst = 0.65)
+- A smoothstep interpolation between current and target random values
+
+The output is normalized by $\sqrt{\sum a_i^2}$ so it's approximately in $[-1, 1]$.
+
+### Blend
+
+The two attractors are blended by the BLEND knob:
+
+$$
+\mathbf{m} = (1 - b) \mathbf{L} + b \mathbf{R}
+$$
+
+where $\mathbf{L}$ is the normalized Lorenz and $\mathbf{R}$ is the normalized Rössler.
+
+### Normalization
+
+Each attractor is normalized to approximately $[-1, 1]$ by dividing by a fixed constant:
+
+- Lorenz: x/20, y/25, (z−25)/25
+- Rössler: x/12, y/12, (z−5)/15
+
+### Fractal mix
+
+The blended attractor is then crossfaded toward the fractal noise:
+
+$$
+\mathbf{m} \leftarrow (1 - f) \mathbf{m} + f \cdot \text{fractal}
+$$
+
+### Output scaling
+
+$$
+\text{out} = \text{clamp}(\mathbf{m} \cdot \text{scale}, -10, 10)
+$$
+
+### MIX output
+
+$$
+\text{mix} = \frac{x + y + z}{3}
+$$
+
+### Speed scaling
+
+$$
+\text{speed} = \text{clamp}(\text{knob} \cdot 2^{\text{CV}}, 0.001, 100)
+$$
+
+### 3D trail
+
+One point is added to the trail every 0.015 units of attractor time:
+
+$$
+\text{trailAcc} \leftarrow \text{trailAcc} + \text{dt}
+$$
+
+$$
+\text{trailAcc} \ge 0.015 \implies \text{push new point}
+$$
+
+This keeps the trail shape independent of the speed setting.
+
+### 3D projection
+
+The display projects attractor-space points (x, y, z) into 2D using a rotating view:
+
+1. Map attractor coordinates to world: (x, -z, y) — z becomes up
+2. Yaw rotation around the vertical axis
+3. Pitch rotation around the horizontal axis
+4. Perspective divide: `k = 1 / (1 + z2 * 0.22)`
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **SPEED_PARAM** (0.01 to 10, default 1): Controls attractor integration speed
-- **BLEND_PARAM** (0 to 1, default 0.5): Mixes between Lorenz and Rössler attractors
-- **FRACTAL_PARAM** (0 to 1, default 0.2): Amount of fractal noise modulation
-- **FRACTAL_SPEED_PARAM** (0.01 to 50, default 1): Speed of fractal noise generation
-- **SCALE_PARAM** (0.1 to 10, default 5): Output signal scaling factor
-- **ROTATE_PARAM** (-1 to 1, default 0.25): Display rotation speed
 
-### Switches and Buttons
-- None explicitly defined in the code
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `SPEED_PARAM` | 0.01 | 10 | 1 | Speed |
+| `BLEND_PARAM` | 0 | 1 | 0.5 | Lorenz ↔ Rössler blend |
+| `FRACTAL_PARAM` | 0 | 1 | 0.2 | Fractal amount |
+| `FRACTAL_SPEED_PARAM` | 0.01 | 50 | 1 | Fractal base frequency (Hz) |
+| `SCALE_PARAM` | 0.1 | 10 | 5 | Output scale (V) |
+| `ROTATE_PARAM` | −1 | 1 | 0.25 | Display rotation speed |
 
-### CV Inputs
-- **SPEED_INPUT**: Speed modulation (1V/octave)
-- **BLEND_INPUT**: Blend modulation (10V = 100%)
-- **FRACTAL_INPUT**: Fractal amount modulation (10V = 100%)
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `SPEED_INPUT` | Speed CV (1 V/oct) |
+| `BLEND_INPUT` | Blend CV (10 V = 100%) |
+| `FRACTAL_INPUT` | Fractal CV (10 V = 100%) |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `X_OUTPUT` | X |
+| `Y_OUTPUT` | Y |
+| `Z_OUTPUT` | Z |
+| `MIX_OUTPUT` | Mix |
 
 ### Enumerations
-- `ParamId`: Enum for parameter IDs
-- `InputId`: Enum for input IDs  
-- `OutputId`: Enum for output IDs
-- `LightId`: Empty enum for light IDs
 
-### Parameter Ranges and Default Values
-| Parameter | Range | Default |
-|-----------|-------|---------|
-| SPEED_PARAM | 0.01 to 10 | 1 |
-| BLEND_PARAM | 0 to 1 | 0.5 |
-| FRACTAL_PARAM | 0 to 1 | 0.2 |
-| FRACTAL_SPEED_PARAM | 0.01 to 50 | 1 |
-| SCALE_PARAM | 0.1 to 10 | 5 |
-| ROTATE_PARAM | -1 to 1 | 0.25 |
+- `ParamId`: Speed, Blend, Fractal, FractalSpeed, Scale, Rotate
+- `InputId`: Speed, Blend, Fractal
+- `OutputId`: X, Y, Z, Mix
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-- **SPEED_INPUT**: Voltage input for speed modulation (range: -5V to +5V)
-- **BLEND_INPUT**: Voltage input for blend modulation (range: -10V to +10V)  
-- **FRACTAL_INPUT**: Voltage input for fractal amount modulation (range: -10V to +10V)
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `SPEED_INPUT` | CV | ±5 V | Speed modulation (1 V/oct) |
+| `BLEND_INPUT` | CV | ±10 V | Blend modulation |
+| `FRACTAL_INPUT` | CV | ±10 V | Fractal amount modulation |
 
 ### Outputs
-- **X_OUTPUT**: X coordinate signal (range: -10V to +10V)
-- **Y_OUTPUT**: Y coordinate signal (range: -10V to +10V)
-- **Z_OUTPUT**: Z coordinate signal (range: -10V to +10V)
-- **MIX_OUTPUT**: Mixed signal (range: -10V to +10V)
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `X_OUTPUT` | CV | ±10 V | Lorenz/Rössler X |
+| `Y_OUTPUT` | CV | ±10 V | Lorenz/Rössler Y |
+| `Z_OUTPUT` | CV | ±10 V | Lorenz/Rössler Z |
+| `MIX_OUTPUT` | CV | ±10 V | (X+Y+Z)/3 |
+
+### Menu
+
+No menu options.
 
 ## 6. Signal Processing Pipeline
 
-1. **Parameter Processing**: Read and scale parameters with CV inputs
-2. **Attractor Integration**: 
-   - Integrate both Lorenz and Rössler attractors using RK4 method
-   - Substep integration for numerical stability
-3. **State Validation**: Reset attractor states if values become infinite
-4. **Fractal Noise Generation**:
-   - Compute fractal noise using multiple octaves of interpolated random values
-   - Apply smoothstep interpolation between random values
-5. **Signal Normalization**: Normalize attractor outputs to approximately [-1, 1]
-6. **Blending**: Mix Lorenz and Rössler outputs based on blend parameter
-7. **Fractal Mixing**: Add fractal noise to the blended signal
-8. **Output Scaling**: Scale final signals by the SCALE parameter
-9. **Trail Update**: Store current attractor position in circular buffer for display
+1. **Read params + CVs** — Speed, blend, fractal amount, fractal speed, scale.
+2. **Integrate Lorenz** — RK4 with 2 sub-steps.
+3. **Integrate Rössler** — RK4 with 2 sub-steps.
+4. **NaN guard** — Re-seed attractors if they blow up.
+5. **Compute fractal** — Advance 6 octaves.
+6. **Normalize** — Map each attractor to ±1.
+7. **Blend** — Mix Lorenz and Rössler.
+8. **Mix fractal** — Crossfade toward fractal noise.
+9. **Compute MIX** — Average.
+10. **Output** — Scale and clamp.
+11. **Trail sampling** — Push new point if enough attractor time elapsed.
 
 ## 7. Important Functions
 
-### Core Processing
-- `process()`: Main DSP processing function that integrates attractors, generates fractal noise, and outputs signals
-- `computeFractal()`: Generates fractional Brownian motion using multiple octaves
-- `rk4()`: Implements Runge-Kutta 4th order integration for differential equations
+### `lorenzDeriv(const double s[3], double d[3])`
 
-### Attractor Functions
-- `lorenzDeriv()`: Computes derivatives for the Lorenz attractor system
-- `rosslerDeriv()`: Computes derivatives for the Rössler attractor system
+The Lorenz derivative function.
 
-### Random Number Generation
-- `xorshift()`: XORShift32 random number generator
-- `randUnipolar()`: Generates uniform random values in [0, 1)
-- `randBipolar()`: Generates uniform random values in [-1, 1)
+### `rosslerDeriv(const double s[3], double d[3])`
 
-### Reset Function
-- `onReset()`: Initializes module state on reset
+The Rössler derivative function.
+
+### `rk4(double s[3], double dt, void (*deriv)(const double *, double *))`
+
+RK4 integration step.
+
+### `computeFractal(double baseFreq, double sr)`
+
+Advances the 6-octave fBm noise and returns a normalized bipolar value.
+
+### `Spikes::process(const ProcessArgs &args)`
+
+The main callback described in §6.
 
 ## 8. Mathematical Implementation
 
-### Fractal Noise Generation
-The implementation uses fractional Brownian motion with Hurst exponent $H = 0.65$:
+### Lorenz
 
 $$
-\text{fractal} = \sum_{i=0}^{N-1} \text{amp}_i \cdot \text{interpolate}(current_i, target_i, phase_i)
+\dot{x} = 10(y - x), \quad \dot{y} = x(28 - z) - y, \quad \dot{z} = xy - \tfrac{8}{3}z
 $$
 
-Where:
-- $\text{amp}_i = 2^{-H \cdot i}$ (amplitude decreases with octave)
-- Interpolation uses smoothstep function: $s = t^2(3 - 2t)$
-
-### Integration Method
-The RK4 integration is implemented as:
+### Rössler
 
 $$
-\begin{aligned}
-k_1 &= f(x_n) \\
-k_2 &= f(x_n + \frac{dt}{2} k_1) \\
-k_3 &= f(x_n + \frac{dt}{2} k_2) \\
-k_4 &= f(x_n + dt \cdot k_3) \\
-x_{n+1} &= x_n + \frac{dt}{6}(k_1 + 2k_2 + 2k_3 + k_4)
-\end{aligned}
+\dot{x} = -y - z, \quad \dot{y} = x + 0.2 y, \quad \dot{z} = 0.2 + z(x - 5.7)
 $$
 
-### Signal Normalization
+### RK4
+
 $$
-\begin{aligned}
-\text{normalized}_x &= \frac{\text{attractor}_x}{20.0} \\
-\text{normalized}_y &= \frac{\text{attractor}_y}{25.0} \\
-\text{normalized}_z &= \frac{\text{attractor}_z - 25.0}{25.0}
-\end{aligned}
+s_{n+1} = s_n + \frac{h}{6}(k_1 + 2k_2 + 2k_3 + k_4)
+$$
+
+### fBm
+
+$$
+\text{total} = \sum_{i=0}^{5} v_i \cdot 2^{-0.65 i}, \quad \text{out} = \frac{\text{total}}{\sqrt{\sum 2^{-1.3 i}}}
+$$
+
+### Normalization
+
+$$
+x_L = x/20, \quad y_L = y/25, \quad z_L = (z-25)/25
+$$
+
+$$
+x_R = x/12, \quad y_R = y/12, \quad z_R = (z-5)/15
+$$
+
+### 3D projection
+
+$$
+\text{world} = (x, -z, y)
+$$
+
+$$
+x_1 = w_x \cos(\text{yaw}) + w_z \sin(\text{yaw}), \quad z_1 = -w_x \sin(\text{yaw}) + w_z \cos(\text{yaw})
+$$
+
+$$
+y_2 = w_y \cos(\text{pitch}) - z_1 \sin(\text{pitch}), \quad z_2 = w_y \sin(\text{pitch}) + z_1 \cos(\text{pitch})
+$$
+
+$$
+k = \frac{1}{1 + 0.22 z_2}, \quad \text{px} = c_x + x_1 \cdot S \cdot k, \quad \text{py} = c_y + y_2 \cdot S \cdot k
 $$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Uses RK4 integration which is computationally intensive but stable
-- Implements substepping to maintain stability at higher speeds
-- Fractal noise generation uses multiple octaves but with efficient interpolation
+### CPU Usage
+
+- Per sample: 8 derivative evaluations (2 attractors × 2 substeps × 2 evaluations per derivative... actually 4 per attractor per substep = 16 deriv calls) ≈ 16 × 20 flops = 320 flops
+- Plus fractal (6 octaves) ≈ 50 flops
+- Plus output math ≈ 20 flops
+- Total: ~400 flops/sample
 
 ### Memory Allocation
-- Pre-allocated arrays for attractor states and trail buffers
-- No dynamic memory allocation during processing
-- Trail buffer size fixed at 400 points
+
+- All state fixed-size
+- No allocation in `process()`
+- Trails: 400 × 3 = 1200 floats ≈ 4.8 KB
 
 ### Buffers
-- Circular buffer of size 400 for storing attractor trajectory points
-- Fixed-size arrays for octave state management
+
+- `trailX[400]`, `trailY[400]`, `trailZ[400]`: 1200 floats
+- 6 fractal octaves
 
 ### Real-time Processing
-- All processing done in the audio thread
-- Uses efficient numerical methods and precomputed values
-- Avoids expensive operations like division or trigonometric functions in critical paths
+
+- All loops bounded
+- No allocation, no blocking
+- 16 RK4 deriv calls/sample at 48 kHz = 768 K trig calls/sec
 
 ### Thread Safety
-- Module state is accessed from audio thread only
-- Display reads are safe (torn reads are cosmetic)
-- No locking mechanisms required for basic operation
+
+- All state written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
-- Uses RK4 integration for numerical stability
-- Implements safety net to reset attractor states if values become infinite
-- Limits fractal noise frequency to prevent aliasing
-- Clamps all parameters to valid ranges
+
+- RK4 with small `dt` (speed capped at 100, so `dt` ≤ 100/48000 ≈ 0.002)
+- NaN guard: re-seed attractors if non-finite
+- Output clamped to ±10 V
+- xorshift32 RNG for fractal (fast, deterministic seed)
 
 ## 10. Dependencies
 
-### Libraries and Headers
-- `rack.hpp`: VCV Rack core library
-- Standard C++ libraries: `<cmath>`, `<cstdio>`, `<algorithm>`
-- VCV Rack UI components: `window::Font`, `nvg*` drawing functions
+### Libraries/Headers
 
-### Classes and Types
-- `rack::Module`: Base module class
-- `rack::ParamWidget`, `rack::InputWidget`, `rack::OutputWidget`: UI widgets
-- `NVGcontext`, `NVGcolor`: NanoVG graphics context and color types
-- `Vec`, `DrawArgs`, `ButtonEvent`, `DragMoveEvent`, `DoubleClickEvent`: VCV Rack geometry and event types
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cstdint>`, `<cmath>`, `<cstdio>`, `<algorithm>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The **Spikes** module implements a chaotic signal generator using the Lorenz and Rössler attractors with fractional Brownian motion fractal noise modulation. It provides three-dimensional coordinate outputs (X, Y, Z) and a mixed output (MIX), along with a real-time 3D visualization of the attractor trajectory. The implementation uses RK4 integration for numerical stability, XORShift32 RNG for high-quality noise generation, and fractional Brownian motion for correlated random processes. The module features CV modulation for all parameters and includes safety mechanisms to prevent numerical instability.
+`Spikes` is a chaotic modulation source combining two famous attractors (Lorenz and Rössler) with fractal-correlated noise. It's the "artistic" counterpart to `PsyLFO`: instead of a physical pendulum, it uses mathematical chaos, which gives a different kind of unpredictability.
+
+The 3D trail display is the standout feature: you can see the attractor's shape emerging from the trail, and you can drag the view to rotate it manually or let it rotate automatically. The blend between Lorenz and Rössler creates a continuous family of attractors, from the classic butterfly (Lorenz) to the Rössler spiral.
+
+The main limitations are: CPU-heavy (400 flops/sample due to the 16 RK4 derivative evaluations), and the outputs are very chaotic (almost random), so it's better for modulation than for pitch (unless you use the V/Oct outputs from `PsyLFO` or `RandomWalk`).
