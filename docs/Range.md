@@ -1,21 +1,27 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: Range.cpp
-Generated: 2026-11-04 06:29
 -->
 
 # Range
 
 ## 1. Overview
 
-The **Range** module is a signal scaling module that maps an input voltage range to a user-defined output voltage range. It accepts a single audio signal input and scales it linearly between two configurable voltage levels, specified by the LOW and HIGH parameters.
+`Range` is a 9 HP utility module that linearly rescales a control-voltage signal. It takes a bipolar input nominally in [−5 V, +5 V] and maps it onto an arbitrary output window [LOW, HIGH], both of which are user-adjustable via front-panel knobs (each spanning −10 V .. +10 V). The transfer is purely linear:
 
-The module features:
-- A graphical display showing the current transfer function and live signal visualization
-- Two knobs for setting the low and high output voltage values
-- An input port for the signal to be scaled
-- An output port for the scaled signal
-- Visual feedback through a retro-styled UI with gradient backgrounds, scanlines, and glowing elements
+$$
+\text{out} = \frac{\text{in} + 5}{10} \cdot (\text{HIGH} - \text{LOW}) + \text{LOW}
+$$
+
+so an input of −5 V produces LOW, +5 V produces HIGH, and 0 V produces the midpoint. This makes the module useful for converting a bipolar LFO or envelope into a unipolar/attenuated/offset control signal.
+
+Key features:
+- Maps [−5, +5] V input to [LOW, HIGH] output
+- LOW and HIGH adjustable from −10 V to +10 V
+- Live transfer curve display
+- Moving dot for current input/output pair
+- LOW/HIGH readout
+- No CV inputs (it's a manual utility)
 
 ## Module Screenshot
 
@@ -25,291 +31,176 @@ The module features:
 
 ### Main Classes
 
-- `Range`: The core module class inheriting from `rack::Module`
-- `RGPanelBackground`: Custom widget for drawing the panel background
-- `RGDisplayWidget`: Custom widget for rendering the transfer function display
-- `RangeWidget`: Module widget that assembles all UI elements
+- `Range`: Core module class inheriting from `rack::Module`
+- `RGPanelBackground`: Static panel artwork
+- `RGDisplayWidget`: Live transfer curve + moving dot + readout
 
 ### Inheritance
 
-```cpp
-struct Range : Module
-```
+- `Range` inherits from `rack::Module`
+- Both UI widgets inherit from `rack::TransparentWidget`
 
-The `Range` class inherits from VCV Rack's base `Module` class.
+### State
 
-### Structures
-
-- **Parameter IDs**: Defined in `enum ParamId`
-  - `LOW_PARAM`
-  - `HIGH_PARAM`
-
-- **Input IDs**: Defined in `enum InputId`
-  - `SIGNAL_INPUT`
-
-- **Output IDs**: Defined in `enum OutputId`
-  - `SIGNAL_OUTPUT`
-
-- **Light IDs**: Defined in `enum LightId` (empty)
-
-### Relationships
-
-- The `RangeWidget` creates and manages:
-  - `RGPanelBackground` for panel rendering
-  - `RGDisplayWidget` for transfer function visualization
-  - Two `RoundSmallBlackKnob` parameters for LOW/HIGH control
-  - Input/output ports (`DarkPJ301MPort`)
-- The `RGDisplayWidget` references the `Range` module to access:
-  - Parameter values (LOW/HIGH)
-  - Last input/output voltages
-  - Active status
-
-### Module Organization
-
-The module is organized into:
-1. Core processing logic in `Range::process()`
-2. UI rendering in anonymous namespace functions (`drawText`, `drawLogo`, etc.)
-3. Panel background drawing in `RGPanelBackground::draw()`
-4. Display widget drawing in `RGDisplayWidget::drawLayer()`
+| Group | Storage |
+|-------|---------|
+| Display | `float lastIn`, `float lastOut`, `bool active` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Linear transfer function
 
-The core scaling operation is a linear transformation:
+The input is normalized to [0, 1] by:
 
 $$
-\text{out} = \left( \frac{\text{in} + 5}{10} \right) \cdot (\text{high} - \text{low}) + \text{low}
+t = \frac{\text{in} + 5}{10}
 $$
 
-Where:
-- `in` ∈ [-5V, +5V] (normalized input range)
-- `out` ∈ [low, high] (output range)
-- `low`, `high` are user-defined parameters in volts
+Then mapped to the output window:
 
-This maps the standard VCV Rack audio signal range (-5V to +5V) to a custom output voltage range.
+$$
+\text{out} = \text{LOW} + t \cdot (\text{HIGH} - \text{LOW})
+$$
 
-### Algorithms
+### Clamping
 
-1. **Linear Mapping**: The module performs a simple linear interpolation from the normalized input range [-5, 5] to the user-specified output range [low, high].
-2. **Signal Processing Pipeline**:
-   - Check if input is connected
-   - Read input voltage
-   - Read LOW/HIGH parameter values
-   - Apply linear transformation
-   - Output scaled voltage
+The input is not clamped — if you feed +20 V into a [−5, +5] input, the output will be `LOW + 1.5 * (HIGH - LOW)`, which could exceed the HIGH endpoint. This is intentional: it lets you extend the range beyond the nominal window if you need to.
 
-### Filters
+### Active state
 
-None implemented.
-
-### Oscillators
-
-None implemented.
-
-### Delay Lines
-
-None implemented.
-
-### Feedback Systems
-
-None implemented.
-
-### Modulation
-
-The module does not implement modulation or feedback systems. It simply scales the input signal based on static parameters.
-
-### Random Processes
-
-None implemented.
+If the input is not connected, the module outputs 0 V and sets `active = false` (the display hides the moving dot).
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
-- **LOW_PARAM**
-  - Range: -10.0 V to +10.0 V
-  - Default: 0.0 V
-  - Label: "Low"
-  - Unit: " V"
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `LOW_PARAM` | −10 | 10 | 0 | Low endpoint of the output window |
+| `HIGH_PARAM` | −10 | 10 | 10 | High endpoint of the output window |
 
-- **HIGH_PARAM**
-  - Range: -10.0 V to +10.0 V
-  - Default: 10.0 V
-  - Label: "High"
-  - Unit: " V"
+### Inputs
 
-### Switches
+| Input | Description |
+|-------|-------------|
+| `SIGNAL_INPUT` | Signal input |
 
-None.
+### Outputs
 
-### Buttons
-
-None.
-
-### CV Inputs
-
-- **SIGNAL_INPUT**
-  - Voltage Range: -5.0 V to +5.0 V (standard VCV Rack audio range)
-  - Behavior: Input signal to be scaled
-
-### Gates
-
-None.
+| Output | Description |
+|--------|-------------|
+| `SIGNAL_OUTPUT` | Scaled output |
 
 ### Enumerations
 
-- `ParamId`: LOW_PARAM, HIGH_PARAM
-- `InputId`: SIGNAL_INPUT
-- `OutputId`: SIGNAL_OUTPUT
-- `LightId`: Empty
-
-### Parameter Ranges and Default Values
-
-| Parameter | Min Value | Max Value | Default Value |
-|-----------|-----------|-----------|---------------|
-| LOW_PARAM | -10.0 V   | 10.0 V    | 0.0 V         |
-| HIGH_PARAM| -10.0 V   | 10.0 V    | 10.0 V        |
+- `ParamId`: LOW, HIGH
+- `InputId`: SignalIn
+- `OutputId`: SignalOut
 
 ## 5. Inputs and Outputs
 
-### Input Ports
+### Input
 
-- **SIGNAL_INPUT**
-  - Voltage Range: -5.0 V to +5.0 V
-  - Signal Type: Audio signal
-  - Behavior: The input signal to be scaled according to LOW/HIGH parameters
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `SIGNAL_INPUT` | CV/Audio | ±10 V (nominal ±5 V) | Input signal |
 
-### Output Ports
+### Output
 
-- **SIGNAL_OUTPUT**
-  - Voltage Range: [LOW_PARAM, HIGH_PARAM] (user-defined)
-  - Signal Type: Scaled audio signal
-  - Behavior: Outputs the linearly scaled version of the input signal
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `SIGNAL_OUTPUT` | CV/Audio | see `[LOW, HIGH]` | Scaled output |
+
+### Bypass
+
+`configBypass(SIGNAL_INPUT, SIGNAL_OUTPUT)` — with no cable, the input passes through.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Check**: Verify that `SIGNAL_INPUT` is connected
-2. **Voltage Reading**: Read input voltage from `SIGNAL_INPUT`
-3. **Parameter Reading**: Read LOW and HIGH parameter values
-4. **Scaling Calculation**:
-   - Normalize input from [-5, 5] to [0, 1]
-   - Scale to output range using linear interpolation
-   - Apply offset to shift to desired range
-5. **Output Setting**: Set scaled voltage on `SIGNAL_OUTPUT`
-6. **Display Update**: Store last input/output voltages for UI visualization
+1. **Check input connection** — If not connected, output 0 V, set `active = false`, return.
+2. **Read LOW and HIGH knobs**.
+3. **Read input voltage**.
+4. **Compute output** — `out = ((in + 5) / 10) * (HIGH - LOW) + LOW`.
+5. **Write output**.
+6. **Update display** — Save `lastIn`, `lastOut`, set `active = true`.
 
 ## 7. Important Functions
 
-### `Range::process()`
+### `process(const ProcessArgs &args)`
 
-The main DSP processing function:
-- Checks if input is connected
-- Reads input voltage and parameter values
-- Applies linear scaling transformation
-- Sets output voltage
-- Updates display variables (`lastIn`, `lastOut`, `active`)
-
-### `RGDisplayWidget::drawLayer()`
-
-Renders the graphical transfer function display:
-- Draws grid lines and axes
-- Renders the current transfer curve
-- Shows live signal marker with position tracking
-- Displays parameter readout
-
-### `RGPanelBackground::draw()`
-
-Draws the panel background:
-- Gradient base
-- Brushed texture
-- Logo and title
-- Section dividers
-- Knob rings and labels
-- Port plates and labels
+The only function. It's a simple linear mapping.
 
 ## 8. Mathematical Implementation
 
-The mathematical implementation is straightforward linear mapping:
+### Transfer function
 
 $$
-\text{out} = \left( \frac{\text{in} + 5}{10} \right) \cdot (\text{high} - \text{low}) + \text{low}
+\text{out} = \frac{\text{in} + 5}{10} \cdot (\text{HIGH} - \text{LOW}) + \text{LOW}
 $$
 
-Where:
-- `in` is the input voltage in range [-5, 5]
-- `low` and `high` are parameter values in volts
-- The expression `(in + 5) / 10` maps the input from [-5, 5] to [0, 1]
-- Multiplying by `(high - low)` scales the range
-- Adding `low` shifts the result to the desired output range
+### Pixel mapping (display)
+
+Voltage → pixel X:
+
+$$
+x(v) = \frac{v + 10}{20} \cdot \text{DISP\_W}
+$$
+
+Voltage → pixel Y:
+
+$$
+y(v) = \text{DISP\_H} - \frac{v + 10}{20} \cdot \text{DISP\_H}
+$$
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
+### CPU Usage
 
-- Simple linear arithmetic operations
-- Minimal floating-point calculations
-- No complex DSP algorithms or filters
-- Constant-time processing per audio block
+- 1 addition, 1 division, 1 multiplication, 1 addition per sample ≈ 4 flops
+- Display: ~200 flops/frame
+- Total: negligible
 
 ### Memory Allocation
 
-- Uses stack variables for temporary calculations
-- No dynamic memory allocation
-- Static buffers for UI rendering
+- No allocation ever
+- Fixed-size state
 
 ### Buffers
 
-- None required for core functionality
-- Display widget uses fixed-size buffers for rendering
+- None
 
 ### Real-time Processing
 
-- All operations are performed in real-time within the audio thread
-- No blocking or time-consuming operations
-- Efficient use of VCV Rack's process loop
+- O(1) per sample
+- No branching except the isConnected check
+- No allocation, no blocking
 
 ### Thread Safety
 
-- The `lastIn`, `lastOut`, and `active` variables are accessed by both audio thread (write) and UI thread (read)
-- No explicit synchronization is used, relying on atomicity of float reads/writes
-- This is acceptable for simple display updates
+- `lastIn`, `lastOut`, `active` are written by audio thread, read by UI thread via torn reads
 
 ### Numerical Stability
 
-- Uses standard floating-point arithmetic
-- No iterative or recursive calculations
-- Linear mapping ensures stable results across all parameter ranges
+- No feedback, no accumulation
+- `std::isfinite` not needed (input is bounded by ±10 V)
 
 ## 10. Dependencies
 
-### Libraries and Headers
+### Libraries/Headers
 
-- `plugin.hpp`: VCV Rack plugin interface definitions
-- `<cmath>`: Standard math functions (not used directly in this module)
-- `<cstdio>`: Standard C I/O (not used directly in this module)
-- `<algorithm>`: Standard algorithms (not used directly in this module)
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
 
-### VCV Rack Classes
+### External Classes
 
-- `rack::Module`: Base module class
-- `rack::ParamId`, `rack::InputId`, `rack::OutputId`: Enumerations for module ports
-- `rack::Widget`: Base widget class
-- `rack::TransparentWidget`: Widget with transparent background
-- `rack::DrawArgs`: Arguments for drawing functions
-- `rack::NVGcontext`: NanoVG rendering context
-- `rack::Vec`, `rack::Color`: Vector and color types
-- `rack::createParamCentered`, `createInputCentered`, `createOutputCentered`: Factory functions for UI elements
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-The **Range** module is a simple yet effective signal scaling unit that maps input voltages from the standard VCV Rack audio range (-5V to +5V) to a user-defined output voltage range. It implements a linear transformation using basic arithmetic operations and provides visual feedback through an interactive display showing the current transfer function and live signal position.
+`Range` is the simplest module in the AGMM collection. It does one thing: linearly remap a voltage range. It's useful for converting a bipolar LFO (say, −5 to +5 V) into a unipolar control signal (0 to +10 V), or for attenuating/offsetting a signal into a specific range.
 
-The module is optimized for real-time performance with minimal CPU usage, making it suitable for use in complex patch setups. Its clean UI design features retro aesthetics with gradient backgrounds, scanlines, and glowing elements that provide both functional and aesthetic value.
+The display is excellent: it shows the full transfer curve, the LOW and HIGH output markers, and the live input/output pair as a moving dot with crosshairs. You can see exactly what the module is doing at a glance.
 
-Key technical characteristics:
-- Linear voltage scaling with configurable range
-- Real-time processing in audio thread
-- Thread-safe display updates
-- Efficient memory usage
-- Standard VCV Rack module interface compliance
+The main limitation is that it has no CV inputs — LOW and HIGH are manual only. For CV-controlled range mapping, chain it with a `Swapper` or use a `Bastion` filter as a VCA. But for a manual utility, this is exactly right.
