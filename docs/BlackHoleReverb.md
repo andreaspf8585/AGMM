@@ -1,280 +1,319 @@
 <!--
 AGMM AUTOMATIC DOCUMENTATION
 Source: BlackHoleReverb.cpp
-Generated: 2026-11-04 06:13
 -->
 
 # BlackHoleReverb
 
 ## 1. Overview
 
-The `BlackHoleReverb` module is a stereo reverb effect for VCV Rack that simulates a black hole's acoustic environment using a combination of delay lines, feedback, and modulation. It provides a dark, deep, and atmospheric reverb sound with parameters for mix, feedback, damping, and modulation.
+`BlackHoleReverb` is a 12 HP stereo reverb built from six parallel modulated delay lines with damping, a shared pre-delay, cross-feedback for stereo spread, and a dry/wet mix. It exposes CV control (with attenuverters) over mix, feedback, darkness and modulation, plus a live scope and L/R level meters. The "Black Hole" name refers to the way long tails swallow the dry signal at high feedback — the reverb feels like it has absorbed the source.
+
+Key features:
+- 6 modulated delay lines with per-line low-pass damping
+- Shared pre-delay (80 ms fixed)
+- L/R cross-feedback (0.4×) for stereo width
+- CV inputs with attenuverters on mix, feedback, darkness, modulation
+- Selectable CV range (bipolar ±5 V or unipolar 0–10 V) via context menu, persisted
+- Soft tanh limiter at ±10 V on the output
+- Live scope of the mono output, plus L/R level meters
+- Non-finite safety net — any NaN/Inf becomes 0
 
 ## Module Screenshot
 
-![BlackHoleReverb VCV Rack Module](images/blackhole.png)
+![BlackHoleReverb VCV Rack Module](images/blackholereverb.png)
 
 ## 2. Architecture
 
 ### Main Classes
-- `BlackHoleReverb`: The core DSP module inheriting from `rack::Module`
-- `BlackHoleReverbWidget`: The UI widget for the module, inheriting from `rack::ModuleWidget`
-- Anonymous namespace: Contains helper classes for drawing and panel layout
+
+- `BlackHoleReverb`: Core module class inheriting from `rack::Module`
+- `BhPanelBackground`: Static panel artwork
+- `BhDisplayWidget`: Live scope + meters + readouts
 
 ### Inheritance
+
 - `BlackHoleReverb` inherits from `rack::Module`
-- `BlackHoleReverbWidget` inherits from `rack::ModuleWidget`
-- Drawing helpers inherit from `rack::TransparentWidget`
+- `BhPanelBackground` and `BhDisplayWidget` inherit from `rack::TransparentWidget`
 
-### Structures
-- `CVRange`: Enumeration with two modes: `BIPOLAR_M5_5` and `UNIPOLAR_0_10`
-- `BhCellDef`: Structure for defining control cell layout (name, param ID, attn ID, CV ID)
-- `BhPanelBackground`: Panel drawing helper
-- `BhDisplayWidget`: Scope display and level meter widget
+### State (grouped)
 
-### Relationships
-- `BlackHoleReverb` contains all DSP state including delay buffers, filter stores, and modulation phase
-- `BlackHoleReverbWidget` manages UI elements and connects to the module
-- `BhDisplayWidget` displays real-time scope data and level meters
-- `BhPanelBackground` handles panel drawing
-
-### Module Organization
-The module is organized into:
-1. DSP processing in `process()` method
-2. Parameter configuration in constructor
-3. JSON serialization for state persistence
-4. UI layout and drawing components
+| Group | Storage |
+|-------|---------|
+| Delay lines | `float delayL[6][MAX_DELAY]`, `float delayR[6][MAX_DELAY]` (MAX_DELAY = 96000) |
+| Write head | `int writeIndex` |
+| Pre-delay | `float preDelayBuffer[PRE_DELAY_MAX]` (44100 samples), `int preWrite` |
+| Modulation | `float modPhase[6]` |
+| Damping | `float filterStoreL[6]`, `float filterStoreR[6]` |
+| CV mode | `CVRange cvRangeMode` (BIPOLAR_M5_5, UNIPOLAR_0_10) |
+| Display | `float scopeMin[96]`, `scopeMax[96]`, `scopeHead`, `scopeCount`, `scopeBMin`, `scopeBMax`, `peakL`, `peakR` |
 
 ## 3. DSP Theory
 
-### Mathematical Equations
+### Parallel modulated delay lines
 
-The reverb uses a multi-tap delay line architecture with feedback and damping:
+The wet path is the sum of six delay lines:
 
-$$y[n] = \alpha x[n] + (1 - \alpha) y[n-1]$$
+$$
+\text{wetL}[n] = \frac{1}{6} \sum_{i=0}^{5} \text{delayL}_i[n - D_i[n]]
+$$
 
-Where:
-- $y[n]$ is the filtered output
-- $x[n]$ is the input
-- $\alpha$ is the filter coefficient
+where each $D_i[n]$ is a base delay plus a sine modulation:
 
-The delay lines implement a comb filter structure with feedback:
+$$
+D_i[n] = \text{base}_i + \text{mod}_i \cdot 240 \cdot \text{modAmt}
+$$
 
-$$output = input + feedback \times delayed\_signal$$
+with baseDelays = `{2741, 3347, 3823, 4421, 5101, 5897}` (samples at 48 kHz) and $\text{mod}_i = \sin(2\pi f_i t)$ with $f_i = 0.08 + 0.04 i$ Hz.
 
-Modulation is implemented as sinusoidal variation of delay times:
+### Damping
 
-$$delay_{var} = base\_delay + modulation\_amount \times 240 \times \sin(2\pi f \times t)$$
+Each line has its own one-pole low-pass in the feedback path:
 
-### Algorithms
-- Multi-tap delay line with 6 delay lines
-- Comb filter feedback structure
-- Low-pass filtering with damping coefficient
-- Sinusoidal modulation of delay times
-- Pre-delay buffer for initial signal processing
-- Peak detection and scope display
+$$
+\text{store}[n] = \text{delay}[n](1-d) + \text{store}[n-1]d
+$$
 
-### Filters
-- First-order low-pass filters implemented using recursive averaging:
-$$filter_{store}[n] = input \times (1 - damp^2) + filter_{store}[n-1] \times damp^2$$
+where $d = \text{damp}^2$ (so the knob has a quadratic effect on brightness).
 
-### Delay Lines
-- 6 delay lines with fixed base delays: [2741, 3347, 3823, 4421, 5101, 5897] samples
-- Each delay line has a maximum length of 96000 samples
-- Modulation varies delay by ±240 samples based on modulation parameter
+### Cross-feedback
 
-### Feedback Systems
-- Feedback is applied to each delay line with cross-feedback between left and right channels
-- Feedback coefficient clamped between 0 and 0.98
-- Cross-feedback factor of 0.4 for stereo widening effect
+To create stereo width without needing a full cross-feedback matrix, the module injects a small amount of the other channel's delay into each line's feedback:
 
-### Modulation
-- Sinusoidal LFO modulating delay times at different frequencies
-- Modulation frequency increases linearly with delay line index
-- Modulation amount scaled by parameter value and CV input
+$$
+\begin{aligned}
+\text{delayL}_i[n] &= \text{revInL} + (fbL_i + 0.4\cdot\text{delayR}_i[n-D_i])f \\
+\text{delayR}_i[n] &= \text{revInR} + (fbR_i + 0.4\cdot\text{delayL}_i[n-D_i])f
+\end{aligned}
+$$
 
-### Random Processes
-- No true random processes; uses deterministic sinusoidal modulation
+The 0.4× factor is small enough that the cross-feedback is audible as width but not so large that the reverb collapses to mono.
+
+### Pre-delay
+
+The 80 ms pre-delay is a simple ring buffer read:
+
+$$
+\text{revInL}[n] = \text{preDelayBuffer}[(n - 0.08 f_s) \bmod f_s]
+$$
+
+The pre-delay gives the dry attack a gap before the reverb starts, which is the main cue the ear uses to judge room size.
+
+### Output soft-limit
+
+The output is clamped to ±10 V with a tanh:
+
+$$
+\text{out} = 10\tanh(\text{mix}/10)
+$$
+
+### CV range scaling
+
+The module can interpret CV either as bipolar ±5 V or unipolar 0–10 V:
+
+$$
+\text{scaleCV}(v) = \begin{cases} v/10 & \text{unipolar} \\ \text{clamp}(v/5,-1,1) & \text{bipolar} \end{cases}
+$$
+
+The choice is stored in the patch and shown in the context menu.
 
 ## 4. Parameters and Controls
 
 ### Knobs
-- **MIX**: 0.0 to 1.0, default 0.5 - Controls wet/dry mix ratio
-- **FEEDBACK**: 0.0 to 0.98, default 0.5 - Controls feedback amount (clamped)
-- **DAMP**: 0.0 to 1.0, default 0.7 - Controls damping (darkness) coefficient
-- **MOD**: 0.0 to 1.0, default 0.5 - Controls modulation amount
 
-### Switches
-- None explicitly defined in code
+| Parameter | Min | Max | Default | Description |
+|-----------|-----|-----|---------|-------------|
+| `MIX_PARAM` | 0 | 1 | 0.5 | Dry/wet |
+| `FEEDBACK_PARAM` | 0 | 0.98 | 0.50 | Feedback |
+| `DAMP_PARAM` | 0 | 1 | 0.7 | Darkness (higher = darker) |
+| `MOD_PARAM` | 0 | 1 | 0.5 | Modulation depth |
 
-### Buttons
-- None explicitly defined in code
+### Attenuverters
 
-### CV Inputs
-- **MIX CV**: Accepts voltage for mix parameter modulation
-- **FEEDBACK CV**: Accepts voltage for feedback parameter modulation
-- **DAMP CV**: Accepts voltage for damping parameter modulation
-- **MOD CV**: Accepts voltage for modulation parameter modulation
+| Parameter | Range | Default | Description |
+|-----------|-------|---------|-------------|
+| `MIX_ATTEN` | 0 | 1 | 0 | Mix CV amount |
+| `FEEDBACK_ATTEN` | 0 | 1 | 0 | Feedback CV amount |
+| `DAMP_ATTEN` | 0 | 1 | 0 | Darkness CV amount |
+| `MOD_ATTEN` | 0 | 1 | 0 | Modulation CV amount |
 
-### Gates
-- None explicitly defined in code
+### Inputs
+
+| Input | Description |
+|-------|-------------|
+| `IN_L` | Left |
+| `IN_R` | Right |
+| `MIX_CV` | Mix CV |
+| `FEEDBACK_CV` | Feedback CV |
+| `DAMP_CV` | Darkness CV |
+| `MOD_CV` | Modulation CV |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `OUT_L` | Left |
+| `OUT_R` | Right |
 
 ### Enumerations
-- `CVRange`: 
-  - `BIPOLAR_M5_5` (-5V to +5V)
-  - `UNIPOLAR_0_10` (0V to +10V)
 
-### Parameter Ranges
-- MIX: 0.0 to 1.0
-- FEEDBACK: 0.0 to 0.98
-- DAMP: 0.0 to 1.0
-- MOD: 0.0 to 1.0
-
-### Default Values
-- MIX: 0.5
-- FEEDBACK: 0.5
-- DAMP: 0.7
-- MOD: 0.5
+- `CVRange`: BIPOLAR_M5_5, UNIPOLAR_0_10
+- `ParamId`: Mix, Feedback, Damp, Mod, MixAtten, FeedbackAtten, DampAtten, ModAtten
+- `InputId`: InL, InR, MixCV, FeedbackCV, DampCV, ModCV
+- `OutputId`: OutL, OutR
 
 ## 5. Inputs and Outputs
 
 ### Inputs
-- **IN_L**: Left input signal (voltage range: ±10V)
-- **IN_R**: Right input signal (voltage range: ±10V)
-- **MIX_CV**: Mix CV modulation input (voltage range: ±10V or 0-10V depending on mode)
-- **FEEDBACK_CV**: Feedback CV modulation input (voltage range: ±10V or 0-10V depending on mode)
-- **DAMP_CV**: Damping CV modulation input (voltage range: ±10V or 0-10V depending on mode)
-- **MOD_CV**: Modulation CV modulation input (voltage range: ±10V or 0-10V depending on mode)
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `IN_L` | Audio | ±10 V | Left audio |
+| `IN_R` | Audio | ±10 V | Right audio |
+| `MIX_CV` | CV | ±10 V | Mix modulation |
+| `FEEDBACK_CV` | CV | ±10 V | Feedback modulation |
+| `DAMP_CV` | CV | ±10 V | Darkness modulation |
+| `MOD_CV` | CV | ±10 V | Modulation depth modulation |
 
 ### Outputs
-- **OUT_L**: Left output signal (voltage range: ±10V)
-- **OUT_R**: Right output signal (voltage range: ±10V)
+
+| Name | Type | Range | Description |
+|------|------|-------|-------------|
+| `OUT_L` | Audio | ±10 V | Left output |
+| `OUT_R` | Audio | ±10 V | Right output |
+
+### Bypass
+
+`configBypass(IN_L, OUT_L)` and `configBypass(IN_R, OUT_R)` — so with no cables, input passes straight through.
 
 ## 6. Signal Processing Pipeline
 
-1. **Input Processing**: Read left and right inputs, normalize invalid values
-2. **Parameter Processing**: Read knobs, CV inputs, and attenuators; scale CVs based on mode
-3. **Pre-delay**: Apply 80ms pre-delay using circular buffer
-4. **Delay Line Processing**:
-   - Process 6 delay lines with different base delays
-   - Apply sinusoidal modulation to each delay line
-   - Implement comb filter feedback with damping
-   - Cross-feedback between left and right channels
-5. **Mixing**: Combine original input with processed signal based on mix parameter
-6. **Clipping**: Apply tanh clipping to prevent overdrive
-7. **Output**: Write processed signals to output jacks
+1. Pre-delay — Write the mono sum to the pre-delay buffer, read at 80 ms.
+2. Per-line read — For each of the 6 delay lines, read at `baseDelay + mod`, with linear interpolation.
+3. Damping — Low-pass the delayed sample in the feedback path.
+4. Cross-feed — Read the other channel's delay line at the same index.
+5. Write — Write input + (damped + crossfeed) × feedback back to the delay line.
+6. Wet sum — Sum the 6 delays and divide by 6.
+7. Wet boost — Multiply by 1.4.
+8. Dry/wet — `out = (1-mix)*in + mix*wet`.
+9. Soft limit — Clamp to ±10 V with tanh.
+10. Display — Peak followers, scope ring buffer.
 
 ## 7. Important Functions
 
-### `process()`
-Main DSP processing function that:
-- Handles sample rate and time validation
-- Reads input signals and parameters
-- Applies CV scaling based on mode
-- Implements pre-delay buffer
-- Processes all 6 delay lines with modulation
-- Combines wet/dry signals
-- Applies output clipping
-- Updates scope display data
+### `scaleCV(float v)`
 
-### `scaleCV()`
-Converts CV input voltage to normalized value:
-- If `UNIPOLAR_0_10`: divide by 10.0
-- If `BIPOLAR_M5_5`: clamp to [-1, 1] after dividing by 5.0
+Returns the CV scaled according to the current CV range mode.
 
-### `dataToJson()` / `dataFromJson()`
-Handles module state persistence:
-- Saves CV range mode to JSON
-- Loads CV range mode from JSON
+```cpp
+if (cvRangeMode == UNIPOLAR_0_10) return v / 10.f;
+return clamp(v / 5.f, -1.f, 1.f);
+```
+
+### `safe(float x)`
+
+Returns `x` if it's a normal float, otherwise `0`. Used on the inputs so a broken cable never poisons the delay lines.
+
+### `process(const ProcessArgs &args)`
+
+The main callback described in §6.
+
+### `dataToJson() / dataFromJson(json_t*)`
+
+Persist the CV range mode so a patch reopens with the same setting.
 
 ## 8. Mathematical Implementation
 
-### Delay Line Implementation
-```cpp
-int readIndex = writeIndex - delay;
-if (readIndex < 0)
-    readIndex += MAX_DELAY;
+### Modulated delay read
 
-float dl = delayL[i][readIndex];
-filterStoreL[i] = dl * (1.f - dampSq) + filterStoreL[i] * dampSq;
-float fbL = filterStoreL[i];
-delayL[i][writeIndex] = revInL + (fbL + cross) * feedback;
-```
+$$
+D_i[n] = \text{base}_i + 240\cdot\text{modAmt}\cdot\sin(2\pi f_i t),\quad f_i = 0.08 + 0.04 i \text{ Hz}
+$$
 
-### Modulation Implementation
-```cpp
-modPhase[i] += args.sampleTime * (0.08f + 0.04f * i);
-if (modPhase[i] > 1.f)
-    modPhase[i] -= 1.f;
-float mod = std::sin(2.f * M_PI * modPhase[i]);
-int delay = baseDelays[i] + (int)(mod * 240.f * modAmount);
-```
+The 240-sample peak deviation gives about 5 ms of pitch modulation at max depth — enough for chorusing, not enough for obvious vibrato.
 
-### Damping Filter
-```cpp
-filterStoreL[i] = dl * (1.f - dampSq) + filterStoreL[i] * dampSq;
-```
+### Cross-feed write
 
-### Clipping
-```cpp
-outL = clipLevel * std::tanh(outL / clipLevel);
-```
+$$
+\begin{aligned}
+\text{delayL}_i[n] &= \text{revInL} + (fbL_i + 0.4\cdot\text{delayR}_i)f \\
+\text{delayR}_i[n] &= \text{revInR} + (fbR_i + 0.4\cdot\text{delayL}_i)f
+\end{aligned}
+$$
+
+where $fbL_i = \text{storeL}_i$ is the damped delay output. The 0.4 factor means that at high feedback the L and R tails become correlated — but not identical — giving a stable, wide image.
+
+### Damping squared
+
+$$
+d = \text{damp}^2
+$$
+
+The square makes the knob feel more natural: at knob = 0.5 the effective damping is 0.25, which is quite bright; at knob = 1.0 it's full darkening.
+
+### Output tanh
+
+$$
+\text{out} = 10\tanh(\text{mix}/10)
+$$
+
+This is linear for |mix| < 3 V and saturates toward ±10 V.
 
 ## 9. Performance and Optimization
 
-### CPU Usage Considerations
-- Uses fixed-size delay buffers (6 × 96000 samples)
-- Implements efficient circular buffer indexing
-- Limits modulation frequency to prevent excessive computation
-- Uses simple mathematical operations for real-time processing
+### CPU Usage
+
+- 6 lines × (1 read + 1 LP + 1 write + 1 cross-feed) ≈ 6 × 10 flops ≈ 60 flops
+- Pre-delay: 1 read + 1 write
+- Modulation: 6 sin calls per sample
+- Total: ~150 flops/sample, plus 6 sin calls at 48 kHz
 
 ### Memory Allocation
-- Pre-allocated static buffers:
-  - `delayL[NUM_DELAYS][MAX_DELAY]`
-  - `delayR[NUM_DELAYS][MAX_DELAY]`
-  - `preDelayBuffer[PRE_DELAY_MAX]`
-  - Scope display buffers (`scopeMin`, `scopeMax`)
+
+- All buffers are allocated once in the constructor:
+  - `delayL[6][96000]`, `delayR[6][96000]` ≈ 1.15 M floats ≈ 4.6 MB
+  - `preDelayBuffer[44100]` ≈ 176 KB
+- No allocation in `process()`
 
 ### Buffers
-- 6 delay lines with 96000 sample capacity each
-- Pre-delay buffer with 44100 samples capacity
-- Scope display buffer with 96 buckets
+
+- 6 × 2 × 96000 floats for the delay lines
+- 44100 floats for the pre-delay
+- 96 floats each for scope min/max
 
 ### Real-time Processing
-- All processing done in `process()` method
-- Uses fixed sample time for consistent timing
-- Implements safe input handling with normalization
+
+- All loops are bounded
+- Pre-delay is a simple ring buffer
+- No allocation, no blocking
 
 ### Thread Safety
-- No explicit thread safety mechanisms (assumes single-threaded Rack environment)
-- All state variables are updated atomically within process loop
+
+- All state is written by the audio thread and read by the UI thread via torn reads
+- The `safe()` wrapper on inputs prevents NaN from broken cables from poisoning the delay lines
 
 ### Numerical Stability
-- Input values clamped to prevent invalid operations
-- Feedback coefficient clamped to 0.98 maximum
-- Uses `std::isnormal()` for input validation
-- Tanh clipping prevents signal overflow
+
+- `safe()` on all input and output values
+- tanh soft limit on output
+- Damping in the feedback path (so high-frequency energy is always being removed)
+- Cross-feed factor 0.4 < 1, so it can't build up
 
 ## 10. Dependencies
 
-### Libraries
-- `rack.hpp`: VCV Rack core library
-- `<cmath>`: Standard math functions
-- `<cstdio>`: Standard I/O (unused in current implementation)
-- `<cstring>`: String operations (unused in current implementation)
-- `<algorithm>`: Standard algorithms
-- `<memory>`: Smart pointers
+### Libraries/Headers
 
-### Classes and Headers
-- `rack::Module`: Base module class
-- `rack::ModuleWidget`: Base widget class
-- `rack::TransparentWidget`: Base drawing widget
-- `rack::Param`: Parameter handling
-- `rack::Input`: Input signal handling
-- `rack::Output`: Output signal handling
-- `rack::json_t`: JSON serialization support
-- `rack::Vec`, `rack::DrawArgs`, `rack::NVGcontext`: Drawing and geometry
+- `plugin.hpp` — VCV Rack core
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<memory>`
+
+### External Classes
+
+- `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
+- `agmm::panelBase`, `agmm::bezel`, `agmm::plate`, `agmm::text`, `agmm::plotFrame`, `agmm::screen`, `agmm::sectionHeader`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`
 
 ## 11. Summary
 
-The `BlackHoleReverb` is a stereo reverb module implementing a multi-tap delay line architecture with sinusoidal modulation. It features six delay lines with fixed base delays, comb filter feedback, damping filters, and cross-channel feedback for stereo widening. The module provides four main parameters (mix, feedback, damping, modulation) with CV inputs and attenuators, plus a CV range selection for compatibility with different voltage standards. The implementation uses efficient circular buffers, real-time processing, and tanh clipping for signal limiting, making it suitable for live performance in VCV Rack.
+`BlackHoleReverb` is a compact stereo reverb built on six parallel modulated delay lines. Unlike a full FDN, it doesn't use a feedback matrix; instead, it relies on the natural decorrelation of six different base delays plus a small L/R cross-feed. This gives a reverb that is simpler to reason about than a Freeverb or FDN, at the cost of a somewhat less dense tail — but with a very musical, chorusy character.
+
+The module's main strengths are its clean, predictable parameter response (the damping-squared curve, the 0.4× cross-feed, the 0.98 feedback cap), its selectable CV range (so it works well with both bipolar LFOs and unipolar envelopes), and its robustness (non-finite safety net, tanh limiter, always-decaying feedback). The fixed 80 ms pre-delay is a reasonable default but not adjustable, which is the module's main limitation.
