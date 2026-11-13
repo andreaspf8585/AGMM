@@ -18,7 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <algorithm>
+#include <algorithm>  
 
 // ------------------------------------------------------------
 // Layout constants (12 HP = 180 px wide)
