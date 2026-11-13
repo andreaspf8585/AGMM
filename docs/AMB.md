@@ -9,6 +9,8 @@ Source: AMB.cpp
 
 `AMB` is a 36 HP generative ambient machine in the spirit of Brian Eno's AMB-1 tapes. It composes by itself: it picks a chord every few seconds, and against that chord it plays eight independent layers — a slow detuned pad, eight long FM bell loops of unequal prime lengths, a sub bass with a low rumble, six Euclidean heartbeat layers, formant-filtered "ah-oh-oo" choir voices, sparse music-box plucks, pitched wind swells, and shimmering high glass partials. The whole mix then runs through a tape ping-pong echo, a granular cloud, a probabilistic glitch stage, and a very long reverb. Nothing ever repeats exactly.
 
+It can either free-run at its own `TEMPO` or lock to an external clock on `CLK IN`: incoming pulses drive the tempo and phase-lock the beat, so bells, plucks, heartbeats, glitches and the chord scheduler all sit in the same grid as the rest of the patch. The `TEMPO` knob takes over again when the clock stops or the jack is unplugged.
+
 Key features:
 - Ten scales, automatic chord progression with 7 s equal-power cross-fade
 - Eight layers (PAD, BELL, BASS, PULSE, CHOIR, PLUCK, AIR, GLASS) with independent levels
@@ -19,6 +21,7 @@ Key features:
 - Granular cloud with 28 voices, pitch scatter (octaves, fifths, fourths, reversal)
 - Probabilistic glitch stage: stutter, reverse, bit-crush, tape stop, dropout
 - 8-line FDN reverb with Hadamard matrix (RT60 up to 32 s), freezable
+- External clock input with configurable pulses-per-beat and optional echo-time sync
 - Wide 500 × 124 display: piano roll, spectrum, goniometer, grain buffer, meters
 - CV / gate outputs: chord root, bell pitch, bell trigger, clock, glitch gate, level
 
@@ -64,6 +67,7 @@ Key features:
 |-------|---------|
 | Parameters | 26 params (key, scale, tempo, chord interval, 8 layer levels, echo/reverb/grain/glitch, dark, freeze) |
 | Transport | `double beatPhase`, `int lastBeat`, `double time` |
+| External clock | `bool extClock`, `float extPhaseErr` (engine); `dsp::SchmittTrigger clockTrig`, `int clockPpb`, `bool echoSync`, `float clockTimer`, `float clockPeriod`, `int extPulseIdx`, `bool clockLocked` (module) |
 | Pad | `PadSet pad[2]`, `int padCur`, `float padFade`, `padLfo[8]`, `padLfoRate[8]`, `padTimer`, `lastDegree` |
 | Bells | `bellPh[8]`, `bellModPh[8]`, `bellEnv[8]`, `bellAge[8]`, `bellFreq[8]`, `bellRatio[8]`, `bellVel[8]`, `bellPan[8]`, `bellCycle[8]` |
 | Bass | `bassPitch, bassTarget, bassPhase, bassLfo`, `texLp1, texLp2` |
@@ -77,13 +81,25 @@ Key features:
 | Master | `mLp1L, mLp2L, mLp1R, mLp2R`, `dcXL, dcYL, dcXR, dcYR` |
 | Analysis | `fft`, `anaRing[2048]`, `anaPos`, `anaHop`, `bandLo[32]`, `bandHi[32]`, `bandTilt[32]`, `bandHold[32]`, `spec[32]`, `specPk[32]`, `gonL[192]`, `gonR[192]`, `gonPos`, `corr`, `peakL, peakR`, `peakHoldL, peakHoldR` |
 | History | `NoteEvent hist[320]`, `histPos` |
-| RNG | `uint32_t rngState` |    
+| RNG | `uint32_t rngState` |
 
 ## 3. DSP Theory
 
 ### Transport
 
-The engine runs a beat clock at `TEMPO` BPM. Beat phase is fractional and drives every time-based layer.
+The engine runs a beat clock at `TEMPO` BPM (or at the derived external tempo when the clock is locked). Beat phase is fractional and drives every time-based layer.
+
+### External clock
+
+When a clock is present on `CLK IN`, the module measures the interval between successive rising edges (Schmitt trigger, thresholds 0.1 V / 2 V). The measured period is smoothed with a one-pole (α = 0.25), ignoring the first pulse pair and any jump larger than 25 %. The tempo is then derived as
+
+$$
+\text{BPM} = \frac{60}{T_\text{pulse} \cdot N_\text{ppb}}
+$$
+
+with `N_ppb` the user-selected pulses-per-beat (1, 2, 4, 8, 12, 16, 24; default 1). Every `N_ppb`-th pulse (i.e. on each downbeat) the engine records the phase error `p_target − beatPhase` and slowly absorbs it into `beatPhase`, so the internal clock slides onto the external grid without ever running backwards or leaping. The absorber is rate-limited to `[−0.9·step, +3·step]` per sample (with `step = bps·dt`) and snaps to zero once the residual is < 1e-5 beats.
+
+If no pulse arrives for `2.5·T_pulse` (or 1 s, whichever is larger), the lock drops and `TEMPO` takes over. Disconnecting the jack also clears the lock. The external state is exposed to the display as an `EXT` chip next to the BPM readout.
 
 ### Chord scheduling
 
@@ -169,6 +185,8 @@ All types cross-fade in/out with 2 × `edge` (≈ 6 ms) fade samples.
 
 Stereo ping-pong with independent L/R delay times, wow + flutter + drift LFOs, a one-pole low-pass (frequency = `2800 · 0.35^DARK`) and high-pass at 150 Hz in the feedback path, `tanh` soft clip. Right channel feeds left, left feeds right.
 
+When **Sync echo time to clock** is enabled (menu) and the external clock is locked, the `TIME` knob no longer reads as seconds — it selects one of six beat divisions (`1/16, 1/8, dotted 1/8, 1/4, dotted 1/4, 1/2`) and the engine sets `echoTime = division · 60 / BPM`, folded into `[0.12 s, 1.2 s]` by halving or doubling.
+
 ### Reverb (final wet path)
 
 8-line feedback delay network with the orthonormal 8 × 8 Hadamard matrix (`HH^T = I`, scaled by `1/√8`). Per-line RT60 gain `10^{−3·d_i / (f_s·T)}` with `T = 0.8·40^{DECAY}`, one-pole damping at `fc = 12000 · 0.0667^{DAMP}`, slow LFO read-position modulation. Three input allpasses per side and a 30 ms pre-delay. **Freeze** sets `g_i = 1`, disables modulation, mutes input.
@@ -193,7 +211,7 @@ xorshift32 with a fresh seed on patch load; `gran` uses its own seed derived fro
 |-----------|-----|-----|---------|-------------|
 | `KEY_PARAM` | 0 | 11 | 0 | Key (C, C#, D … B), snapped |
 | `SCALE_PARAM` | 0 | 9 | 1 | Scale (Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Harm Minor, Locrian, Min Pent, Whole Tone) |
-| `TEMPO_PARAM` | 40 | 180 | 72 | Tempo in BPM |
+| `TEMPO_PARAM` | 40 | 180 | 72 | Tempo in BPM (ignored while the external clock is locked) |
 | `CHORD_INT_PARAM` | 4 | 60 | 24 | Chord change interval (s) |
 | `PAD_LEVEL_PARAM` | 0 | 1 | 0.60 | Pad level |
 | `BELL_LEVEL_PARAM` | 0 | 1 | 0.45 | Bell level |
@@ -208,7 +226,7 @@ xorshift32 with a fresh seed on patch load; `gran` uses its own seed derived fro
 
 | Parameter | Min | Max | Default | Description |
 |-----------|-----|-----|---------|-------------|
-| `ECHO_TIME_PARAM` | 0.12 | 1.2 | 0.50 | Echo time (s) |
+| `ECHO_TIME_PARAM` | 0.12 | 1.2 | 0.50 | Echo time (s); reads as a beat division when Sync is on |
 | `ECHO_FBK_PARAM` | 0 | 0.9 | 0.60 | Echo feedback |
 | `ECHO_MIX_PARAM` | 0 | 1 | 0.45 | Echo mix |
 | `REVERB_DECAY_PARAM` | 0 | 1 | 0.70 | Reverb decay (RT60 0.8 – 32 s) |
@@ -228,6 +246,15 @@ xorshift32 with a fresh seed on patch load; `gran` uses its own seed derived fro
 | `GLITCH_PROB_PARAM` | 0 | 1 | 0.15 | Glitch probability per 16th note |
 | `GLITCH_LEN_PARAM` | 0 | 1 | 0.40 | Glitch slice length, exponential (≈ 0.125 → 1 beat) |
 
+Row 3 also holds the `GLT IN`, `FRZ IN` and `CLK IN` jacks plus eight outputs (see §5). It uses a 13-cell layout with a 37 px pitch instead of the 40 px pitch used by rows 1 and 2.
+
+### Context menu
+
+- **Clock pulses per beat** — 1, 2, 4, 8, 12, 16, 24 (default 1). Set this to match your clock source (e.g. 24 for DIN-sync, 4 for "every 16th note" from a sequencer).
+- **Sync echo time to clock** — when enabled and the clock is locked, `ECHO_TIME` picks a beat division instead of seconds (see §3).
+
+Both menu choices persist with the patch.
+
 ## 5. Inputs and Outputs
 
 ### Inputs
@@ -236,6 +263,7 @@ xorshift32 with a fresh seed on patch load; `gran` uses its own seed derived fro
 |------|------|-------|-------------|
 | `GLITCH_INPUT` | Trigger | 0..10 V | Rising edge fires a glitch immediately |
 | `FREEZE_INPUT` | Gate | 0..10 V | > 1 V freezes the reverb (OR with the button) |
+| `CLOCK_INPUT` | Clock | 0..10 V | External clock; the tempo and beat phase follow its pulses |
 
 ### Outputs
 
@@ -256,14 +284,24 @@ xorshift32 with a fresh seed on patch load; `gran` uses its own seed derived fro
 
 ### Menu
 
-No menu options.
+See §4.
 
 ## 6. Signal Processing Pipeline
 
-Per sample, `AmbEngine::process(dt)` runs:
+Per sample, `AMB::process(args)` runs first (Rack side), then `AmbEngine::process(dt)`:
 
+**Rack wrapper:**
+1. Sample-rate update, key/scale change detection → `pickNewChord()` or `startChord()`.
+2. Freeze button (Schmitt + toggle), freeze OR gate, `FREEZE_LIGHT`.
+3. Glitch trigger Schmitt → `engine.glitchTrigIn`.
+4. Clock input: measure pulse interval, smooth period, phase-lock on downbeats, drop lock if pulses stop for `2.5·T_pulse`. Set `engine.extClock`, and override `engine.tempoBpm` with `60 / (T_pulse · N_ppb)` while locked.
+5. Copy 26 parameter values into the engine (with echo-time sync applied if enabled and locked).
+6. `engine.process(dt)`.
+7. Write 8 outputs; drive `trigPulse` / `clockPulse` from counter diffs.
+
+**Engine:**
 1. **Smoothing** — 50 ms one-pole on all 12 level / mix / dark targets.
-2. **Transport** — advance `beatPhase`; update `beatCount` on integer beat boundaries.
+2. **Transport** — advance `beatPhase` at the current `tempoBpm`; absorb `extPhaseErr` into `beatPhase` if present (rate-limited, sign-preserving); update `beatCount` on integer beat boundaries.
 3. **Chord scheduling** — advance `padTimer`; pick a new chord on overflow; advance pad cross-fade and `chordRoot` one-pole.
 4. **Render Pad** — 2 chord sets × 4 notes × 2 detuned voices.
 5. **Render Bells** — 8 loops; envs > 0.0008 only.
@@ -318,11 +356,15 @@ Per-sample effect blocks (see §3).
 
 ### `void AMB::process(const ProcessArgs &args)`
 
-Rack wrapper: sets sample rate, handles key/scale change, buttons, freeze OR gate, transfers 26 parameters into `AmbEngine`, calls `engine.process(dt)`, writes 8 outputs, drives 2 trigger generators from counter diffs.
+Rack wrapper: sets sample rate, handles key/scale change, buttons, freeze OR gate, glitch trigger, external clock tracking and phase lock, transfers 26 parameters into `AmbEngine`, calls `engine.process(dt)`, writes 8 outputs, drives 2 trigger generators from counter diffs.
 
 ### `json_t *AMB::dataToJson()` / `void AMB::dataFromJson(json_t *)`
 
-Persist `frozen` with the patch.
+Persist `frozen`, `clockPpb` and `echoSync` with the patch.
+
+### `void AMBWidget::appendContextMenu(Menu *menu)`
+
+Adds the "Clock pulses per beat" submenu and the "Sync echo time to clock" toggle (see §4).
 
 ## 8. Mathematical Implementation
 
@@ -331,6 +373,39 @@ Persist `frozen` with the patch.
 $$
 \text{semis}(d) = \text{INTERVALS}\!\left[(d \bmod n + n) \bmod n\right] + 12 \lfloor d/n \rfloor
 $$
+
+### External clock tempo
+
+$$
+T_\text{smoothed} \leftarrow T_\text{smoothed} + 0.25 \,(T_\text{measured} - T_\text{smoothed}), \quad \text{BPM} = \frac{60}{T_\text{smoothed} \cdot N_\text{ppb}}
+$$
+
+### Phase-error absorption
+
+On each downbeat (`extPulseIdx % N_ppb == 0`):
+
+$$
+\text{err} \leftarrow \text{round}(\text{beatPhase}) - \text{beatPhase}
+$$
+
+Each subsequent sample:
+
+$$
+\Delta \leftarrow \mathrm{clamp}\!\left(\text{err} \cdot \min(1,\, 8\,dt),\; -0.9\,\text{step},\; 3.0\,\text{step}\right), \quad \text{step} = \frac{\text{BPM}}{60}\,dt
+$$
+$$
+\text{beatPhase} \mathrel{+}= \Delta, \quad \text{err} \mathrel{-}= \Delta
+$$
+
+with a snap to zero once `|err| < 1e-5`.
+
+### Sync echo time
+
+$$
+t_\text{echo} = \text{div} \cdot \frac{60}{\text{BPM}}, \quad \text{div} \in \{0.25, 0.5, 0.75, 1, 1.5, 2\}
+$$
+
+folded into `[0.12 s, 1.2 s]` by successive halving or doubling.
 
 ### Pad cross-fade
 
@@ -428,6 +503,7 @@ with `tilt = 2.5·log₂(√(f₀·f₁) / 1000)` so that a pink-ish spectrum re
 - Reverb: 8 FDN lines + 6 allpasses + 2 pre-delay lines
 - Master: 2 one-poles + DC + tanh + 2 one-poles + DC + tanh
 - Analysis: one 2048-point FFT per 1024 samples (~48 per second at 48 kHz)
+- Clock tracking: one Schmitt trigger + one multiply/add per sample (negligible)
 
 Rough estimate: 2500 – 4000 flops/sample, dominated by the granular cloud, granular + reverb, and the FFT.
 
@@ -460,6 +536,7 @@ Rough estimate: 2500 – 4000 flops/sample, dominated by the granular cloud, gra
 - Reverb feedback `g_i < 1` outside freeze; freeze sets `g_i = 1` and mutes input so the loop is lossless
 - Master soft-clips with `tanh` before the output
 - All output voltages clamped by Rack
+- External clock: only pulse intervals in `[10 ms, 4 s]` are accepted; phase-error step is clamped to `[−0.9·step, +3·step]` so `beatPhase` never runs backwards; the lock drops after `max(2.5·T_pulse, 1 s)` without a pulse
 
 ## 10. Dependencies
 
@@ -475,12 +552,15 @@ Rough estimate: 2500 – 4000 flops/sample, dominated by the granular cloud, gra
 - `rack::ParamQuantity` and subclasses (`KeyParamQuantity`, `TempoParamQuantity`, `ChordIntervalParamQuantity`, `EchoTimeParamQuantity`, `GrainSizeParamQuantity`, `GrainDensParamQuantity`, `GlitchLenParamQuantity`)
 - `dsp::SchmittTrigger`, `dsp::PulseGenerator`
 - `rack::random` (initial seed)
+- `rack::Menu`, `rack::MenuSeparator`, `rack::createSubmenuItem`, `rack::createCheckMenuItem`, `rack::createBoolPtrMenuItem`
 - `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::sectionHeader`, `agmm::screen`, `agmm::plotFrame`, `agmm::meter`, `agmm::chip`, `agmm::text`, `agmm::accent`, `agmm::violet`, `agmm::warm`, `agmm::bright`, `agmm::dim`, `agmm::withA`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
 `AMB` is a wide, self-contained generative ambient instrument. It schedules its own chords from a ten-scale selection, plays eight independent layers against them, and washes the result through an echo, a granular cloud, a probabilistic glitch stage, and a very long freezable FDN reverb. The prime-loop bells and the equal-power chord cross-fade guarantee that no two minutes are ever the same, while the DARK control lets you tilt the entire machine from bright shimmer to a dark, sub-dominated wash.
 
-The 500 × 124 display is the heart of the UI: a 20 s piano-roll history with nine colour-coded layers, a real-time 32-band spectrum analyser, a goniometer, a live grain-buffer view with colour-coded pitch ratios, and stereo meters with peak hold. The GLITCH and FREEZE chips in the header make the current state readable at a glance, and the pitch / trigger outputs make the generative material easy to drive external voices in key and time.
+The external clock input makes it easy to lock the whole machine to a sequencer: the engine measures the pulse interval, derives the tempo, and slowly slides its beat phase onto the external grid on every downbeat, so the bells, plucks, heartbeats and glitches always land on the beat without any hard jumps. The menu lets you set the pulses-per-beat to match your source, and optionally retarget the `ECHO_TIME` knob to pick a beat division for tempo-synced echoes.
 
-The main trade-offs are CPU (four effects in series, 28-voice granular cloud, 2048-point FFT at ~48 Hz) and control density (26 parameters split across three 12-cell rows); once you have the layout in muscle memory it feels less like a module and more like a small composing studio. `FREEZE` combined with `GLITCH` is the sweet spot for performance — capture a drone, then let the glitch stage chew on it in time with the beat.
+The 500 × 124 display is the heart of the UI: a 20 s piano-roll history with nine colour-coded layers, a real-time 32-band spectrum analyser, a goniometer, a live grain-buffer view with colour-coded pitch ratios, and stereo meters with peak hold. The GLITCH and FREEZE chips in the header make the current state readable at a glance, and an `EXT` chip next to the BPM readout confirms an external clock lock.
+
+The main trade-offs are CPU (four effects in series, 28-voice granular cloud, 2048-point FFT at ~48 Hz) and control density (26 parameters split across three rows — 12 cells, 12 cells, then 13 cells for I/O); once you have the layout in muscle memory it feels less like a module and more like a small composing studio. `FREEZE` combined with `GLITCH` is the sweet spot for performance — capture a drone, then let the glitch stage chew on it in time with the beat.

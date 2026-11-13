@@ -34,6 +34,9 @@
 //   DARK          overall tone: low values are bright, high values are dark
 //   FREEZE        holds the reverb as an endless drone (button or gate input)
 //
+//   CLK IN   external clock: the tempo and beat phase follow the incoming pulses
+//            (menu: pulses per beat 1..24, optional echo-time sync). The TEMPO
+//            knob takes over again when the clock stops or is unplugged.
 //   Inputs   GLT IN   trigger: fire a glitch now
 //            FRZ IN   gate: hold the reverb while high
 //   Outputs  OUT L / OUT R   stereo audio
@@ -824,6 +827,9 @@ struct AmbEngine
     int key = 0;
     int scaleIdx = 1;
     float tempoBpm = 72.f;
+    // External clock lock (set by the module; unused while extClock is false)
+    bool extClock = false;
+    float extPhaseErr = 0.f; // beats still to be absorbed into beatPhase
     float padLevel = 0.60f;
     float bellLevel = 0.45f;
     float bassLevel = 0.50f;
@@ -1473,6 +1479,17 @@ struct AmbEngine
         // 1. Transport
         const float bps = std::max(tempoBpm, 20.f) / 60.f;
         beatPhase += (double)bps * dt;
+        if (extPhaseErr != 0.f)
+        {
+            // Absorb the phase error smoothly: never run backwards, never leap
+            const double step = (double)bps * dt;
+            double c = (double)extPhaseErr * std::min(1.0, 8.0 * (double)dt);
+            c = std::max(-0.9 * step, std::min(3.0 * step, c));
+            if (std::fabs((double)extPhaseErr) < 1e-5)
+                c = (double)extPhaseErr;
+            beatPhase += c;
+            extPhaseErr -= (float)c;
+        }
         int beat = (int)std::floor(beatPhase);
         if (beat != lastBeat)
         {
@@ -1936,6 +1953,16 @@ static inline float ambCellEdge(int i)
 {
     return AMB_ROW_X0 + AMB_ROW_W / 12.f * (float)i;
 }
+// Row 3 holds thirteen cells (the CLK IN jack was added): 40 px pitch
+static const float AMB_R3_CELL_W = 37.f;
+static inline float ambCellX13(int i)
+{
+    return AMB_ROW_X0 + AMB_ROW_W / 13.f * ((float)i + 0.5f);
+}
+static inline float ambCellEdge13(int i)
+{
+    return AMB_ROW_X0 + AMB_ROW_W / 13.f * (float)i;
+}
 
 // ---------------------------------------------------------------------------
 // Param quantities
@@ -2033,6 +2060,7 @@ struct AMB : Module
     {
         FREEZE_INPUT,
         GLITCH_INPUT,
+        CLOCK_INPUT,
         INPUTS_LEN
     };
     enum OutputId
@@ -2058,6 +2086,14 @@ struct AMB : Module
     int lastScale = -1;
     bool started = false;
     bool frozen = false;
+    // External clock
+    dsp::SchmittTrigger clockTrig;
+    int clockPpb = 1;        // clock pulses per beat (menu)
+    bool echoSync = false;   // lock echo time to the clock (menu)
+    float clockTimer = 0.f;  // seconds since the last pulse
+    float clockPeriod = 0.f; // smoothed pulse period, 0 = unknown
+    int extPulseIdx = 0;
+    bool clockLocked = false;
     int lastBellCount = 0;
     int lastBeatCount = 0;
 
@@ -2109,6 +2145,7 @@ struct AMB : Module
 
         configInput(FREEZE_INPUT, "Freeze gate");
         configInput(GLITCH_INPUT, "Glitch trigger");
+        configInput(CLOCK_INPUT, "External clock");
         configOutput(OUT_L_OUTPUT, "Left");
         configOutput(OUT_R_OUTPUT, "Right");
         configOutput(CHORD_OUTPUT, "Chord root (1 V/oct)");
@@ -2125,6 +2162,8 @@ struct AMB : Module
     {
         Module::onReset(e);
         frozen = false;
+        clockPeriod = 0.f;
+        clockLocked = false;
         lastKey = lastScale = -1; // pick a fresh chord on the next sample
     }
 
@@ -2132,6 +2171,8 @@ struct AMB : Module
     {
         json_t *root = json_object();
         json_object_set_new(root, "frozen", json_boolean(frozen));
+        json_object_set_new(root, "clockPpb", json_integer(clockPpb));
+        json_object_set_new(root, "echoSync", json_boolean(echoSync));
         return root;
     }
 
@@ -2140,6 +2181,12 @@ struct AMB : Module
         json_t *f = json_object_get(root, "frozen");
         if (f)
             frozen = json_is_true(f);
+        json_t *cp = json_object_get(root, "clockPpb");
+        if (cp)
+            clockPpb = rack::math::clamp((int)json_integer_value(cp), 1, 48);
+        json_t *es = json_object_get(root, "echoSync");
+        if (es)
+            echoSync = json_is_true(es);
     }
 
     void process(const ProcessArgs &args) override
@@ -2173,6 +2220,52 @@ struct AMB : Module
 
         engine.freeze = freezeNow;
         engine.tempoBpm = params[TEMPO_PARAM].getValue();
+
+        // ---- external clock: follow its tempo and lock the beat phase ----
+        clockTimer += args.sampleTime;
+        if (inputs[CLOCK_INPUT].isConnected())
+        {
+            if (clockTrig.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 2.f))
+            {
+                const float t = clockTimer;
+                clockTimer = 0.f;
+                if (t > 0.01f && t < 4.f)
+                {
+                    if (clockPeriod <= 0.f || std::fabs(t - clockPeriod) > 0.25f * clockPeriod)
+                    {
+                        clockPeriod = t; // first pulse pair, or a tempo jump
+                        extPulseIdx = 0;
+                    }
+                    else
+                        clockPeriod += (t - clockPeriod) * 0.25f;
+                    clockLocked = true;
+                    if (extPulseIdx % clockPpb == 0)
+                    {
+                        const double p = engine.beatPhase;
+                        engine.extPhaseErr = (float)(std::floor(p + 0.5) - p);
+                    }
+                    ++extPulseIdx;
+                }
+                else
+                {
+                    clockPeriod = 0.f;
+                    clockLocked = false;
+                }
+            }
+            if (clockLocked && clockTimer > std::max(2.5f * clockPeriod, 1.f))
+            {
+                clockLocked = false; // clock stopped: back to the TEMPO knob
+                clockPeriod = 0.f;
+            }
+        }
+        else
+        {
+            clockLocked = false;
+            clockPeriod = 0.f;
+        }
+        engine.extClock = clockLocked;
+        if (clockLocked)
+            engine.tempoBpm = rack::math::clamp(60.f / (clockPeriod * (float)clockPpb), 20.f, 300.f);
         engine.padLevel = params[PAD_LEVEL_PARAM].getValue();
         engine.bellLevel = params[BELL_LEVEL_PARAM].getValue();
         engine.bassLevel = params[BASS_LEVEL_PARAM].getValue();
@@ -2188,6 +2281,18 @@ struct AMB : Module
         engine.chordInterval = params[CHORD_INT_PARAM].getValue();
         engine.dark = params[DARK_PARAM].getValue();
         engine.echoTime = params[ECHO_TIME_PARAM].getValue();
+        if (echoSync && clockLocked)
+        {
+            // The TIME knob picks a beat division: 1/16, 1/8, dotted 1/8, 1/4, dotted 1/4, 1/2
+            static const float div[6] = {0.25f, 0.5f, 0.75f, 1.f, 1.5f, 2.f};
+            const float n = rack::math::clamp((engine.echoTime - 0.12f) / 1.08f, 0.f, 0.9999f);
+            float t = div[(int)(n * 6.f)] * 60.f / std::max(engine.tempoBpm, 20.f);
+            while (t > 1.2f)
+                t *= 0.5f;
+            while (t < 0.12f)
+                t *= 2.f;
+            engine.echoTime = t;
+        }
         engine.reverbDamp = params[REVERB_DAMP_PARAM].getValue();
         engine.grainMix = params[GRAIN_MIX_PARAM].getValue();
         engine.grainSize = params[GRAIN_SIZE_PARAM].getValue();
@@ -2301,12 +2406,12 @@ namespace
                 ag::cell(vg, ambCellX(i), AMB_R2_TOP, AMB_CELL_W, AMB_CELL_H, r2[i]);
 
             // Row 3: glitch | inputs and outputs (outputs tinted)
-            ambGroupHeader(vg, ambCellEdge(0), ambCellEdge(2), AMB_R3_HDR, "GLITCH");
-            ambGroupHeader(vg, ambCellEdge(2), ambCellEdge(12), AMB_R3_HDR, "I / O");
-            const char *r3[12] = {"PROB", "LEN", "GLT IN", "FRZ IN", "OUT L", "OUT R",
+            ambGroupHeader(vg, ambCellEdge13(0), ambCellEdge13(2), AMB_R3_HDR, "GLITCH");
+            ambGroupHeader(vg, ambCellEdge13(2), ambCellEdge13(13), AMB_R3_HDR, "I / O");
+            const char *r3[13] = {"PROB", "LEN", "GLT IN", "FRZ IN", "CLK IN", "OUT L", "OUT R",
                                   "CHORD", "BELL", "TRIG", "CLOCK", "GLITCH", "LEVEL"};
-            for (int i = 0; i < 12; ++i)
-                ag::cell(vg, ambCellX(i), AMB_R3_TOP, AMB_CELL_W, AMB_CELL_H, r3[i], i >= 4);
+            for (int i = 0; i < 13; ++i)
+                ag::cell(vg, ambCellX13(i), AMB_R3_TOP, AMB_R3_CELL_W, AMB_CELL_H, r3[i], i >= 5);
 
             Widget::draw(args);
         }
@@ -2452,7 +2557,7 @@ namespace
             int key = 0, scale = 1, beatCount = 0, nGrains = 0;
             float tempo = 72.f, chordProg = 0.f, mL = 0.f, mR = 0.f, pkL = 0.f, pkR = 0.f;
             float echoMs = 500.f, revSec = 8.f, corr = 0.f;
-            bool frozen = false, glitchOn = false;
+            bool frozen = false, glitchOn = false, extClk = false;
             double now = 0.0;
             float chordNotes[4] = {0.f, 3.f, 7.f, 14.f};
             const AmbEngine::NoteEvent *hist = nullptr;
@@ -2474,7 +2579,8 @@ namespace
                 key = e.key;
                 scale = e.scaleIdx;
                 tempo = e.tempoBpm;
-                //chord = e.chordRoot;
+                extClk = e.extClock;
+                // chord = e.chordRoot;
                 chordProg = e.chordProgress;
                 mL = e.meterL;
                 mR = e.meterR;
@@ -2487,7 +2593,7 @@ namespace
                 beatCount = e.beatCount;
                 corr = e.corr;
                 glitchOn = e.glitchActive;
-                //glitchType = e.glitchType;
+                // glitchType = e.glitchType;
                 for (int k = 0; k < 4; ++k)
                     chordNotes[k] = e.pad[e.padCur].note[k];
                 hist = e.hist;
@@ -2506,7 +2612,7 @@ namespace
                 // Static preview for the module browser
                 now = 20.0;
                 tempo = 72.f;
-                //chord = 0.f;
+                // chord = 0.f;
                 chordProg = 0.62f;
                 beatCount = 37;
                 mL = 0.35f;
@@ -2515,7 +2621,7 @@ namespace
                 pkR = 0.45f;
                 corr = 0.78f;
                 glitchOn = true;
-                //glitchType = 0;
+                // glitchType = 0;
                 nGrains = 9;
                 int n = 0;
                 const float pads[4] = {0.f, 3.f, 7.f, 10.f};
@@ -2733,7 +2839,9 @@ namespace
             ag::text(vg, 8.f, AMB_HDR_H * 0.5f, buf, 8.f, ag::accent(), ag::ALIGN_L, 0.5f);
 
             snprintf(buf, sizeof(buf), "%.0f BPM", tempo);
-            ag::text(vg, 128.f, AMB_HDR_H * 0.5f, buf, 8.f, ag::dim(), ag::ALIGN_L, 0.5f);
+            ag::text(vg, 128.f, AMB_HDR_H * 0.5f, buf, 8.f, extClk ? ag::accent() : ag::dim(), ag::ALIGN_L, 0.5f);
+            if (extClk)
+                ag::text(vg, 128.f + ag::textWidth(vg, buf, 8.f, 0.5f) + 4.f, AMB_HDR_H * 0.5f, "EXT", 6.f, ag::accent(), ag::ALIGN_L, 0.5f);
 
             snprintf(buf, sizeof(buf), "BAR %03d.%d", beatCount / 4 + 1, beatCount % 4 + 1);
             ag::text(vg, 184.f, AMB_HDR_H * 0.5f, buf, 8.f, ag::dim(), ag::ALIGN_L, 0.5f);
@@ -2955,18 +3063,34 @@ struct AMBWidget : ModuleWidget
 
         // Row 3: glitch PROB, LEN | GLT IN, FRZ IN | OUT L, OUT R, CHORD, BELL, TRIG, CLOCK, GLITCH, LEVEL
         const float y3 = AMB_R3_TOP + AMB_CTRL_DY;
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(0), y3), module, AMB::GLITCH_PROB_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(1), y3), module, AMB::GLITCH_LEN_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX(2), y3), module, AMB::GLITCH_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX(3), y3), module, AMB::FREEZE_INPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(4), y3), module, AMB::OUT_L_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(5), y3), module, AMB::OUT_R_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(6), y3), module, AMB::CHORD_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(7), y3), module, AMB::BELL_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(8), y3), module, AMB::TRIG_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(9), y3), module, AMB::CLOCK_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(10), y3), module, AMB::GLITCH_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(11), y3), module, AMB::LEVEL_OUTPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX13(0), y3), module, AMB::GLITCH_PROB_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX13(1), y3), module, AMB::GLITCH_LEN_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX13(2), y3), module, AMB::GLITCH_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX13(3), y3), module, AMB::FREEZE_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX13(4), y3), module, AMB::CLOCK_INPUT));
+        static const int outs3[8] = {AMB::OUT_L_OUTPUT, AMB::OUT_R_OUTPUT, AMB::CHORD_OUTPUT, AMB::BELL_OUTPUT,
+                                     AMB::TRIG_OUTPUT, AMB::CLOCK_OUTPUT, AMB::GLITCH_OUTPUT, AMB::LEVEL_OUTPUT};
+        for (int i = 0; i < 8; ++i)
+            addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX13(5 + i), y3), module, outs3[i]));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        ModuleWidget::appendContextMenu(menu);
+        AMB *m = dynamic_cast<AMB *>(module);
+        if (!m)
+            return;
+        menu->addChild(new MenuSeparator);
+        menu->addChild(createSubmenuItem("Clock pulses per beat", std::to_string(m->clockPpb), [=](Menu *sub)
+                                         {
+            static const int opts[7] = {1, 2, 4, 8, 12, 16, 24};
+            for (int i = 0; i < 7; ++i)
+            {
+                const int v = opts[i];
+                sub->addChild(createCheckMenuItem(std::to_string(v), "", [=]() { return m->clockPpb == v; },
+                                                  [=]() { m->clockPpb = v; m->extPulseIdx = 0; }));
+            } }));
+        menu->addChild(createBoolPtrMenuItem("Sync echo time to clock (TIME picks the division)", "", &m->echoSync));
     }
 };
 
