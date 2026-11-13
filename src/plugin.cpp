@@ -58,6 +58,7 @@ void init(Plugin *p)
 	p->addModel(modelTritoneParadox);
 	p->addModel(modelAMB);
 	p->addModel(modelGalton);
+	p->addModel(modelAMB_MINI);
 
 
 	// Any other plugin initialization may go here.

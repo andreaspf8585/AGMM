@@ -462,6 +462,16 @@
         "Gate",
         "trigger"
       ]
+    },
+    {
+      "slug": "AMB_MINI",
+      "name": "AMB_MINI",
+      "description": "Ambient sounds like AMB module",
+      "tags": [
+        "ambient",
+        "random",
+        "generative"
+      ]
     }
   ]
 }
