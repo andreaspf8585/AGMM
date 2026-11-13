@@ -77,7 +77,7 @@ Key features:
 | Master | `mLp1L, mLp2L, mLp1R, mLp2R`, `dcXL, dcYL, dcXR, dcYR` |
 | Analysis | `fft`, `anaRing[2048]`, `anaPos`, `anaHop`, `bandLo[32]`, `bandHi[32]`, `bandTilt[32]`, `bandHold[32]`, `spec[32]`, `specPk[32]`, `gonL[192]`, `gonR[192]`, `gonPos`, `corr`, `peakL, peakR`, `peakHoldL, peakHoldR` |
 | History | `NoteEvent hist[320]`, `histPos` |
-| RNG | `uint32_t rngState` |
+| RNG | `uint32_t rngState` |    
 
 ## 3. DSP Theory
 
