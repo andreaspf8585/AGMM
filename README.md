@@ -1,5 +1,224 @@
 # AGMM
+author: Andreas Gkogkos, andreaspf8585@gmail.com
+# AGMM Module Catalogue
 
+The plugin is a collection of **55 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+
+---
+
+## 1. Generative Ambient Instruments
+*Self-composing machines that schedule their own chords, layers and textures.*
+
+| Module | Description |
+|--------|-------------|
+| **AMB** | 36 HP generative ambient machine (Eno / AMB-1 style): an 8-voice detuned pad, 8 tape-loop bells of unequal prime lengths, sub bass, six Euclidean heartbeat layers, formant choir, sparse music-box plucks, pitched wind swells, shimmering glass partials. Runs through tape ping-pong echo, 28-voice granular cloud, probabilistic glitch stage, and an 8-line FDN reverb. Ten scales, automatic chord progression with 7 s cross-fade, external clock input with pulses-per-beat menu, optional clock-synced echo time. |
+| **AMB_MINI** | 28 HP compact sibling of AMB: cross-fading 8-voice pad, 8 tape-loop bells, sub bass, six Euclidean pulse layers, tape echo and an 8-line FDN reverb. Same automatic chord progression and ten-scale selection, without the choir / pluck / air / glass layers or the granular / glitch stages. Can be loaded alongside the full AMB in the same patch. |
+| **InstantDrone** | Three-oscillator drone synth with per-oscillator V/Oct pitch, sine/triangle/saw waveforms, mix, slow drift, low-pass filter and reverb send — all CV-able. Optional per-oscillator envelope input with a bypass switch. Multi-tap delay-based reverb. |
+| **LSDrone** | Cathedral-style drone synth: two detunable oscillators, resonant LPF, LFO, drift, modulated stereo delay, shimmer reverb, echo and final LPF. All 23 parameters have CV inputs and attenuverters. Display switches between waveform, bar spectrum and spectrum curve. |
+
+---
+
+## 2. Reverbs
+*From minimal feedback-delay ambience to fully parametric 8-line FDN cathedrals.*
+
+| Module | Description |
+|--------|-------------|
+| **Ambience** | Algorithmic reverb built on a 4-line FDN with input all-pass diffusion, per-line damping low-pass filters, shared pre-delay, output shelving EQ, and freeze. CV over decay and mix. |
+| **BlackHoleReverb** | Stereo reverb using six parallel modulated delay lines with damping, shared pre-delay and feedback. CV inputs with attenuverters for mix, feedback, darkness and modulation; selectable bipolar/unipolar CV range. |
+| **DarkHall** | Stereo reverb built from eight damped comb filters feeding four series all-passes (Schroeder / Freeverb-style) with L/R cross-feed, size, damping and modulation controls, plus a scope and L/R level meters. |
+| **DarkHallGranular** | Galaxy-style stereo reverb with an input diffusion chain feeding two cross-coupled delay tanks. Replace, Brightness, Detune and Bigness controls with CV and attenuverters, input/output gain, dry/wet and a reset input. |
+| **HeatRev** | Hybrid reverb / echo: a stereo feedback delay stage, a Cathedral FDN reverb, and a 2D heat-grid diffusion network that adds a warm moving resonant texture. Live heat-map display. |
+| **InfinityRev** | Fully parametric 8-line FDN reverb using an orthonormal Hadamard feedback matrix, modulated delays, per-line damping, RT60-based decay and a freeze switch/gate. Input all-pass diffusion, early reflections, width and equal-power dry/wet. |
+| **PsyReverb** | Freeverb-style stereo reverb: eight parallel damped comb filters feeding four series Schroeder all-passes, with the wet signal mono-shared between L and R for a wide, stable image. Wet / Dry / Room / Damping each have CV and bipolar attenuverters. Display shows decay envelope, damping response and I/O meters. |
+| **PsyReverb2** | "Galactic"-style reverb (Airwindows-inspired) extended with damping, predelay, mod, width, freeze, shelving EQ, low cut and ducking. CV + attenuverter per knob, pre/post-reverb EQ, click-free bypass, tank-clear button/trigger. Display switches between WAVE, BARS and SPECTRUM views. |
+| **Reverb** | Minimal mono feedback-delay reverb with a damped feedback loop, soft-clipped write, optional input drive saturation, dry/wet mix and output gain. Warm, feedback-based ambience. Scope and single mono level meter. |
+| **Whirlpool** | Polyphonic reverb built on an 8-line FDN per voice, with orthonormal Hadamard feedback, 4-stage input all-pass diffusion, early reflections, RT60-based per-line gains, one-pole damping and per-line modulation. Five CV-able controls (Replace, Brightness, Detune, Bigness, Mix), stereo in/out, and WAVE/BARS/SPECTRUM display. |
+
+---
+
+## 3. Delays & Echoes
+*Tape, ping-pong, reverse, and glitch-flavoured stereo delays.*
+
+| Module | Description |
+|--------|-------------|
+| **PsyDelay** | Psychedelic stereo delay (up to 2 s) with feedback, reverse, ping-pong and phase-flip routing, an input gate, and wet character FX: chaos-LFO time modulation, cross-mod, glitch, ring mod, sample-rate reduction, bit-crush, howl and freeze. Display shows the full delay line as a mirrored timeline with tap markers and state chips. |
+| **SickDelay** | Stereo delay with independent / linked L/R times (or clock-synced note divisions), feedback, mix, tone, drive, modulation, ping-pong, bit-crusher and freeze. Display shows the delay-line contents as a timeline with L/R read taps and all state readouts. |
+
+---
+
+## 4. Multi-Effects
+*Everything-in-one boxes that combine several effect blocks.*
+
+| Module | Description |
+|--------|-------------|
+| **Pharmakon** | Stereo multi-FX: modulated stereo delay (ping-pong, detune/chorus tap), Schroeder reverb, distortion, two-band shelving EQ, spacy LFO-modulated LPF and M/S width. 16 main parameters with individual CV and attenuverters. Display switches between waveform, bar spectrum and spectrum curve. |
+| **Vortex** | Dual-mode reverb / echo. Reverb is a plate with 12 CV-able parameters (pre-delay, size, decay, diffusion, damping, low cut, mod speed/depth, mix); echo is a modulated delay with ping-pong. Freeze (latch + gate), Clear (fade-out/reset/fade-in), stereo in/out switches, and WAVE/BARS/SPECTRUM display. |
+
+---
+
+## 5. Filters & Waveshapers
+*Character filters and analogue-flavoured non-linearities.*
+
+| Module | Description |
+|--------|-------------|
+| **Bastion** | Multi-engine filter offering ten selectable classic topologies (Moog ladder, TB-303, MS-20, SEM SVF, Steiner-Parker, CEM3320, Roland OTA, EMS diode, EDP Wasp, Buchla LPG). Simultaneous LP/BP/HP outputs with CV-able cutoff, resonance and drive. |
+| **MagicBox** | Waveshaper with 20 selectable shaping functions, auto-level, DC blocker, drive, dry/wet and output level. Display shows the live transfer curve with an operating-point trail, eight harmonic bars, and IN/OUT scopes. |
+| **Phasmal** | Stereo phaser with a chain of 2–12 first-order all-pass stages and global feedback, swept by a sine or triangle LFO. Stereo spread and CV over rate/depth/center/feedback. Display shows the exact magnitude response of the current settings, the sweep range and an LFO scope. |
+
+---
+
+## 6. Oscillators & Voices
+*Tonal sources, from band-limited wavetables to Shepard–Risset glissandi.*
+
+| Module | Description |
+|--------|-------------|
+| **Ladder** | Shepard–Risset glissando VCO. Up to 20 octave-spaced partials weighted by a Gaussian window in log-frequency space; SPEED slides them together so pitch appears to rise (or fall) endlessly. Stereo output with per-partial panning; oscilloscope and partial-spectrum display. |
+| **Oscillator** | Polyphonic band-limited wavetable oscillator. 30 waveforms baked into an 11-level mipmap selected by pitch so table playback is alias-free. LO CUT and HI CUT SVF stages, feedback and FM as phase offsets. Display shows waveform, spectrum and filter response plus a clickable 30-wave gallery. |
+| **Stagger** | Polyphonic stereo VCO with independent filtered-random pitch drift per channel (chaos), giving a wide, unstable tone. Sine/triangle/saw/square with minBLEP anti-aliasing; CV + attenuverter on pitch, chaos, waveform and pulse width. Display shows the waveform with a phase marker plus a scrolling chaos history. |
+| **Stagger2** | Expanded Stagger: adds a per-voice modulated delay and 8-line FDN reverb, a trigger/gate envelope, master gain and a compressor. Polyphonic VCO+FX output plus a mono-summed stereo FX output. Wave scope, ENV/L/R meters and FX readouts. |
+| **TritoneParadox** | Shepard-tone pair generator for the tritone paradox illusion. Two tones separated by a 5–7 semitone interval with an adjustable Gaussian spectral envelope (centre + width), optional lower/higher context tone, and Manual/Auto sequencing. Display shows the envelope with partials, plus a pitch-class circle marking the interval. |
+
+---
+
+## 7. Chaos & Modulation Sources
+*Physics-driven modulation: pendula, attractors, N-body systems, gravity wells.*
+
+| Module | Description |
+|--------|-------------|
+| **BouncingBalls** | Chaos generator with up to 16 balls bouncing inside a 20 V × 20 V arena. Polyphonic outputs for X/Y position, per-ball random V/Oct, zero-crossing gates, ball-ball collision gates, and wall-hit gates. |
+| **Galton** | Interactive Galton board with real ball physics: balls fall under gravity, bounce off a triangular peg lattice and collect in bins, forming a bell curve. Outputs slot gates, slot/row CV, landing/peg-hit triggers, and polyphonic V/Oct + gates. |
+| **PsyLFO** | Chaotic modulation source built from a real double-pendulum physics simulation integrated with RK4 at audio rate. Per pendulum: X/Y position outputs, V/Oct that latches a random value on each zero-crossing, and a gate output. Global Speed, Gravity, Damping, Kick and Reset. Live animated display. |
+| **RandomWalk** | Polyphonic random-walk generator: up to 16 walkers wander in a ±10 V arena with Gaussian steps, configurable step size, speed and AR(1) smoothness (momentum). Per walker: X/Y position, axis-crossing gates, and random V/Oct latched on each crossing. Arena display with fading trails and a 16-bar position strip. |
+| **Spikes** | Chaotic modulation source combining Lorenz and Rössler strange attractors (integrated with RK4) with a fractal-correlated fBm noise generator. Blend, fractal amount/speed, speed (1 V/oct) and scale controls; outputs X/Y/Z/MIX. Rotatable 3D trail view of the blended attractor. |
+| **SpringPendulum** | Chaotic modulation source based on a physical spring-pendulum: a mass on four linear springs with optional gravity, damping and random force, integrated with RK4. Mouse-grabbable. Outputs X/Y position, plus a random V/Oct latched on each X = 0 crossing with a matching gate. Live dial display with fading trail. |
+| **XBodyProblem** | N-body gravity LFO: simulates 2–10 point masses under mutual gravity inside a unit square. Per-mass X/Y position, speed and wall-event trigger outputs as poly channels. Wrap (Pac-Man) or bounce walls, equal or random masses, adjustable gravity/speed/softening. Big square display with bodies, velocity vectors, gravity links, trails and centre of mass. |
+
+---
+
+## 8. Random & Probability
+*Dice rolls, weighted randomness and probabilistic gate / pitch generation.*
+
+| Module | Description |
+|--------|-------------|
+| **Dice** | Polyphonic random-gate / random V/Oct generator. On each clock edge, per-voice dice rolls open gates with configurable probability and latch random voltages, output raw and quantized to one of 60+ scales. |
+| **DiceOnSteroids** | Expanded 16-voice probabilistic gate / random V/Oct generator with random modes (uniform, walk, drunk, gaussian), a 16 × 64 pattern recorder/player, train mode, glide, CV over most parameters, and an RNG seed input. |
+
+---
+
+## 9. Sequencers & Pattern Generators
+*Everything from Euclidean-style step grids to generative arpeggiators.*
+
+| Module | Description |
+|--------|-------------|
+| **CellAutoGate** | One-dimensional elementary cellular automaton (Wolfram rules 0–255) on a 64-cell row, sampled at 1–16 positions to produce a polyphonic gate pattern. Internal or external clock, randomize/reset, with a history display and rule truth table. |
+| **ExpressArpeggiator** | Generative 16-step arpeggiator with root, 60+ scales, octave range and forward/backward/random/drunk/pendulum direction. Interactive display to paint notes, mute/lock steps, set loop length and direction; per-step mutation and randomization. |
+| **PsySeq** | 8 × 8 step sequencer with per-cell voltage and probability trimpots. Forward/reverse/random direction, adjustable start step, random-voltage-per-step mode, and periodic mutation (with configurable wait cycles). Outputs CV, inverted CV, cycle gate and step trigger; live 8 × 8 grid and status screen. |
+| **Stasis** | 8-stage clocked sample-and-hold shift register with per-stage probability, slew (1 ms – 2 s), loop-back and bipolar level. Each stage has its own input (breaking the chain) and output; also a poly 8-channel output. Display shows per-stage bars, chain arrows, loop bus and a 24-column history heat map. |
+
+---
+
+## 10. Pitch Processing
+*Quantisation, tuning and scale mapping.*
+
+| Module | Description |
+|--------|-------------|
+| **Quantara** | Polyphonic 1 V/oct pitch quantizer with 16 built-in scales plus an editable custom scale. Root/scale/transpose via knob + CV, glide, three quantize modes (nearest/down/up), and optional clocked sample & hold. Each voice emits a note-change trigger. Display shows a pitch-class wheel, staircase transfer plot and a clickable keyboard for editing the custom scale. |
+
+---
+
+## 11. Sampling
+*Audio capture and playback.*
+
+| Module | Description |
+|--------|-------------|
+| **Sampler** | Mono/stereo sample recorder + player. Record from L/R (new sample or Sound-on-Sound overdub), load/save WAV, adjust playback speed or V/Oct tuning, start/length, direction, one-shot/loop/ping-pong modes, anti-click fades, A-D envelope with sustain gate, loop crossfade, and input/playback mix. Interactive waveform display (drag to set the loop region). |
+
+---
+
+## 12. Utilities & Logic
+*Routing, logic, range mapping and crossfading.*
+
+| Module | Description |
+|--------|-------------|
+| **Gates** | Polyphonic logic processor taking two gate inputs (A, B) and producing seven simultaneous logic outputs: AND, OR, NOT (A), NAND, NOR, XOR, XNOR. Live 9-row scrolling logic scope with adjustable time-per-screen. |
+| **Merger** | 16 monophonic inputs merged into one polyphonic output. Output channel count equals the highest connected input, so gaps carry 0 V and channel numbering stays stable. Display shows the active channel count and a 16-segment bar. |
+| **Range** | Utility CV range mapper: linearly rescales a [−5 V, +5 V] input onto an arbitrary [LOW, HIGH] output window, both adjustable from −10 V to +10 V. Display shows the live transfer curve, range markers and a moving dot for the current input/output. |
+| **Splitter** | Expands a single polyphonic input into sixteen monophonic outputs. Each output jack carries one channel of the incoming poly signal (or 0 V). Display shows the current channel count and a 16-segment activity bar. |
+| **Swapper** | Dual-channel crossfader. Independent L→R and R→L amounts (knob + CV/attenuverter) blend the two signals into each output. Routing-diagram display shows the four link weights as line thickness plus IN/OUT level nodes. |
+
+---
+
+## 13. Mixers & VCAs
+*Level control, mixing and polyphonic gain.*
+
+| Module | Description |
+|--------|-------------|
+| **Mixer3** | Stereo 3-channel mixer with per-channel L/R inputs, a level knob plus CV with bipolar attenuverter, and a master gain. Scope and L/R level meters. CV range selectable (bipolar/unipolar) from the menu. |
+| **Mixer6** | Six-channel version of Mixer3 with the same structure (per-channel L/R inputs, level knob + CV/attenuverter, master gain), laid out in narrower stacked plates for a taller panel. Scope and L/R meters. |
+| **VCA2** | Dual VCA with a per-channel gain-limit knob (0× .. 2×). ENV input drives the gain (unpatched = unity), and the limit clamps the maximum. The two vertical limit bars double as interactive controls (click/drag to set, double-click to reset) and as envelope + output-peak meters. |
+| **VCAPoly** | Polyphonic VCA (up to 16 voices). Per-voice gain = ENV × limit; limit comes from the global knob, or from a per-voice LIMIT CV when patched. ENV unpatched gives unity gain. Display stacks 16 voice rows with gain bars, output-peak ticks and per-row or global limit markers. |
+
+---
+
+## 14. Envelopes
+*Shaped control voltages.*
+
+| Module | Description |
+|--------|-------------|
+| **FancyADSR** | Envelope generator with per-stage CV, selectable linear/exponential attack and release shapes, loop mode, and a 5 ms end-of-release (EOR) pulse. Scope shows both the ideal ADSR preview and the live output trace. |
+
+---
+
+## 15. Switches & Routing
+*Sequential routing of one signal across many or many across one.*
+
+| Module | Description |
+|--------|-------------|
+| **SwitchLines1to8** | 1-to-8 sequential switch: one SIGNAL input routed to one of eight outputs by a clocked sequencer (LENGTH/START/DIR: forward/reverse/pendulum/random). Per-output crossfade on change, one gate per output (high when selected), EOC trigger, and a live routing display with fan-out curves, meters and history strip. |
+| **SwitchLines8to1** | 8-to-1 sequential switch: one of eight inputs routed to a single output by a clocked sequencer, with crossfade, one gate per input (high when selected), EOC trigger, and a live routing display with input meters, converging curves and history strip. |
+
+---
+
+## 16. Noise, Weather & Field Recordings
+*Environmental textures and non-tonal sounds.*
+
+| Module | Description |
+|--------|-------------|
+| **RainStorm** | Generative weather module: layered rain (pink-noise wash, two Poisson-timed resonant droplet layers, hiss, distant rumble) with slow gusts, plus up to two overlapping thunder voices with random distance and flash-to-bang delay. Stereo echo and Freeverb-style reverb. Animated rain/lightning display. |
+
+---
+
+## 17. Visualisers
+*Audio-reactive graphics and generative eye candy.*
+
+| Module | Description |
+|--------|-------------|
+| **Lifeform** | Audio-reactive 3D ferrofluid visualiser. A glossy black lobed blob with ~140 Rosensweig spikes and orbiting droplets tumbles inside a glass dish. Low/mid/high bands, onset detection and silence detection drive shape, spikes and droplet orbits. |
+
+---
+
+## Quick Reference by Category
+
+| Category | Count | Modules |
+|----------|-------|---------|
+| Generative Ambient | 4 | AMB, AMB_MINI, InstantDrone, LSDrone |
+| Reverbs | 10 | Ambience, BlackHoleReverb, DarkHall, DarkHallGranular, HeatRev, InfinityRev, PsyReverb, PsyReverb2, Reverb, Whirlpool |
+| Delays & Echoes | 2 | PsyDelay, SickDelay |
+| Multi-Effects | 2 | Pharmakon, Vortex |
+| Filters & Waveshapers | 3 | Bastion, MagicBox, Phasmal |
+| Oscillators & Voices | 5 | Ladder, Oscillator, Stagger, Stagger2, TritoneParadox |
+| Chaos & Modulation | 7 | BouncingBalls, Galton, PsyLFO, RandomWalk, Spikes, SpringPendulum, XBodyProblem |
+| Random & Probability | 2 | Dice, DiceOnSteroids |
+| Sequencers & Patterns | 4 | CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
+| Pitch Processing | 1 | Quantara |
+| Sampling | 1 | Sampler |
+| Utilities & Logic | 5 | Gates, Merger, Range, Splitter, Swapper |
+| Mixers & VCAs | 4 | Mixer3, Mixer6, VCA2, VCAPoly |
+| Envelopes | 1 | FancyADSR |
+| Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
+| Noise & Weather | 1 | RainStorm |
+| Visualisers | 1 | Lifeform |
+| **Total** | **55** | |
 ## Documentation
 
-[Explore the complete AGMM documentation](docs/README.md)
+[Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
