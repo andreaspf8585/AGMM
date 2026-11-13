@@ -1,75 +1,835 @@
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <vector>
-#include <random>
 
 // ============================================================================
-// AMB – generative ambient machine (Eno / AMB-1 style)
+// AMB - generative ambient machine (Eno / AMB-1 style), dark and wide
+// ----------------------------------------------------------------------------
+// The machine composes by itself: it picks a chord every few seconds, plays
+// eight long bell loops of unequal length against it, holds a sub bass, a low
+// rumble and soft Euclidean heartbeats, and sends everything through a tape
+// echo and a very long reverb. Nothing ever repeats exactly.
+//
+//   KEY / SCALE   tonal centre and scale (default C minor)
+//   TEMPO         speed of the bell loops and heartbeats
+//   CHORD         seconds between chord changes (chords cross-fade over 7 s)
+//   PAD / BELL / BASS / PULSE   layer levels
+//   ECHO          TIME, FBK (feedback) and MIX of the tape ping-pong echo
+//   REVERB        DECAY (0.8 .. 32 s), DAMP (darkness of the tail), MIX
+//   DARK          overall tone: low values are bright, high values are dark
+//   FREEZE        holds the reverb as an endless drone (button or gate input)
+//
+//   Inputs   FRZ IN   gate: hold the reverb while high
+//   Outputs  OUT L / OUT R   stereo audio
+//            CHORD    root of the current chord, 1 V/oct (C4 = 0 V)
+//            BELL     pitch of the last bell, 1 V/oct
+//            TRIG     trigger on every bell
+//            CLOCK    trigger on every beat
+//            LEVEL    output level, 0..10 V
 // ============================================================================
 
-// ------------------------------------------------------------
-// Layout constants (16 HP = 240×380)
-// ------------------------------------------------------------
-static const float AMB_W = RACK_GRID_WIDTH * 16;
-static const float AMB_H = RACK_GRID_HEIGHT;
-
-static const float AMB_DX = 20.f, AMB_DY = 30.f, AMB_DW = 200.f, AMB_DH = 90.f;
-static const float AMB_TX0 = 12.f, AMB_TY0 = 18.f, AMB_TW = 164.f, AMB_TH = 46.f;
-
-static const float AMB_KCOL[4]  = {34.f, 91.f, 149.f, 206.f};
-static const float AMB_CELL_W   = 54.f;
-
-static const float AMB_KBIG_CELL_TOP = 128.f;
-static const float AMB_KBIG_CELL_H   = 58.f;
-static const float AMB_KBIG_CY       = 162.f;
-
-static const float AMB_KS1_CELL_TOP = 192.f;
-static const float AMB_KS1_CELL_H   = 38.f;
-static const float AMB_KS1_CY       = 220.f;
-
-static const float AMB_KS2_CELL_TOP = 234.f;
-static const float AMB_KS2_CELL_H   = 38.f;
-static const float AMB_KS2_CY       = 262.f;
-
-static const float AMB_KS3_CELL_TOP = 276.f;
-static const float AMB_KS3_CELL_H   = 38.f;
-static const float AMB_KS3_CY       = 304.f;
-
-static const float AMB_IO_CELL_TOP = 320.f;
-static const float AMB_IO_CELL_H   = 46.f;
-static const float AMB_IO_CY       = 350.f;
-
-static const int AMB_NSCALES = 6;
+// ============================================================================
+// Scales
+// ============================================================================
+static const int AMB_NSCALES = 10;
 static const char *AMB_SCALE_NAMES[AMB_NSCALES] = {
-    "MAJOR", "MINOR", "DORIAN", "PHRYGIAN", "LYDIAN", "MIXOLYDIAN"
+    "MAJOR", "MINOR", "DORIAN", "PHRYGIAN", "LYDIAN", "MIXOLYDIAN",
+    "HARM MINOR", "LOCRIAN", "MIN PENT", "WHOLE TONE"
 };
+static const int AMB_SCALE_LEN[AMB_NSCALES] = {7, 7, 7, 7, 7, 7, 7, 7, 5, 6};
 static const int AMB_SCALE_INTERVALS[AMB_NSCALES][7] = {
     {0, 2, 4, 5, 7, 9, 11},
     {0, 2, 3, 5, 7, 8, 10},
     {0, 2, 3, 5, 7, 9, 10},
     {0, 1, 3, 5, 7, 8, 10},
     {0, 2, 4, 6, 7, 9, 11},
-    {0, 2, 4, 5, 7, 9, 10}
+    {0, 2, 4, 5, 7, 9, 10},
+    {0, 2, 3, 5, 7, 8, 11},
+    {0, 1, 3, 5, 6, 8, 10},
+    {0, 3, 5, 7, 10, 0, 0},
+    {0, 2, 4, 6, 8, 10, 0}
 };
 static const char *AMB_NOTE_NAMES[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 };
 
-static const int   AMB_PITCH_MIN = -12;   // C2 (was 0)
-static const int   AMB_PITCH_MAX = 48;    // C6
-static const float AMB_HIST_WIN  = 15.f;
+static const float AMB_PITCH_MIN = -16.f;   // plot range (semitones above C3)
+static const float AMB_PITCH_MAX = 36.f;
+static const float AMB_HIST_WIN  = 20.f;    // seconds shown in the display
 
-// 8 tape loops of unequal prime lengths
+// 8 tape loops of unequal prime lengths (in beats)
 static const int AMB_LOOP_BEATS[8] = { 17, 23, 29, 31, 37, 41, 43, 47 };
 
 // 6 Euclidean patterns (32-beat cycle across all)
-static const int AMB_EUCLID[6][2]  = {
+static const int AMB_EUCLID[6][2] = {
     { 32, 5 }, { 24, 4 }, { 16, 2 }, { 28, 3 }, { 20, 5 }, { 12, 3 }
 };
+
+// ============================================================================
+// DSP building blocks (no Rack dependencies)
+// ============================================================================
+namespace ambdsp
+{
+    static const float kPi = 3.14159265358979f;
+
+    inline float lpCoef(float fc, float dt)
+    {
+        return 1.f - std::exp(-2.f * kPi * fc * dt);
+    }
+
+    inline int floorDiv(int a, int b)
+    {
+        int q = a / b;
+        if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+        return q;
+    }
+
+    // Fractional delay line (linear interpolation).
+    struct DelayLine
+    {
+        std::vector<float> buf;
+        int w = 0;
+        int size = 4;
+
+        void init(int n)
+        {
+            size = std::max(n, 2) + 2;
+            buf.assign((size_t)size, 0.f);
+            w = 0;
+        }
+        // Read before write: returns the sample written d samples ago.
+        inline float read(float d) const
+        {
+            float rp = (float)w - d;
+            while (rp < 0.f) rp += (float)size;
+            int i0 = (int)rp;
+            float f = rp - (float)i0;
+            if (i0 >= size) i0 -= size;
+            int i1 = i0 + 1;
+            if (i1 >= size) i1 = 0;
+            return buf[(size_t)i0] + (buf[(size_t)i1] - buf[(size_t)i0]) * f;
+        }
+        inline void write(float x)
+        {
+            buf[(size_t)w] = x;
+            if (++w >= size) w = 0;
+        }
+    };
+
+    // Schroeder all-pass with a fixed integer delay.
+    struct Allpass
+    {
+        std::vector<float> buf;
+        int idx = 0;
+        float g = 0.6f;
+        void init(int n) { buf.assign((size_t)std::max(n, 1), 0.f); idx = 0; }
+        inline float process(float x)
+        {
+            float yn = buf[(size_t)idx];
+            float vn = x + g * yn;
+            buf[(size_t)idx] = vn;
+            if (++idx >= (int)buf.size()) idx = 0;
+            return yn - g * vn;
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // 8-line feedback delay network with a Hadamard mixing matrix.
+    //   * RT60 is set directly (0.8 s .. 32 s)
+    //   * a one-pole low-pass in every line darkens the tail
+    //   * slowly modulated lines remove the metallic ringing
+    //   * freeze: unity loop gain, no filtering, input muted
+    // ------------------------------------------------------------------
+    struct Reverb
+    {
+        static const int N = 8;
+        float sr = 48000.f;
+        DelayLine line[N];
+        float len[N] = {};
+        float lfoPh[N] = {};
+        float lfoRate[N] = {0.07f, 0.11f, 0.15f, 0.19f, 0.23f, 0.27f, 0.31f, 0.37f};
+        float lp[N] = {};
+        float g[N] = {};
+        Allpass apL[3], apR[3];
+        DelayLine preL, preR;
+        float preSamples = 1440.f;
+        float modBase = 6.f;       // modulation depth in samples
+        float modDepth = 6.f;      // current depth (fades to 0 when frozen)
+        float lpA = 0.3f;
+        float injGain = 1.f;
+        float outGain = 0.3f;
+        int ctrl = 0;
+        float hpXL = 0.f, hpYL = 0.f, hpXR = 0.f, hpYR = 0.f;
+
+        void init(float sampleRate)
+        {
+            sr = sampleRate;
+            static const int base[N] = {1913, 2269, 2657, 3067, 3527, 4013, 4519, 5099};
+            const float k = sr / 48000.f;
+            modBase = 6.f * k;
+            modDepth = modBase;
+            for (int i = 0; i < N; ++i)
+            {
+                len[i] = std::floor((float)base[i] * k);
+                line[i].init((int)len[i] + (int)modBase + 8);
+                lfoPh[i] = (float)i / (float)N;
+                lp[i] = 0.f;
+                g[i] = 0.9f;
+            }
+            static const int dl[3] = {142, 107, 379};
+            static const int dr[3] = {149, 113, 367};
+            const float kd = sr / 29761.f;
+            for (int i = 0; i < 3; ++i)
+            {
+                apL[i].init((int)std::round((float)dl[i] * kd));
+                apR[i].init((int)std::round((float)dr[i] * kd));
+                apL[i].g = apR[i].g = 0.6f;
+            }
+            int pre = (int)(0.030f * sr);
+            preL.init(pre + 4);
+            preR.init(pre + 4);
+            preSamples = (float)pre;
+            ctrl = 0;
+            injGain = 1.f;
+            hpXL = hpYL = hpXR = hpYR = 0.f;
+        }
+
+        static inline void hadamard8(float *x)
+        {
+            for (int h = 1; h < 8; h *= 2)
+                for (int i = 0; i < 8; i += 2 * h)
+                    for (int j = i; j < i + h; ++j)
+                    {
+                        float a = x[j], b = x[j + h];
+                        x[j] = a + b;
+                        x[j + h] = a - b;
+                    }
+            for (int i = 0; i < 8; ++i) x[i] *= 0.35355339f;
+        }
+
+        void process(float inL, float inR, float decay01, float damp01, bool freeze,
+                     float dt, float &outL, float &outR)
+        {
+            // Control rate (every 32 samples): RT60 -> loop gains, damping
+            if (--ctrl <= 0)
+            {
+                ctrl = 32;
+                float rt60 = 0.8f * std::pow(40.f, rack_clamp01(decay01));
+                float fc = 12000.f * std::pow(0.0667f, rack_clamp01(damp01));
+                if (freeze)
+                {
+                    for (int i = 0; i < N; ++i) g[i] = 1.f;
+                    lpA = 1.f;
+                }
+                else
+                {
+                    for (int i = 0; i < N; ++i)
+                        g[i] = std::pow(10.f, -3.f * len[i] / (sr * rt60));
+                    lpA = lpCoef(fc, dt);
+                }
+                outGain = 0.55f / std::sqrt(std::max(rt60, 1.f));
+            }
+            // Frozen: no modulation, so the loop is truly lossless
+            modDepth += ((freeze ? 0.f : modBase) - modDepth) * lpCoef(1.f, dt);
+            // Input fades out/in when freezing (50 ms)
+            injGain += ((freeze ? 0.f : 1.f) - injGain) * lpCoef(3.f, dt);
+
+            float xl = preL.read(preSamples);
+            float xr = preR.read(preSamples);
+            preL.write(inL);
+            preR.write(inR);
+            for (int i = 0; i < 3; ++i)
+            {
+                xl = apL[i].process(xl);
+                xr = apR[i].process(xr);
+            }
+            xl *= injGain;
+            xr *= injGain;
+
+            float v[N], u[N];
+            for (int i = 0; i < N; ++i)
+            {
+                lfoPh[i] += lfoRate[i] * dt;
+                if (lfoPh[i] >= 1.f) lfoPh[i] -= 1.f;
+                float d = len[i] + modDepth * std::sin(2.f * kPi * lfoPh[i]);
+                v[i] = line[i].read(d);
+                lp[i] += lpA * (v[i] - lp[i]);
+                u[i] = g[i] * lp[i];
+            }
+            hadamard8(u);
+            for (int i = 0; i < N; ++i)
+            {
+                float sgn = (i & 2) ? -1.f : 1.f;
+                float inj = ((i & 1) ? xr : xl) * sgn * 0.5f;
+                line[i].write(u[i] + inj);
+            }
+
+            float wl = (v[0] - v[1] + v[2] - v[3] + v[4] - v[5] + v[6] - v[7]);
+            float wr = (v[0] + v[1] - v[2] - v[3] + v[4] + v[5] - v[6] - v[7]);
+            wl *= outGain;
+            wr *= outGain;
+
+            // DC blocker (about 15 Hz)
+            const float r = 1.f - 2.f * kPi * 15.f * dt;
+            hpYL = wl - hpXL + r * hpYL; hpXL = wl;
+            hpYR = wr - hpXR + r * hpYR; hpXR = wr;
+            outL = hpYL;
+            outR = hpYR;
+        }
+
+        static inline float rack_clamp01(float x) { return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
+    };
+
+    // ------------------------------------------------------------------
+    // Tape-style ping-pong echo: dotted right side, wow and flutter, dark
+    // saturating feedback path.
+    // ------------------------------------------------------------------
+    struct Echo
+    {
+        float sr = 48000.f;
+        DelayLine dl[2];
+        float timeSm = 0.5f;
+        float wowPh = 0.f, flutPh = 0.f, driftPh = 0.f;
+        float lpL = 0.f, lpR = 0.f, hpL = 0.f, hpR = 0.f;
+
+        void init(float sampleRate)
+        {
+            sr = sampleRate;
+            dl[0].init((int)(sr * 2.4f));
+            dl[1].init((int)(sr * 2.4f));
+            lpL = lpR = hpL = hpR = 0.f;
+        }
+
+        void process(float inL, float inR, float timeS, float fb, float dark, float dt,
+                     float &wetL, float &wetR)
+        {
+            timeSm += (timeS - timeSm) * lpCoef(1.5f, dt);   // tape speed glide
+            wowPh += 0.31f * dt;   if (wowPh >= 1.f)   wowPh -= 1.f;
+            flutPh += 4.7f * dt;   if (flutPh >= 1.f)  flutPh -= 1.f;
+            driftPh += 0.053f * dt; if (driftPh >= 1.f) driftPh -= 1.f;
+            float wow = 0.0030f * std::sin(2.f * kPi * wowPh)
+                      + 0.0007f * std::sin(2.f * kPi * flutPh)
+                      + 0.0020f * std::sin(2.f * kPi * driftPh);
+
+            float tl = timeSm * sr * (1.f + wow);
+            float tr = timeSm * 1.5f * sr * (1.f - wow * 0.8f);
+            tl = std::min(std::max(tl, 8.f), sr * 2.2f);
+            tr = std::min(std::max(tr, 8.f), sr * 2.2f);
+
+            float eL = dl[0].read(tl);
+            float eR = dl[1].read(tr);
+
+            // Feedback path: low-pass (darker with DARK), high-pass, soft clip
+            float fcLp = 2800.f * std::pow(0.35f, dark);
+            float aLp = lpCoef(fcLp, dt);
+            float aHp = lpCoef(150.f, dt);
+            lpL += aLp * (eR - lpL);       // ping-pong: right feeds left
+            lpR += aLp * (eL - lpR);
+            hpL += aHp * (lpL - hpL);
+            hpR += aHp * (lpR - hpR);
+            float fbL = std::tanh((lpL - hpL) * 1.2f) * (1.f / 1.2f);
+            float fbR = std::tanh((lpR - hpR) * 1.2f) * (1.f / 1.2f);
+
+            float f = std::min(std::max(fb, 0.f), 0.92f);
+            dl[0].write(inL + fbL * f);
+            dl[1].write(inR + fbR * f);
+            wetL = eL;
+            wetR = eR;
+        }
+    };
+} // namespace ambdsp
+
+// ============================================================================
+// AmbEngine
+// ============================================================================
+struct AmbEngine
+{
+    // ---------------------------------------------------------------
+    // Parameters (set by the module every sample)
+    // ---------------------------------------------------------------
+    int   key           = 0;
+    int   scaleIdx      = 1;
+    float tempoBpm      = 72.f;
+    float padLevel      = 0.60f;
+    float bellLevel     = 0.45f;
+    float bassLevel     = 0.50f;
+    float pulseLevel    = 0.25f;
+    float dark          = 0.60f;
+    float echoTime      = 0.50f;
+    float echoMix       = 0.45f;
+    float echoFbk       = 0.60f;
+    float reverbMix     = 0.60f;
+    float reverbDecay   = 0.70f;
+    float reverbDamp    = 0.55f;
+    float chordInterval = 24.f;
+    bool  freeze        = false;
+
+    // ---------------------------------------------------------------
+    // Outputs and display data
+    // ---------------------------------------------------------------
+    float outL = 0.f, outR = 0.f;
+    float level = 0.f;
+    float meterL = 0.f, meterR = 0.f;
+    float chordRoot = 0.f;        // pad root, semitones above C3 (smoothed)
+    float lastBellSemis = 12.f;   // semitones above C3
+    int   bellTrigCount = 0;
+    int   beatCount = 0;
+    double time = 0.0;
+    float echoMs = 500.f;
+    float reverbSec = 8.f;
+
+    struct NoteEvent { double born; double end; float pitch; int layer; };
+    static const int HIST_MAX = 160;
+    NoteEvent hist[HIST_MAX];
+    int histPos = 0;
+
+    // ---------------------------------------------------------------
+    // Internals
+    // ---------------------------------------------------------------
+    float sr = 0.f;
+    uint32_t rngState = 2463534242u;
+    double beatPhase = 0.0;
+    int lastBeat = -1;
+
+    // Pad: two chord sets that cross-fade; 4 notes x 2 detuned voices each
+    struct PadSet
+    {
+        float note[4] = {0.f, 7.f, 12.f, 14.f};
+        float phase[8] = {};
+        float freq[8] = {};     // Hz of each voice, set when the chord is chosen
+        float gain = 0.f;
+    };
+    PadSet pad[2];
+    int padCur = 0;
+    float padFade = 1.f;          // 0..1 progress of the cross-fade
+    float padLfo[8] = {0.f, 0.13f, 0.27f, 0.41f, 0.55f, 0.69f, 0.83f, 0.97f};
+    float padLfoRate[8] = {0.031f, 0.047f, 0.023f, 0.059f, 0.037f, 0.071f, 0.043f, 0.029f};
+    float padTimer = 0.f;
+    int   lastDegree = -1;
+    float breathPh = 0.f;
+
+    // Bells
+    static const int NBELLS = 8;
+    float bellPh[NBELLS] = {}, bellModPh[NBELLS] = {};
+    float bellEnv[NBELLS] = {}, bellAge[NBELLS] = {};
+    float bellFreq[NBELLS] = {}, bellRatio[NBELLS] = {};
+    float bellVel[NBELLS] = {}, bellPan[NBELLS] = {};
+    int   bellCycle[NBELLS] = {};
+
+    // Bass + rumble
+    float bassPitch = -6.f, bassTarget = -6.f;
+    float bassPhase = 0.f, bassLfo = 0.f;
+    float texLp1 = 0.f, texLp2 = 0.f;
+
+    // Pulse
+    static const int NPULSE = 6;
+    int   euclidStep[NPULSE] = {};
+    float pulseEnv[NPULSE] = {}, pulsePhase[NPULSE] = {};
+    float tickEnv[NPULSE] = {}, tickLp[NPULSE] = {};
+    bool  euclidPat[NPULSE][32] = {};
+    int   euclidLen[NPULSE] = {};
+
+    // Smoothed controls
+    float sPad = 0.f, sBell = 0.f, sBass = 0.f, sPulse = 0.f;
+    float sEchoMix = 0.f, sRevMix = 0.f, sDark = 0.f;
+
+    // Effects and master
+    ambdsp::Echo echo;
+    ambdsp::Reverb reverb;
+    float mLp1L = 0.f, mLp2L = 0.f, mLp1R = 0.f, mLp2R = 0.f;
+    float dcXL = 0.f, dcYL = 0.f, dcXR = 0.f, dcYR = 0.f;
+
+    // ---------------------------------------------------------------
+    float rnd()
+    {
+        rngState ^= rngState << 13;
+        rngState ^= rngState >> 17;
+        rngState ^= rngState << 5;
+        return (float)(rngState >> 8) * (1.f / 16777216.f);
+    }
+
+    void seed(uint32_t s) { rngState = s | 1u; }
+
+    AmbEngine()
+    {
+        for (int p = 0; p < NPULSE; p++)
+        {
+            int steps = AMB_EUCLID[p][0];
+            int pulses = AMB_EUCLID[p][1];
+            euclidLen[p] = steps;
+            for (int i = 0; i < steps; i++)
+                euclidPat[p][i] = ((i * pulses) % steps) < pulses;
+        }
+        for (int i = 0; i < HIST_MAX; i++) hist[i] = NoteEvent{-1000.0, -1000.0, 0.f, 0};
+        for (int b = 0; b < NBELLS; b++) bellRatio[b] = (b % 3 == 1) ? 2.f : ((b % 3 == 2) ? 1.5f : 1.f);
+    }
+
+    void setSampleRate(float sampleRate)
+    {
+        if (sampleRate == sr) return;
+        sr = sampleRate;
+        echo.init(sr);
+        reverb.init(sr);
+    }
+
+    // ---------------------------------------------------------------
+    int degSemis(int deg) const
+    {
+        const int n = AMB_SCALE_LEN[scaleIdx];
+        const int oct = ambdsp::floorDiv(deg, n);
+        const int idx = deg - oct * n;
+        return AMB_SCALE_INTERVALS[scaleIdx][idx] + 12 * oct;
+    }
+
+    void addHistory(float pitch, int layer, double end)
+    {
+        hist[histPos] = NoteEvent{time, end, pitch, layer};
+        histPos = (histPos + 1) % HIST_MAX;
+    }
+
+    void closePadEvents()
+    {
+        for (int i = 0; i < HIST_MAX; i++)
+            if (hist[i].layer == 0 && hist[i].end < 0.0 && hist[i].born > -999.0)
+                hist[i].end = time;
+    }
+
+    // Choose a new chord: root, third, fifth and a colour tone from the scale.
+    void pickNewChord()
+    {
+        const int n = AMB_SCALE_LEN[scaleIdx];
+        static const float w[7] = {0.30f, 0.08f, 0.14f, 0.18f, 0.16f, 0.10f, 0.04f};
+        float tot = 0.f;
+        for (int d = 0; d < std::min(n, 7); d++) tot += w[d];
+        int deg = 0;
+        for (int tries = 0; tries < 3; tries++)
+        {
+            float r = rnd() * tot, acc = 0.f;
+            deg = 0;
+            for (int d = 0; d < std::min(n, 7); d++)
+            {
+                acc += w[d];
+                if (r <= acc) { deg = d; break; }
+            }
+            if (deg != lastDegree || rnd() < 0.3f) break;
+        }
+        lastDegree = deg;
+
+        int root = (degSemis(deg) + key) % 12;
+        if (root >= 8) root -= 12;                       // keep the pad low and dark
+        const int rs = degSemis(deg);
+        float third = (float)(degSemis(deg + 2) - rs);
+        float fifth = (float)(degSemis(deg + 4) - rs);
+        float colourChoices[3] = {
+            (float)(degSemis(deg + 1) - rs + 12),        // ninth
+            (float)(degSemis(deg + 6) - rs),             // seventh
+            12.f                                         // octave
+        };
+        float colour = colourChoices[std::min(2, (int)(rnd() * 3.f))];
+
+        // Start the cross-fade into a fresh chord set.
+        closePadEvents();
+        int old = padCur;
+        padCur = 1 - padCur;
+        pad[padCur].note[0] = (float)root;
+        pad[padCur].note[1] = (float)root + third;
+        pad[padCur].note[2] = (float)root + fifth;
+        pad[padCur].note[3] = (float)root + colour;
+        {
+            static const float det[4][2] = {{-0.06f, 0.05f}, {-0.08f, 0.07f}, {-0.05f, 0.09f}, {-0.10f, 0.06f}};
+            for (int k = 0; k < 4; ++k)
+                for (int j = 0; j < 2; ++j)
+                    pad[padCur].freq[k * 2 + j] = 130.81f * std::pow(2.f, (pad[padCur].note[k] + det[k][j]) / 12.f);
+        }
+        padFade = 0.f;
+        (void)old;
+        padTimer = 0.f;
+
+        float b = (float)root - 12.f;
+        while (b < -12.f) b += 12.f;
+        while (b > 0.f) b -= 12.f;
+        bassTarget = b;
+
+        for (int k = 0; k < 4; k++) addHistory(pad[padCur].note[k], 0, -1.0);
+        addHistory(bassTarget, 2, time + 12.0);
+    }
+
+    // First chord: no cross-fade.
+    void startChord()
+    {
+        pickNewChord();
+        padFade = 1.f;
+        pad[padCur].gain = 1.f;
+        pad[1 - padCur].gain = 0.f;
+        bassPitch = bassTarget;
+        chordRoot = pad[padCur].note[0];
+    }
+
+    // ---------------------------------------------------------------
+    void process(float dt)
+    {
+        time += dt;
+        const float twoPi = 2.f * ambdsp::kPi;
+        const float darkAmt = std::min(std::max(sDark, 0.f), 1.f);
+
+        // Smooth the level controls (about 50 ms)
+        {
+            float k = ambdsp::lpCoef(3.f, dt);
+            sPad     += (padLevel - sPad) * k;
+            sBell    += (bellLevel - sBell) * k;
+            sBass    += (bassLevel - sBass) * k;
+            sPulse   += (pulseLevel - sPulse) * k;
+            sEchoMix += (echoMix - sEchoMix) * k;
+            sRevMix  += (reverbMix - sRevMix) * k;
+            sDark    += (dark - sDark) * k;
+        }
+
+        // 1. Transport
+        const float bps = std::max(tempoBpm, 20.f) / 60.f;
+        beatPhase += (double)bps * dt;
+        int beat = (int)std::floor(beatPhase);
+        if (beat != lastBeat)
+        {
+            if (lastBeat >= 0) ++beatCount;
+            lastBeat = beat;
+        }
+
+        // 2. Pad: a new chord every chordInterval seconds, cross-faded
+        padTimer += dt;
+        if (padTimer >= std::max(chordInterval, 2.f))
+            pickNewChord();
+
+        padFade = std::min(1.f, padFade + dt / 7.f);
+        pad[padCur].gain = std::sin(0.5f * ambdsp::kPi * padFade);
+        pad[1 - padCur].gain = std::cos(0.5f * ambdsp::kPi * padFade);
+        chordRoot += (pad[padCur].note[0] - chordRoot) * ambdsp::lpCoef(0.15f, dt);
+
+        breathPh += dt / 37.f;
+        if (breathPh >= 1.f) breathPh -= 1.f;
+        const float breath = 0.82f + 0.18f * std::sin(twoPi * breathPh);
+
+        const float bright = 0.06f + 0.55f * (1.f - darkAmt);
+        float padL = 0.f, padR = 0.f;
+        for (int v = 0; v < 8; ++v)
+        {
+            padLfo[v] += padLfoRate[v] * dt;
+            if (padLfo[v] >= 1.f) padLfo[v] -= 1.f;
+        }
+        for (int s = 0; s < 2; ++s)
+        {
+            PadSet &ps = pad[s];
+            if (ps.gain < 0.001f) continue;
+            for (int k = 0; k < 4; ++k)
+            {
+                static const float panK[4] = {0.f, -0.45f, 0.45f, 0.f};
+                for (int j = 0; j < 2; ++j)
+                {
+                    const int vi = k * 2 + j;
+                    ps.phase[vi] += ps.freq[vi] * dt;
+                    if (ps.phase[vi] >= 1.f) ps.phase[vi] -= 1.f;
+                    float th = twoPi * ps.phase[vi];
+                    float lfo = 0.5f + 0.5f * std::sin(twoPi * padLfo[vi]);
+                    float hb = bright * (0.35f + 0.65f * lfo);
+                    float osc = std::sin(th) + hb * 0.5f * std::sin(2.f * th) + hb * 0.28f * std::sin(3.f * th);
+                    float amp = (0.55f + 0.45f * lfo) * (k == 0 ? 1.15f : 0.8f);
+                    float sv = osc * amp * 0.105f * ps.gain;
+                    float pan = std::min(std::max(panK[k] + (j ? 0.3f : -0.3f), -1.f), 1.f);
+                    padL += sv * (1.f - pan) * 0.5f;
+                    padR += sv * (1.f + pan) * 0.5f;
+                }
+            }
+        }
+        padL *= sPad * breath;
+        padR *= sPad * breath;
+
+        // 3. Bells: 8 long loops of unequal length, soft FM, dark
+        float bellL = 0.f, bellR = 0.f;
+        for (int b = 0; b < NBELLS; ++b)
+        {
+            static const float off[8] = {0.93f, 0.80f, 0.61f, 0.45f, 0.30f, 0.20f, 0.12f, 0.05f};
+            const float loop = (float)AMB_LOOP_BEATS[b];
+            int cyc = (int)std::floor((beatPhase + (double)(off[b] * loop)) / (double)loop);
+            if (cyc != bellCycle[b])
+            {
+                bellCycle[b] = cyc;
+                if (rnd() < 0.78f)
+                {
+                    int semi;
+                    const int up = (b % 3 == 0) ? 24 : 12;
+                    if (rnd() < 0.55f)
+                        semi = (int)pad[padCur].note[std::min(3, (int)(rnd() * 4.f))] + up;
+                    else
+                        semi = degSemis((int)(rnd() * (float)AMB_SCALE_LEN[scaleIdx])) + key + up;
+                    while (semi > 33) semi -= 12;
+                    while (semi < 12) semi += 12;
+                    bellFreq[b] = 130.81f * std::pow(2.f, (float)semi / 12.f);
+                    bellEnv[b] = 1.f;
+                    bellAge[b] = 0.f;
+                    bellPh[b] = 0.f;
+                    bellModPh[b] = 0.f;
+                    bellVel[b] = 0.55f + 0.45f * rnd();
+                    bellPan[b] = rnd() * 1.6f - 0.8f;
+                    lastBellSemis = (float)semi;
+                    ++bellTrigCount;
+                    addHistory((float)semi, 1, -1.0);
+                }
+            }
+            if (bellEnv[b] > 0.0008f)
+            {
+                bellAge[b] += dt;
+                bellModPh[b] += bellFreq[b] * bellRatio[b] * dt;
+                if (bellModPh[b] >= 1.f) bellModPh[b] -= 1.f;
+                bellPh[b] += bellFreq[b] * dt;
+                if (bellPh[b] >= 1.f) bellPh[b] -= 1.f;
+                const float idx = (0.35f + 0.9f * (1.f - darkAmt)) * bellVel[b] * bellEnv[b] * bellEnv[b] * 1.6f;
+                float carrier = std::sin(twoPi * bellPh[b] + idx * std::sin(twoPi * bellModPh[b]));
+                float atk = std::min(1.f, bellAge[b] / 0.015f);
+                float sv = carrier * bellEnv[b] * atk * bellVel[b] * 0.26f;
+                bellEnv[b] *= std::exp(-dt / 3.8f);
+                bellL += sv * (1.f - bellPan[b]) * 0.5f;
+                bellR += sv * (1.f + bellPan[b]) * 0.5f;
+            }
+        }
+        bellL *= sBell;
+        bellR *= sBell;
+
+        // 4. Bass: sine sub with a touch of second harmonic, plus a slow rumble
+        bassPitch += (bassTarget - bassPitch) * ambdsp::lpCoef(0.11f, dt);
+        float bassF = 130.81f * std::pow(2.f, bassPitch / 12.f);
+        bassPhase += bassF * dt;
+        if (bassPhase >= 1.f) bassPhase -= 1.f;
+        bassLfo += dt / 23.f;
+        if (bassLfo >= 1.f) bassLfo -= 1.f;
+        float bth = twoPi * bassPhase;
+        float bassSig = (std::sin(bth) + 0.22f * std::sin(2.f * bth)) * (0.72f + 0.28f * std::sin(twoPi * bassLfo));
+
+        float nz = rnd() * 2.f - 1.f;
+        const float a90 = ambdsp::lpCoef(90.f, dt);
+        texLp1 += a90 * (nz - texLp1);
+        texLp2 += a90 * (texLp1 - texLp2);
+        float rumble = texLp2 * 9.f * (0.6f + 0.4f * std::sin(twoPi * (bassLfo * 3.f + 0.2f)));
+
+        float bassOut = (bassSig * 0.085f + rumble * 0.028f) * sBass;
+
+        // 5. Pulse: soft low heartbeats and dusty ticks
+        float pulseL = 0.f, pulseR = 0.f;
+        const float tickA = ambdsp::lpCoef(1800.f, dt);
+        for (int p = 0; p < NPULSE; ++p)
+        {
+            int len = euclidLen[p];
+            int ns = ((int)std::floor((float)(beatPhase / 32.0) * (float)len)) % len;
+            if (ns < 0) ns += len;
+            if (ns != euclidStep[p])
+            {
+                euclidStep[p] = ns;
+                if (euclidPat[p][ns] && rnd() < 0.85f)
+                {
+                    pulseEnv[p] = 1.f;
+                    tickEnv[p] = 1.f;
+                    pulsePhase[p] = 0.f;
+                    addHistory(0.f, 3, time);
+                }
+            }
+            if (pulseEnv[p] > 0.001f)
+            {
+                float f0 = 44.f + 14.f * (float)(p % 3);
+                float fr = f0 * (1.f + 1.6f * pulseEnv[p] * pulseEnv[p]);
+                pulsePhase[p] += fr * dt;
+                if (pulsePhase[p] >= 1.f) pulsePhase[p] -= 1.f;
+                float sv = std::sin(twoPi * pulsePhase[p]) * pulseEnv[p] * 0.07f;
+                pulseL += sv;
+                pulseR += sv;
+                pulseEnv[p] *= std::exp(-dt / 0.28f);
+            }
+            if (tickEnv[p] > 0.001f)
+            {
+                float n2 = rnd() * 2.f - 1.f;
+                tickLp[p] += (n2 - tickLp[p]) * tickA;
+                float tk = tickLp[p] * tickEnv[p] * 0.06f;
+                pulseL += tk * (0.5f + 0.1f * (float)p);
+                pulseR += tk * (1.0f - 0.1f * (float)p);
+                tickEnv[p] *= std::exp(-dt / 0.03f);
+            }
+        }
+        pulseL *= sPulse;
+        pulseR *= sPulse;
+
+        // 6. Dry sum
+        float dryL = std::tanh(padL + bellL + bassOut + pulseL);
+        float dryR = std::tanh(padR + bellR + bassOut + pulseR);
+
+        // 7. Tape echo (added on top of the dry signal)
+        float wetEL, wetER;
+        echo.process(dryL, dryR, echoTime, echoFbk, darkAmt, dt, wetEL, wetER);
+        float em = std::min(std::max(sEchoMix, 0.f), 1.f);
+        float mixL = dryL + wetEL * em * 1.1f;
+        float mixR = dryR + wetER * em * 1.1f;
+        echoMs = echoTime * 1000.f;
+
+        // 8. Reverb: fed by dry + echoes
+        float rvL, rvR;
+        reverb.process(mixL * 0.9f, mixR * 0.9f, reverbDecay, reverbDamp, freeze, dt, rvL, rvR);
+        reverbSec = 0.8f * std::pow(40.f, std::min(std::max(reverbDecay, 0.f), 1.f));
+        float wm = std::min(std::max(sRevMix, 0.f), 1.f);
+        float finL = mixL * (1.f - 0.6f * wm) + rvL * wm * 2.2f;
+        float finR = mixR * (1.f - 0.6f * wm) + rvR * wm * 2.2f;
+
+        // 9. Master: two-pole low-pass that follows DARK, DC block, soft limit
+        float mfc = std::min(std::max(12000.f * std::pow(0.06f, darkAmt), 500.f), 0.45f * sr);
+        float ma = ambdsp::lpCoef(mfc, dt);
+        mLp1L += ma * (finL - mLp1L); mLp2L += ma * (mLp1L - mLp2L);
+        mLp1R += ma * (finR - mLp1R); mLp2R += ma * (mLp1R - mLp2R);
+        const float rdc = 1.f - twoPi * 12.f * dt;
+        dcYL = mLp2L - dcXL + rdc * dcYL; dcXL = mLp2L;
+        dcYR = mLp2R - dcXR + rdc * dcYR; dcXR = mLp2R;
+        outL = std::tanh(dcYL * 1.1f);
+        outR = std::tanh(dcYR * 1.1f);
+
+        // 10. Meters
+        float rel = std::exp(-dt / 0.25f);
+        meterL = std::max(std::fabs(outL), meterL * rel);
+        meterR = std::max(std::fabs(outR), meterR * rel);
+        level = std::max(meterL, meterR);
+    }
+};
+
+// ------------------------------------------------------------
+// Layout constants (28 HP = 420 x 380)
+// ------------------------------------------------------------
+static const float AMB_W = RACK_GRID_WIDTH * 28;   // 420
+static const float AMB_H = RACK_GRID_HEIGHT;       // 380
+
+// Display (bezel adds 4 px on every side)
+static const float AMB_DX = 20.f, AMB_DY = 24.f, AMB_DW = 380.f, AMB_DH = 124.f;
+
+// Inside the display (local coordinates)
+static const float AMB_HDR_H  = 18.f;
+static const float AMB_PLOT_L = 30.f;
+static const float AMB_PLOT_R = 336.f;
+static const float AMB_PLOT_T = 22.f;
+static const float AMB_PLOT_B = 92.f;
+static const float AMB_MET_X  = 348.f;   // two level meters, 6 px wide, 10 px apart
+
+// Control rows: eight equal cells spanning x = 10 .. 410
+static const float AMB_ROW_X0 = 10.f;
+static const float AMB_ROW_W  = 400.f;
+static const float AMB_CELL_W = 46.f;
+static const float AMB_CELL_H = 50.f;
+static const float AMB_CTRL_DY = 33.f;   // control centre below the cell top
+
+static const float AMB_R1_HDR = 161.f, AMB_R1_TOP = 169.f;   // COMPOSE | LAYERS
+static const float AMB_R2_HDR = 228.f, AMB_R2_TOP = 236.f;   // ECHO | REVERB | MASTER
+static const float AMB_R3_HDR = 295.f, AMB_R3_TOP = 303.f;   // I / O
+
+static inline float ambCellX(int i)
+{
+    return AMB_ROW_X0 + AMB_ROW_W / 8.f * ((float)i + 0.5f);
+}
 
 // ---------------------------------------------------------------------------
 // Param quantities
@@ -78,16 +838,8 @@ struct KeyParamQuantity : ParamQuantity
 {
     std::string getDisplayValueString() override
     {
-        int v = clamp((int)std::round(getValue()), 0, 11);
+        int v = rack::math::clamp((int)std::round(getValue()), 0, 11);
         return AMB_NOTE_NAMES[v];
-    }
-};
-struct ScaleParamQuantity : ParamQuantity
-{
-    std::string getDisplayValueString() override
-    {
-        int v = clamp((int)std::round(getValue()), 0, AMB_NSCALES - 1);
-        return AMB_SCALE_NAMES[v];
     }
 };
 struct TempoParamQuantity : ParamQuantity
@@ -104,472 +856,11 @@ struct ChordIntervalParamQuantity : ParamQuantity
         return string::f("%.0f s", getValue());
     }
 };
-
-// ============================================================================
-// AmbEngine
-// ============================================================================
-struct AmbEngine
+struct EchoTimeParamQuantity : ParamQuantity
 {
-    // ---------------------------------------------------------------
-    // Parameters
-    // ---------------------------------------------------------------
-    int   key          = 0;
-    int   scaleIdx     = 0;
-    float tempoBpm     = 120.f;
-    float padLevel     = 0.55f;
-    float bellLevel    = 0.55f;
-    float bassLevel    = 0.55f;
-    float pulseLevel   = 0.50f;
-    float echoMix      = 0.40f;
-    float echoFbk      = 0.55f;
-    float reverbMix    = 0.55f;
-    float reverbDecay  = 0.55f;
-    float chordInterval = 24.f;
-
-    // ---------------------------------------------------------------
-    // Transport
-    // ---------------------------------------------------------------
-    double beatPhase      = 0.0;
-    float  lastSampleRate = 0.f;
-
-    // ---------------------------------------------------------------
-    // Pad – 8 voices
-    // ---------------------------------------------------------------
-    static constexpr int PAD_VOICES = 8;
-    float padPhase[PAD_VOICES]   = {};
-    float padDetune[PAD_VOICES]  = {
-        -0.08f, -0.055f, -0.03f, -0.01f,
-         0.01f,  0.03f,   0.055f, 0.08f
-    };
-    float padLfo[PAD_VOICES]     = {};
-    float padLfoRate[PAD_VOICES] = {
-        0.07f, 0.11f, 0.05f, 0.13f,
-        0.09f, 0.03f, 0.10f, 0.15f
-    };
-    float padChordRoot  = 12.f;
-    float padTargetRoot = 12.f;
-    float padChordTimer = 0.f;
-
-    // ---------------------------------------------------------------
-    // Bells – 8 loops
-    // ---------------------------------------------------------------
-    static constexpr int NBELLS = 8;
-    float bellLoopPos[NBELLS] = {};
-    int   bellDegree[NBELLS]  = {};
-    float bellPhase[NBELLS]   = {};
-    float bellEnv[NBELLS]     = {};
-    float bellFreq[NBELLS]    = {};
-    float bellModPhase[NBELLS]= {};
-    float bellMod   = 1.5f;
-    float bellIndex = 0.5f;
-
-    // ---------------------------------------------------------------
-    // Bass – 2 voices (sub + mid, one octave apart)
-    // ---------------------------------------------------------------
-    float bassPhaseSub = 0.f;
-    float bassPhaseMid = 0.f;
-    float bassPitch    = 0.f;   // -12..0
-    float bassTarget   = 0.f;
-    float bassLfoPhase = 0.f;
-
-    // ---------------------------------------------------------------
-    // Pulse – 6 Euclidean patterns
-    // ---------------------------------------------------------------
-    static constexpr int NPULSE = 6;
-    int   euclidStep[NPULSE]    = {};
-    float pulseEnv[NPULSE]      = {};
-    float pulseHatEnv[NPULSE]   = {};
-    float pulsePhase[NPULSE]    = {};
-    float hatLP[NPULSE]         = {};
-    bool  euclidPat[NPULSE][32] = {};
-    int   euclidLen[NPULSE]     = {};
-
-    // ---------------------------------------------------------------
-    // Tape echo
-    // ---------------------------------------------------------------
-    static constexpr size_t ECHO_SIZE = 96000;
-    std::vector<float> echoBufL, echoBufR;
-    int   echoWrite = 0;
-    int   echoTap1  = 0;
-    int   echoTap2  = 0;
-
-    // ---------------------------------------------------------------
-    // Dattorro plate reverb
-    // ---------------------------------------------------------------
-    static constexpr int PRE_DELAY = 220;
-    std::vector<float> preBuf;
-    int   preIdx = 0;
-
-    struct Allpass
+    std::string getDisplayValueString() override
     {
-        std::vector<float> buf;
-        int   idx = 0;
-        float g   = 0.75f;
-        void init(int delay) { buf.assign(std::max(delay, 1), 0.f); }
-        float process(float x)
-        {
-            int n = (int)buf.size();
-            float yn = buf[idx];
-            float vn = x + g * yn;
-            buf[idx] = vn;
-            idx = (idx + 1) % n;
-            return yn - g * vn;
-        }
-    };
-    Allpass ap1, ap2, ap3, ap4;
-
-    struct ModAllpass
-    {
-        std::vector<float> buf;
-        int   idx = 0;
-        float g   = 0.75f;
-        float modPhase = 0.f;
-        float modRate  = 0.5f;
-        float modDepth = 4.f;
-        void init(int delay) { buf.assign(std::max(delay, 1), 0.f); }
-        float process(float x, float sr)
-        {
-            int n = (int)buf.size();
-            modPhase += modRate / sr;
-            if (modPhase > 1.f) modPhase -= 1.f;
-            float mod = (1.f + std::sin(2.f * (float)M_PI * modPhase))
-                      * 0.5f * modDepth;
-            int r = (idx + (int)std::round(mod)) % n;
-            float yn = buf[r];
-            float vn = x + g * yn;
-            buf[idx] = vn;
-            idx = (idx + 1) % n;
-            return yn - g * vn;
-        }
-    };
-    ModAllpass tankAP[8];
-    std::vector<float> tankDelay[4];
-    int tankDelayIdx[4] = {};
-
-    // ---------------------------------------------------------------
-    // Display snapshot & output
-    // ---------------------------------------------------------------
-    struct NoteEvent { float age; float pitch; int layer; };
-    std::vector<NoteEvent> history;
-    static constexpr size_t HIST_MAX = 128;
-    float meterL = 0.f, meterR = 0.f;
-    float curChordRoot = 12.f;
-    float outL = 0.f, outR = 0.f;
-
-    float masterLP_L = 0.f, masterLP_R = 0.f;
-
-    std::mt19937 rng;
-    std::uniform_real_distribution<float> dist01{0.f, 1.f};
-
-    // ---------------------------------------------------------------
-    AmbEngine()
-    {
-        rng.seed(std::random_device{}());
-
-        echoBufL.assign(ECHO_SIZE, 0.f);
-        echoBufR.assign(ECHO_SIZE, 0.f);
-        echoTap1 = (int)(0.30f * 48000.f);
-        echoTap2 = (int)(1.20f * 48000.f);
-
-        preBuf.assign(PRE_DELAY * 2, 0.f);
-
-        ap1.init(142);
-        ap2.init(107);
-        ap3.init(379);
-        ap4.init(277);
-
-        int apLens[8] = { 672, 908, 1800, 2656, 672, 908, 1800, 2656 };
-        for (int i = 0; i < 8; i++)
-        {
-            tankAP[i].init(apLens[i]);
-            tankAP[i].g        = 0.75f;
-            tankAP[i].modRate  = 0.5f + 0.1f * i;
-            tankAP[i].modDepth = 4.f;
-        }
-        int dLens[4] = { 4453, 3720, 4217, 3163 };
-        for (int i = 0; i < 4; i++)
-            tankDelay[i].assign(std::max(dLens[i], 1), 0.f);
-
-        for (int p = 0; p < NPULSE; p++)
-        {
-            int steps  = AMB_EUCLID[p][0];
-            int pulses = AMB_EUCLID[p][1];
-            euclidLen[p] = steps;
-            for (int i = 0; i < steps; i++)
-                euclidPat[p][i] = ((i * pulses) % steps) < pulses;
-        }
-
-        history.reserve(HIST_MAX + 2);
-        pickNewChord();
-    }
-
-    // ---------------------------------------------------------------
-    void pickNewChord()
-    {
-        const int *scale = AMB_SCALE_INTERVALS[scaleIdx];
-
-        // Pad root: octave 1 or 2, cap at E5 (pitch 28)
-        int octave = 1 + (dist01(rng) < 0.6f ? 0 : 1);
-        int degree = std::min(6, (int)(dist01(rng) * 7.f));
-        int semitone = octave * 12 + scale[degree] + key;
-        while (semitone > 28) semitone -= 12;
-        while (semitone < 12) semitone += 12;
-        padTargetRoot = (float)semitone;
-        padChordTimer = 0.f;
-
-        // Bass: two octaves below pad, wrapped to pitch range [-12, 0]
-        float b = padTargetRoot - 24.f;
-        while (b < -12.f) b += 12.f;
-        while (b > 0.f)   b -= 12.f;
-        bassTarget = b;
-
-        for (int bb = 0; bb < NBELLS; bb++)
-            bellDegree[bb] = std::min(6, (int)(dist01(rng) * 7.f));
-
-        addHistory(padTargetRoot, 0);
-        addHistory(bassTarget, 2);
-    }
-
-    void addHistory(float pitch, int layer)
-    {
-        if (history.size() >= HIST_MAX)
-            history.erase(history.begin());
-        history.push_back({ 0.f, pitch, layer });
-    }
-
-    // ---------------------------------------------------------------
-    void process(float sampleRate, float dt)
-    {
-        // 0. SR-dependent taps
-        if (sampleRate != lastSampleRate)
-        {
-            echoTap1 = std::min((int)(0.30f * sampleRate), (int)ECHO_SIZE - 1);
-            echoTap2 = std::min((int)(1.20f * sampleRate), (int)ECHO_SIZE - 1);
-            lastSampleRate = sampleRate;
-        }
-        const float masterLpCoef = 1.f - std::exp(-2.f * (float)M_PI * 4000.f * dt);
-        const float hatLpCoef    = 1.f - std::exp(-2.f * (float)M_PI * 3000.f * dt);
-
-        // 1. Transport
-        const float bps = std::max(tempoBpm, 20.f) / 60.f;
-        beatPhase += bps * dt;
-
-        // 2. Pad (8 voices)
-        padChordTimer += dt;
-        if (padChordTimer >= std::max(chordInterval, 2.f))
-            pickNewChord();
-
-        padChordRoot += (padTargetRoot - padChordRoot)
-                      * (1.f - std::exp(-dt / 2.f));
-        curChordRoot = padChordRoot;
-
-        float padL = 0.f, padR = 0.f;
-        for (int v = 0; v < PAD_VOICES; v++)
-        {
-            padLfo[v] += padLfoRate[v] * dt;
-            if (padLfo[v] > 1.f) padLfo[v] -= 1.f;
-            float lfo = 0.5f + 0.5f * std::sin(2.f * (float)M_PI * padLfo[v]);
-            float voicePitch = padChordRoot + padDetune[v] * 12.f;
-            float freq = 130.81f * std::pow(2.f, voicePitch / 12.f);
-            padPhase[v] += freq * dt;
-            if (padPhase[v] >= 1.f) padPhase[v] -= 1.f;
-            float osc = std::sin(2.f * (float)M_PI * padPhase[v]);
-            float env = 0.6f + 0.4f * lfo;
-            float s   = osc * env * 0.09f;   // 8 voices × 0.09 ≈ 0.72 max (same total as before)
-            float pan = (float)v / (PAD_VOICES - 1) * 2.f - 1.f;
-            padL += s * (1.f - pan) * 0.5f;
-            padR += s * (1.f + pan) * 0.5f;
-        }
-        padL *= padLevel;
-        padR *= padLevel;
-
-        // 3. Bells (8 loops)
-        float bellL = 0.f, bellR = 0.f;
-        for (int b = 0; b < NBELLS; b++)
-        {
-            float loopBeats = (float)AMB_LOOP_BEATS[b];
-            float prevPos   = bellLoopPos[b];
-            bellLoopPos[b]  = std::fmod((float)beatPhase, loopBeats);
-            if (bellLoopPos[b] < prevPos)
-            {
-                const int *scale = AMB_SCALE_INTERVALS[scaleIdx];
-                int deg  = std::min(6, bellDegree[b]);
-                int oct  = 1 + (b % 3 == 0 ? 1 : 0);   // ~1/3 of bells one octave up
-                int semi = oct * 12 + scale[deg] + key;
-                while (semi > 30) semi -= 12;          // cap at F#5
-                while (semi < 0)  semi += 12;
-                bellFreq[b]     = 130.81f * std::pow(2.f, (float)semi / 12.f);
-                bellEnv[b]      = 1.f;
-                bellPhase[b]    = 0.f;
-                bellModPhase[b] = 0.f;
-                addHistory((float)semi, 1);
-                bellDegree[b] = std::min(6, (int)(dist01(rng) * 7.f));
-            }
-            if (bellEnv[b] > 0.001f)
-            {
-                float carrierFreq = bellFreq[b];
-                float modFreq     = carrierFreq * bellMod;
-                bellModPhase[b] += modFreq * dt;
-                if (bellModPhase[b] > 1.f) bellModPhase[b] -= 1.f;
-                float mod = std::sin(2.f * (float)M_PI * bellModPhase[b]);
-                bellPhase[b] += carrierFreq * dt;
-                if (bellPhase[b] > 1.f) bellPhase[b] -= 1.f;
-                float carrier = std::sin(2.f * (float)M_PI * bellPhase[b]
-                                        + bellIndex * mod);
-                float s = carrier * bellEnv[b] * 0.09f;   // 8 voices × 0.09 ≈ same total
-                bellEnv[b] *= std::exp(-dt / 1.5f);
-                float pan = ((float)b / (NBELLS - 1)) * 1.6f - 0.8f;
-                bellL += s * (1.f - pan) * 0.5f;
-                bellR += s * (1.f + pan) * 0.5f;
-            }
-        }
-        bellL *= bellLevel;
-        bellR *= bellLevel;
-
-        // 4. Bass (2 voices: sub + mid one octave up)
-        bassPitch += (bassTarget - bassPitch) * (1.f - std::exp(-dt / 1.5f));
-
-        float bassSubFreq = 130.81f * std::pow(2.f, bassPitch / 12.f);
-        float bassMidFreq = bassSubFreq * 2.f;
-
-        bassPhaseSub += bassSubFreq * dt;
-        if (bassPhaseSub >= 1.f) bassPhaseSub -= 1.f;
-        float bassSub = std::sin(2.f * (float)M_PI * bassPhaseSub);
-        bassSub += 0.30f * std::sin(4.f * (float)M_PI * bassPhaseSub);
-        bassSub += 0.15f * std::sin(6.f * (float)M_PI * bassPhaseSub);
-
-        bassPhaseMid += bassMidFreq * dt;
-        if (bassPhaseMid >= 1.f) bassPhaseMid -= 1.f;
-        float bassMid = std::sin(2.f * (float)M_PI * bassPhaseMid);
-        bassMid += 0.25f * std::sin(4.f * (float)M_PI * bassPhaseMid);
-
-        bassLfoPhase += 0.0625f * bps * dt;
-        if (bassLfoPhase > 1.f) bassLfoPhase -= 1.f;
-        float bassEnv = 0.6f + 0.4f * std::sin(2.f * (float)M_PI * bassLfoPhase);
-
-        float bassSig = (bassSub * 0.50f + bassMid * 0.30f) * bassEnv * bassLevel;
-
-        // 5. Pulse (6 Euclidean patterns)
-        float pulseL = 0.f, pulseR = 0.f;
-        for (int p = 0; p < NPULSE; p++)
-        {
-            int len = euclidLen[p];
-            int newStep = ((int)std::floor((float)beatPhase / 32.f * (float)len)) % len;
-            if (newStep < 0) newStep += len;
-            if (newStep != euclidStep[p])
-            {
-                euclidStep[p] = newStep;
-                if (euclidPat[p][newStep])
-                {
-                    pulseEnv[p]    = 1.f;
-                    pulseHatEnv[p] = 1.f;
-                    addHistory(bassTarget, 3);   // draw pulse at bass pitch
-                }
-            }
-            if (pulseEnv[p] > 0.001f)
-            {
-                float thumpFreq = 60.f + 40.f * (p % 3);
-                pulsePhase[p] += thumpFreq * dt;
-                if (pulsePhase[p] >= 1.f) pulsePhase[p] -= 1.f;
-                float thump = std::sin(2.f * (float)M_PI * pulsePhase[p]);
-                float s = thump * pulseEnv[p] * 0.07f;
-                pulseL += s;
-                pulseR += s;
-                pulseEnv[p] *= std::exp(-dt / 0.20f);
-            }
-            if (pulseHatEnv[p] > 0.001f)
-            {
-                float noise = dist01(rng) * 2.f - 1.f;
-                hatLP[p] += (noise - hatLP[p]) * hatLpCoef;
-                float hat = hatLP[p] * pulseHatEnv[p] * 0.05f;
-                pulseL += hat * 0.6f;
-                pulseR += hat * 0.4f;
-                pulseHatEnv[p] *= std::exp(-dt / 0.04f);
-            }
-        }
-        pulseL *= pulseLevel;
-        pulseR *= pulseLevel;
-
-        // 6. Dry sum
-        float dryL = padL + bellL + bassSig + pulseL;
-        float dryR = padR + bellR + bassSig + pulseR;
-        dryL = std::tanh(dryL);
-        dryR = std::tanh(dryR);
-
-        // 7. Tape echo (internal feedback scaled for stability)
-        int read1 = (echoWrite - echoTap1 + (int)ECHO_SIZE) % (int)ECHO_SIZE;
-        int read2 = (echoWrite - echoTap2 + (int)ECHO_SIZE) % (int)ECHO_SIZE;
-        float e1L = echoBufL[read1];
-        float e1R = echoBufR[read1];
-        float e2L = echoBufL[read2];
-        float e2R = echoBufR[read2];
-
-        float fbk = clamp(echoFbk, 0.f, 0.9f) * 0.65f;    // scaled internally
-        echoBufL[echoWrite] = dryL + e1R * fbk + e2R * fbk * 0.5f;
-        echoBufR[echoWrite] = dryR + e1L * fbk + e2L * fbk * 0.5f;
-        echoWrite = (echoWrite + 1) % (int)ECHO_SIZE;
-
-        float em = clamp(echoMix, 0.f, 1.f);
-        float mixL = dryL * (1.f - em) + (e1L + e2L) * 0.5f * em;
-        float mixR = dryR * (1.f - em) + (e1R + e2R) * 0.5f * em;
-
-        // 8. Dattorro plate reverb
-        preBuf[preIdx] = (mixL + mixR) * 0.5f;
-        int preRead = (preIdx - PRE_DELAY + (int)preBuf.size()) % (int)preBuf.size();
-        float pre = preBuf[preRead];
-        preIdx = (preIdx + 1) % (int)preBuf.size();
-
-        float diff = ap1.process(pre);
-        diff = ap2.process(diff);
-        diff = ap3.process(diff);
-        diff = ap4.process(diff);
-
-        float tankL = diff, tankR = diff;
-        tankL = tankAP[0].process(tankL, sampleRate);
-        tankL = tankAP[1].process(tankL, sampleRate);
-        tankL = tankAP[2].process(tankL, sampleRate);
-        tankL = tankAP[3].process(tankL, sampleRate);
-        tankR = tankAP[4].process(tankR, sampleRate);
-        tankR = tankAP[5].process(tankR, sampleRate);
-        tankR = tankAP[6].process(tankR, sampleRate);
-        tankR = tankAP[7].process(tankR, sampleRate);
-
-        float tankFb = 0.30f + clamp(reverbDecay, 0.f, 1.f) * 0.40f;
-        auto processDelay = [&](std::vector<float> &buf, int &idx, float in) -> float
-        {
-            int n = (int)buf.size();
-            float y = buf[idx];
-            buf[idx] = in + y * tankFb;
-            idx = (idx + 1) % n;
-            return y;
-        };
-
-        float d1 = processDelay(tankDelay[0], tankDelayIdx[0], tankL);
-        float d2 = processDelay(tankDelay[1], tankDelayIdx[1], tankR);
-        float d3 = processDelay(tankDelay[2], tankDelayIdx[2], tankL);
-        float d4 = processDelay(tankDelay[3], tankDelayIdx[3], tankR);
-
-        float revL = (d1 + d3) * 0.5f;
-        float revR = (d2 + d4) * 0.5f;
-
-        // 9. Final mix + master lowpass
-        float wm = clamp(reverbMix, 0.f, 1.f);
-        float finalL = mixL * (1.f - wm) + revL * wm;
-        float finalR = mixR * (1.f - wm) + revR * wm;
-
-        masterLP_L += (finalL - masterLP_L) * masterLpCoef;
-        masterLP_R += (finalR - masterLP_R) * masterLpCoef;
-
-        outL = std::tanh(masterLP_L);
-        outR = std::tanh(masterLP_R);
-
-        // 10. UI snapshot
-        meterL = std::max(std::fabs(outL), meterL * (1.f - 5.f * dt));
-        meterR = std::max(std::fabs(outR), meterR * (1.f - 5.f * dt));
-
-        for (auto &e : history) e.age += dt;
-        while (history.size() > HIST_MAX)
-            history.erase(history.begin());
+        return string::f("%.0f ms", getValue() * 1000.f);
     }
 };
 
@@ -578,6 +869,8 @@ struct AmbEngine
 // ============================================================================
 struct AMB : Module
 {
+    // New parameters, inputs and outputs are appended after the original ones
+    // so that existing patches keep loading correctly.
     enum ParamId
     {
         KEY_PARAM,
@@ -592,54 +885,112 @@ struct AMB : Module
         REVERB_MIX_PARAM,
         REVERB_DECAY_PARAM,
         CHORD_INT_PARAM,
+        DARK_PARAM,
+        ECHO_TIME_PARAM,
+        REVERB_DAMP_PARAM,
+        FREEZE_PARAM,
         PARAMS_LEN
     };
-    enum InputId  { INPUTS_LEN };
-    enum OutputId { OUT_L_OUTPUT, OUT_R_OUTPUT, OUTPUTS_LEN };
-    enum LightId  { LIGHTS_LEN };
+    enum InputId  { FREEZE_INPUT, INPUTS_LEN };
+    enum OutputId { OUT_L_OUTPUT, OUT_R_OUTPUT, CHORD_OUTPUT, BELL_OUTPUT, TRIG_OUTPUT,
+                    CLOCK_OUTPUT, LEVEL_OUTPUT, OUTPUTS_LEN };
+    enum LightId  { FREEZE_LIGHT, LIGHTS_LEN };
 
     AmbEngine engine;
-    int lastKey   = -1;
-    int lastScale = -1;
+    int  lastKey   = -1;
+    int  lastScale = -1;
+    bool started   = false;
+    bool frozen    = false;
+    int  lastBellCount = 0;
+    int  lastBeatCount = 0;
+
+    dsp::SchmittTrigger freezeBtn;
+    dsp::PulseGenerator trigPulse, clockPulse;
 
     AMB()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 
-        configParam<KeyParamQuantity>(KEY_PARAM,   0.f, 11.f, 0.f, "Key (C–B)");
-        configParam<ScaleParamQuantity>(SCALE_PARAM, 0.f, (float)(AMB_NSCALES - 1), 0.f, "Scale");
-        configParam<TempoParamQuantity>(TEMPO_PARAM, 40.f, 180.f, 120.f, "Tempo");
+        configParam<KeyParamQuantity>(KEY_PARAM, 0.f, 11.f, 0.f, "Key");
+        paramQuantities[KEY_PARAM]->snapEnabled = true;
+        {
+            std::vector<std::string> names;
+            for (int i = 0; i < AMB_NSCALES; i++) names.push_back(AMB_SCALE_NAMES[i]);
+            configSwitch(SCALE_PARAM, 0.f, (float)(AMB_NSCALES - 1), 1.f, "Scale", names);
+        }
+        configParam<TempoParamQuantity>(TEMPO_PARAM, 40.f, 180.f, 72.f, "Tempo");
 
-        configParam(PAD_LEVEL_PARAM,   0.f, 1.f, 0.55f, "Pad level",   "%", 0.f, 100.f);
-        configParam(BELL_LEVEL_PARAM,  0.f, 1.f, 0.55f, "Bell level",  "%", 0.f, 100.f);
-        configParam(BASS_LEVEL_PARAM,  0.f, 1.f, 0.55f, "Bass level",  "%", 0.f, 100.f);
-        configParam(PULSE_LEVEL_PARAM, 0.f, 1.f, 0.50f, "Pulse level", "%", 0.f, 100.f);
+        configParam(PAD_LEVEL_PARAM,   0.f, 1.f, 0.60f, "Pad level",   "%", 0.f, 100.f);
+        configParam(BELL_LEVEL_PARAM,  0.f, 1.f, 0.45f, "Bell level",  "%", 0.f, 100.f);
+        configParam(BASS_LEVEL_PARAM,  0.f, 1.f, 0.50f, "Bass level",  "%", 0.f, 100.f);
+        configParam(PULSE_LEVEL_PARAM, 0.f, 1.f, 0.25f, "Pulse level", "%", 0.f, 100.f);
 
-        configParam(ECHO_MIX_PARAM,   0.f, 1.f,  0.40f, "Echo mix",      "%", 0.f, 100.f);
-        configParam(ECHO_FBK_PARAM,   0.f, 0.9f, 0.55f, "Echo feedback", "%", 0.f, 100.f);
-        configParam(REVERB_MIX_PARAM, 0.f, 1.f,  0.55f, "Reverb mix",    "%", 0.f, 100.f);
-        configParam(REVERB_DECAY_PARAM, 0.f, 1.f, 0.55f, "Reverb decay", "%", 0.f, 100.f);
+        configParam(ECHO_MIX_PARAM,   0.f, 1.f,  0.45f, "Echo mix",      "%", 0.f, 100.f);
+        configParam(ECHO_FBK_PARAM,   0.f, 0.9f, 0.60f, "Echo feedback", "%", 0.f, 100.f);
+        configParam(REVERB_MIX_PARAM, 0.f, 1.f,  0.60f, "Reverb mix",    "%", 0.f, 100.f);
+        configParam(REVERB_DECAY_PARAM, 0.f, 1.f, 0.70f, "Reverb decay", "%", 0.f, 100.f);
 
         configParam<ChordIntervalParamQuantity>(CHORD_INT_PARAM, 4.f, 60.f, 24.f, "Chord change interval");
 
+        configParam(DARK_PARAM, 0.f, 1.f, 0.60f, "Dark (tone)", "%", 0.f, 100.f);
+        configParam<EchoTimeParamQuantity>(ECHO_TIME_PARAM, 0.12f, 1.2f, 0.50f, "Echo time");
+        configParam(REVERB_DAMP_PARAM, 0.f, 1.f, 0.55f, "Reverb damping", "%", 0.f, 100.f);
+        configButton(FREEZE_PARAM, "Freeze reverb");
+
+        configInput(FREEZE_INPUT, "Freeze gate");
         configOutput(OUT_L_OUTPUT, "Left");
         configOutput(OUT_R_OUTPUT, "Right");
+        configOutput(CHORD_OUTPUT, "Chord root (1 V/oct)");
+        configOutput(BELL_OUTPUT,  "Bell pitch (1 V/oct)");
+        configOutput(TRIG_OUTPUT,  "Bell trigger");
+        configOutput(CLOCK_OUTPUT, "Beat clock");
+        configOutput(LEVEL_OUTPUT, "Output level");
+
+        engine.seed(random::u32());
+    }
+
+    void onReset(const ResetEvent &e) override
+    {
+        Module::onReset(e);
+        frozen = false;
+        lastKey = lastScale = -1;   // pick a fresh chord on the next sample
+    }
+
+    json_t *dataToJson() override
+    {
+        json_t *root = json_object();
+        json_object_set_new(root, "frozen", json_boolean(frozen));
+        return root;
+    }
+
+    void dataFromJson(json_t *root) override
+    {
+        json_t *f = json_object_get(root, "frozen");
+        if (f) frozen = json_is_true(f);
     }
 
     void process(const ProcessArgs &args) override
     {
-        int newKey   = clamp((int)std::round(params[KEY_PARAM].getValue()), 0, 11);
-        int newScale = clamp((int)std::round(params[SCALE_PARAM].getValue()), 0, AMB_NSCALES - 1);
+        engine.setSampleRate(args.sampleRate);
 
+        int newKey   = rack::math::clamp((int)std::round(params[KEY_PARAM].getValue()), 0, 11);
+        int newScale = rack::math::clamp((int)std::round(params[SCALE_PARAM].getValue()), 0, AMB_NSCALES - 1);
         if (newKey != lastKey || newScale != lastScale)
         {
             engine.key      = newKey;
             engine.scaleIdx = newScale;
-            engine.pickNewChord();
+            if (!started) { engine.startChord(); started = true; }
+            else          engine.pickNewChord();
             lastKey   = newKey;
             lastScale = newScale;
         }
 
+        if (freezeBtn.process(params[FREEZE_PARAM].getValue(), 0.1f, 1.f))
+            frozen = !frozen;
+        bool freezeNow = frozen || inputs[FREEZE_INPUT].getVoltage() > 1.f;
+        lights[FREEZE_LIGHT].setBrightness(freezeNow ? 1.f : 0.f);
+
+        engine.freeze        = freezeNow;
         engine.tempoBpm      = params[TEMPO_PARAM].getValue();
         engine.padLevel      = params[PAD_LEVEL_PARAM].getValue();
         engine.bellLevel     = params[BELL_LEVEL_PARAM].getValue();
@@ -650,11 +1001,32 @@ struct AMB : Module
         engine.reverbMix     = params[REVERB_MIX_PARAM].getValue();
         engine.reverbDecay   = params[REVERB_DECAY_PARAM].getValue();
         engine.chordInterval = params[CHORD_INT_PARAM].getValue();
+        engine.dark          = params[DARK_PARAM].getValue();
+        engine.echoTime      = params[ECHO_TIME_PARAM].getValue();
+        engine.reverbDamp    = params[REVERB_DAMP_PARAM].getValue();
 
-        engine.process(args.sampleRate, args.sampleTime);
+        engine.process(args.sampleTime);
 
         outputs[OUT_L_OUTPUT].setVoltage(engine.outL * 5.f);
         outputs[OUT_R_OUTPUT].setVoltage(engine.outR * 5.f);
+
+        // Notes are semitones above C3, so C4 = 12 = 0 V
+        outputs[CHORD_OUTPUT].setVoltage((engine.chordRoot - 12.f) / 12.f);
+        outputs[BELL_OUTPUT].setVoltage((engine.lastBellSemis - 12.f) / 12.f);
+
+        if (engine.bellTrigCount != lastBellCount)
+        {
+            lastBellCount = engine.bellTrigCount;
+            trigPulse.trigger(5e-3f);
+        }
+        if (engine.beatCount != lastBeatCount)
+        {
+            lastBeatCount = engine.beatCount;
+            clockPulse.trigger(5e-3f);
+        }
+        outputs[TRIG_OUTPUT].setVoltage(trigPulse.process(args.sampleTime) ? 10.f : 0.f);
+        outputs[CLOCK_OUTPUT].setVoltage(clockPulse.process(args.sampleTime) ? 10.f : 0.f);
+        outputs[LEVEL_OUTPUT].setVoltage(rack::math::clamp(engine.level * 18.f, 0.f, 10.f));
     }
 };
 
@@ -664,6 +1036,24 @@ struct AMB : Module
 namespace
 {
     namespace ag = agmm;
+
+    // Note name for semitones above C3 (0 = C3).
+    void ambNoteName(int semis, char *buf, size_t n)
+    {
+        const int midi = 48 + semis;
+        const int pc = ((midi % 12) + 12) % 12;
+        const int oct = ambdsp::floorDiv(midi, 12) - 1;
+        snprintf(buf, n, "%s%d", AMB_NOTE_NAMES[pc], oct);
+    }
+
+    // Section title over a group of cells between x0 and x1.
+    void ambGroupHeader(NVGcontext *vg, float x0, float x1, float y, const char *txt)
+    {
+        nvgSave(vg);
+        nvgTranslate(vg, x0, 0.f);
+        ag::sectionHeader(vg, x1 - x0, y, txt, 4.f);
+        nvgRestore(vg);
+    }
 
     struct AMBPanel : TransparentWidget
     {
@@ -675,22 +1065,26 @@ namespace
             ag::panelBase(vg, AMB_W, AMB_H, "AMB");
             ag::bezel(vg, AMB_DX, AMB_DY, AMB_DW, AMB_DH);
 
-            ag::cell(vg, 68.f,  AMB_KBIG_CELL_TOP, 90.f, AMB_KBIG_CELL_H, "KEY");
-            ag::cell(vg, 172.f, AMB_KBIG_CELL_TOP, 90.f, AMB_KBIG_CELL_H, "SCALE");
+            // Row 1: composition | layer levels
+            ambGroupHeader(vg, 10.f, 210.f, AMB_R1_HDR, "COMPOSE");
+            ambGroupHeader(vg, 210.f, 410.f, AMB_R1_HDR, "LAYERS");
+            const char *r1[8] = {"KEY", "SCALE", "TEMPO", "CHORD", "PAD", "BELL", "BASS", "PULSE"};
+            for (int i = 0; i < 8; ++i)
+                ag::cell(vg, ambCellX(i), AMB_R1_TOP, AMB_CELL_W, AMB_CELL_H, r1[i]);
 
-            const char *r1[4] = { "TEMPO", "PAD", "BELL", "BASS" };
-            for (int i = 0; i < 4; ++i)
-                ag::cell(vg, AMB_KCOL[i], AMB_KS1_CELL_TOP, AMB_CELL_W, AMB_KS1_CELL_H, r1[i]);
+            // Row 2: echo | reverb | master
+            ambGroupHeader(vg, 10.f, 160.f, AMB_R2_HDR, "ECHO");
+            ambGroupHeader(vg, 160.f, 310.f, AMB_R2_HDR, "REVERB");
+            ambGroupHeader(vg, 310.f, 410.f, AMB_R2_HDR, "MASTER");
+            const char *r2[8] = {"TIME", "FBK", "MIX", "DECAY", "DAMP", "MIX", "DARK", "FREEZE"};
+            for (int i = 0; i < 8; ++i)
+                ag::cell(vg, ambCellX(i), AMB_R2_TOP, AMB_CELL_W, AMB_CELL_H, r2[i]);
 
-            const char *r2[4] = { "PULSE", "ECHO", "FBK", "REV MIX" };
-            for (int i = 0; i < 4; ++i)
-                ag::cell(vg, AMB_KCOL[i], AMB_KS2_CELL_TOP, AMB_CELL_W, AMB_KS2_CELL_H, r2[i]);
-
-            ag::cell(vg, AMB_KCOL[0], AMB_KS3_CELL_TOP, AMB_CELL_W, AMB_KS3_CELL_H, "REV DEC");
-            ag::cell(vg, AMB_KCOL[1], AMB_KS3_CELL_TOP, AMB_CELL_W, AMB_KS3_CELL_H, "CHORD INT");
-
-            ag::cell(vg, 68.f,  AMB_IO_CELL_TOP, 60.f, AMB_IO_CELL_H, "OUT L", true, 7.f);
-            ag::cell(vg, 172.f, AMB_IO_CELL_TOP, 60.f, AMB_IO_CELL_H, "OUT R", true, 7.f);
+            // Row 3: freeze input on the left, outputs (tinted) after it
+            ag::sectionHeader(vg, AMB_W, AMB_R3_HDR, "I / O", 10.f);
+            const char *r3[8] = {"FRZ IN", "OUT L", "OUT R", "CHORD", "BELL", "TRIG", "CLOCK", "LEVEL"};
+            for (int i = 0; i < 8; ++i)
+                ag::cell(vg, ambCellX(i), AMB_R3_TOP, AMB_CELL_W, AMB_CELL_H, r3[i], i >= 1);
 
             Widget::draw(args);
         }
@@ -705,44 +1099,69 @@ namespace
             box.size = Vec(AMB_DW, AMB_DH);
         }
 
+        static float pitchY(float p)
+        {
+            float n = (p - AMB_PITCH_MIN) / (AMB_PITCH_MAX - AMB_PITCH_MIN);
+            n = rack::math::clamp(n, 0.f, 1.f);
+            return AMB_PLOT_B - n * (AMB_PLOT_B - AMB_PLOT_T);
+        }
+        // x position for a time `age` seconds in the past
+        static float ageX(double age)
+        {
+            float a = rack::math::clamp((float)(age / (double)AMB_HIST_WIN), 0.f, 1.f);
+            return AMB_PLOT_R - a * (AMB_PLOT_R - AMB_PLOT_L);
+        }
+
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
-            const float X0 = AMB_TX0, Y0 = AMB_TY0, TW = AMB_TW, TH = AMB_TH;
-
             ag::screen(vg, 0.f, 0.f, AMB_DW, AMB_DH);
 
+            // Hairlines under the header and above the legend row
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 6.f, 13.5f);
-            nvgLineTo(vg, AMB_DW - 6.f, 13.5f);
-            nvgMoveTo(vg, 6.f, 77.5f);
-            nvgLineTo(vg, AMB_DW - 6.f, 77.5f);
+            nvgMoveTo(vg, 8.f, AMB_HDR_H + 0.5f);
+            nvgLineTo(vg, AMB_DW - 8.f, AMB_HDR_H + 0.5f);
+            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 40));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, 8.f, 105.5f);
+            nvgLineTo(vg, AMB_DW - 8.f, 105.5f);
             nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 22));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            ag::plotFrame(vg, X0 - 1.f, Y0 - 1.f, TW + 2.f, TH + 2.f);
+            ag::plotFrame(vg, AMB_PLOT_L, AMB_PLOT_T, AMB_PLOT_R - AMB_PLOT_L, AMB_PLOT_B - AMB_PLOT_T);
 
-            // Octave gridlines at C2, C3, C4, C5, C6
+            // Octave grid: C2 .. C6 (C3 = 0 semitones)
+            static const char *octTxt[5] = {"C2", "C3", "C4", "C5", "C6"};
             nvgBeginPath(vg);
-            for (int s = AMB_PITCH_MIN; s <= AMB_PITCH_MAX; s += 12)
+            for (int i = 0; i < 5; ++i)
             {
-                float y = Y0 + TH - (float)(s - AMB_PITCH_MIN)
-                                    / (float)(AMB_PITCH_MAX - AMB_PITCH_MIN) * TH;
-                nvgMoveTo(vg, X0, y + 0.5f);
-                nvgLineTo(vg, X0 + TW, y + 0.5f);
+                float y = std::floor(pitchY((float)(-12 + 12 * i))) + 0.5f;
+                nvgMoveTo(vg, AMB_PLOT_L + 1.f, y);
+                nvgLineTo(vg, AMB_PLOT_R - 1.f, y);
             }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 20));
+            // Time grid every 5 s
+            for (int k = 1; k < 4; ++k)
+            {
+                float x = std::floor(ageX(5.0 * k)) + 0.5f;
+                nvgMoveTo(vg, x, AMB_PLOT_T + 1.f);
+                nvgLineTo(vg, x, AMB_PLOT_B - 1.f);
+            }
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 14));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            const char *tl[4] = { "15S", "10", "5", "0" };
-            for (int k = 0; k < 4; ++k)
-                ag::text(vg, X0 + TW - k * (TW / 3.f), Y0 + TH + 12.f,
-                         tl[k], 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            for (int i = 0; i < 5; ++i)
+                ag::text(vg, AMB_PLOT_L - 4.f, pitchY((float)(-12 + 12 * i)), octTxt[i], 7.f, ag::dim(), ag::ALIGN_R, 0.f);
 
-            ag::text(vg, X0 + TW + 8.f,  Y0 + TH + 12.f, "L", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
-            ag::text(vg, X0 + TW + 14.f, Y0 + TH + 12.f, "R", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            static const char *timeTxt[5] = {"20S", "15", "10", "5", "NOW"};
+            for (int k = 0; k < 5; ++k)
+                ag::text(vg, ageX(20.0 - 5.0 * k), AMB_PLOT_B + 8.f, timeTxt[k], 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+
+            ag::text(vg, AMB_MET_X + 3.f,  AMB_PLOT_B + 8.f, "L", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
+            ag::text(vg, AMB_MET_X + 13.f, AMB_PLOT_B + 8.f, "R", 7.f, ag::dim(), ag::ALIGN_C, 0.f);
 
             Widget::draw(args);
         }
@@ -751,81 +1170,125 @@ namespace
         {
             if (layer != 1) { Widget::drawLayer(args, layer); return; }
             NVGcontext *vg = args.vg;
-            const float X0 = AMB_TX0, Y0 = AMB_TY0, TW = AMB_TW, TH = AMB_TH;
-            const float W  = AMB_DW, H  = AMB_DH;
 
-            std::vector<AmbEngine::NoteEvent> evts;
+            const NVGcolor colours[4] = {
+                ag::violet(),                   // pad
+                ag::accent(),                   // bell
+                ag::warm(),                     // bass
+                nvgRGB(0xa0, 0xa8, 0xb4)        // pulse
+            };
+
+            // -------- snapshot --------
+            int key = 0, scale = 1;
+            float tempo = 72.f, chord = 0.f, mL = 0.f, mR = 0.f, echoMs = 500.f, revSec = 8.f;
+            bool frozen = false;
+            double now = 0.0;
+            const AmbEngine::NoteEvent *hist = nullptr;
+            AmbEngine::NoteEvent demo[24];
+
             if (module)
             {
-                for (auto &e : module->engine.history)
-                    if (e.age <= AMB_HIST_WIN) evts.push_back(e);
+                const AmbEngine &e = module->engine;
+                key = e.key; scale = e.scaleIdx; tempo = e.tempoBpm; chord = e.chordRoot;
+                mL = e.meterL; mR = e.meterR; echoMs = e.echoMs; revSec = e.reverbSec;
+                frozen = e.freeze; now = e.time;
+                hist = e.hist;
             }
             else
             {
-                for (int i = 0; i < 16; i++)
-                    evts.push_back({ (float)i, 12.f + (i % 6) * 3.f, i % 4 });
+                // Static preview for the module browser
+                now = 20.0;
+                int n = 0;
+                const float pads[4] = {0.f, 3.f, 7.f, 10.f};
+                for (int k = 0; k < 4; ++k) demo[n++] = AmbEngine::NoteEvent{4.0, -1.0, pads[k], 0};
+                for (int k = 0; k < 4; ++k) demo[n++] = AmbEngine::NoteEvent{0.0, 4.0, pads[k] + 5.f, 0};
+                demo[n++] = AmbEngine::NoteEvent{4.0, 16.0, -9.f, 2};
+                for (int k = 0; k < 8; ++k) demo[n++] = AmbEngine::NoteEvent{3.0 + 2.2 * k, -1.0, 15.f + 3.f * (float)(k % 5), 1};
+                for (int k = 0; k < 7; ++k) demo[n++] = AmbEngine::NoteEvent{1.0 + 2.7 * k, 1.0 + 2.7 * k, 0.f, 3};
+                hist = demo;
             }
+            key = rack::math::clamp(key, 0, 11);
+            scale = rack::math::clamp(scale, 0, AMB_NSCALES - 1);
+            const int histN = module ? AmbEngine::HIST_MAX : 24;
 
-            auto pitchY = [&](float p) {
-                float n = (p - (float)AMB_PITCH_MIN) / (float)(AMB_PITCH_MAX - AMB_PITCH_MIN);
-                n = clamp(n, 0.f, 1.f);
-                return Y0 + TH - n * TH;
-            };
-            auto ageX = [&](float a) {
-                return X0 + TW - clamp(a / AMB_HIST_WIN, 0.f, 1.f) * TW;
-            };
-
-            NVGcolor colours[4] = {
-                ag::withA(ag::violet(), 0.85f),
-                ag::withA(ag::accent(), 0.85f),
-                nvgRGB(0xff, 0xc0, 0x60),
-                nvgRGB(0x90, 0x90, 0x90)
-            };
-
-            for (auto &e : evts)
+            // -------- events --------
+            nvgSave(vg);
+            nvgScissor(vg, AMB_PLOT_L, AMB_PLOT_T, AMB_PLOT_R - AMB_PLOT_L, AMB_PLOT_B - AMB_PLOT_T);
+            for (int i = 0; i < histN; ++i)
             {
-                float x = ageX(e.age);
-                float y = pitchY(e.pitch);
-                float a = clamp(1.f - e.age / AMB_HIST_WIN, 0.f, 1.f);
-                NVGcolor c = colours[e.layer % 4];
-                c.a *= a;
-                nvgBeginPath(vg);
-                nvgCircle(vg, x, y, 2.5f);
-                nvgFillColor(vg, c);
-                nvgFill(vg);
-            }
+                const AmbEngine::NoteEvent &ev = hist[i];
+                if (ev.born < -999.0) continue;
+                const double age = now - ev.born;
+                if (age < 0.0) continue;
+                const double endT = (ev.end < 0.0) ? now : ev.end;
+                if (now - endT > (double)AMB_HIST_WIN) continue;
+                const int lay = rack::math::clamp(ev.layer, 0, 3);
+                // Bells and pulses are points in time: skip them once off the left edge
+                if ((lay == 1 || lay == 3) && age > (double)AMB_HIST_WIN) continue;
+                const float fadeAge = (lay == 1 || lay == 3) ? (float)age : (float)(now - endT);
+                const float fade = rack::math::clamp(1.f - fadeAge / AMB_HIST_WIN * 0.7f, 0.2f, 1.f);
+                float x0 = ageX(age);
+                float x1 = ageX(now - endT);
 
-            int k = 0, s = 0;
-            float chord = 12.f;
-            if (module)
-            {
-                k = module->engine.key;
-                s = module->engine.scaleIdx;
-                chord = module->engine.curChordRoot;
+                if (lay == 0 || lay == 2)
+                {
+                    // Pad and bass notes are sustained bars
+                    float h = (lay == 0) ? 3.f : 4.f;
+                    float y = pitchY(ev.pitch);
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x0, y - h * 0.5f, std::max(x1 - x0, 1.f), h);
+                    nvgFillColor(vg, ag::withA(colours[lay], 0.80f * fade));
+                    nvgFill(vg);
+                }
+                else if (lay == 1)
+                {
+                    // Bells are dots that fade as they ring out
+                    nvgBeginPath(vg);
+                    nvgCircle(vg, x0, pitchY(ev.pitch), 2.6f);
+                    nvgFillColor(vg, ag::withA(colours[1], 0.90f * fade));
+                    nvgFill(vg);
+                }
+                else
+                {
+                    // Pulses are short ticks along the bottom edge
+                    nvgBeginPath(vg);
+                    nvgRect(vg, x0 - 0.5f, AMB_PLOT_B - 6.f, 1.f, 5.f);
+                    nvgFillColor(vg, ag::withA(colours[3], 0.85f * fade));
+                    nvgFill(vg);
+                }
             }
-            k = clamp(k, 0, 11);
-            s = clamp(s, 0, AMB_NSCALES - 1);
+            nvgRestore(vg);
 
+            // -------- header --------
             char buf[64];
-            snprintf(buf, sizeof(buf), "%s %s", AMB_NOTE_NAMES[k], AMB_SCALE_NAMES[s]);
-            ag::text(vg, 6.f, 8.f, buf, 7.f, ag::withA(ag::accent(), 0.9f), ag::ALIGN_L, 0.5f);
+            snprintf(buf, sizeof(buf), "%s %s", AMB_NOTE_NAMES[key], AMB_SCALE_NAMES[scale]);
+            ag::text(vg, 8.f, AMB_HDR_H * 0.5f, buf, 8.f, ag::accent(), ag::ALIGN_L, 0.5f);
 
-            // Display oct: 130.81 Hz base, pitch 0 = C3 → oct = 3 + pitch/12
-            int nearest = clamp((int)std::round(chord), AMB_PITCH_MIN, AMB_PITCH_MAX);
-            int oct = 3 + (nearest < 0 ? (nearest - 11) / 12 : nearest / 12);
-            int nn  = ((nearest % 12) + 12) % 12;
-            snprintf(buf, sizeof(buf), "%s%d", AMB_NOTE_NAMES[nn], oct);
-            ag::text(vg, W - 6.f, 9.f, buf, 9.f, ag::withA(ag::bright(), 0.9f), ag::ALIGN_R, 0.5f);
+            snprintf(buf, sizeof(buf), "%.0f BPM", tempo);
+            ag::text(vg, AMB_DW * 0.5f, AMB_HDR_H * 0.5f, buf, 8.f, ag::dim(), ag::ALIGN_C, 0.5f);
 
-            ag::text(vg, 6.f,  H - 6.f, "PAD",   7.f, colours[0], ag::ALIGN_L, 0.5f);
-            ag::text(vg, 30.f, H - 6.f, "BELL",  7.f, colours[1], ag::ALIGN_L, 0.5f);
-            ag::text(vg, 56.f, H - 6.f, "BASS",  7.f, colours[2], ag::ALIGN_L, 0.5f);
-            ag::text(vg, 82.f, H - 6.f, "PULSE", 7.f, colours[3], ag::ALIGN_L, 0.5f);
+            char nb[24];
+            ambNoteName((int)std::round(chord), nb, sizeof(nb));
+            ag::text(vg, AMB_DW - 8.f, AMB_HDR_H * 0.5f, nb, 9.f, ag::bright(), ag::ALIGN_R, 0.5f);
+            ag::chip(vg, AMB_DW - 8.f - 22.f - 4.f - 40.f, 3.f, 40.f, 12.f, "FREEZE", frozen, ag::accent());
 
-            float mL = module ? module->engine.meterL : 0.f;
-            float mR = module ? module->engine.meterR : 0.f;
-            ag::meter(vg, X0 + TW + 6.f,  Y0, 4.f, TH, mL / 5.f);
-            ag::meter(vg, X0 + TW + 12.f, Y0, 4.f, TH, mR / 5.f);
+            // -------- meters --------
+            ag::meter(vg, AMB_MET_X,        AMB_PLOT_T, 6.f, AMB_PLOT_B - AMB_PLOT_T, mL * 1.8f);
+            ag::meter(vg, AMB_MET_X + 10.f, AMB_PLOT_T, 6.f, AMB_PLOT_B - AMB_PLOT_T, mR * 1.8f);
+
+            // -------- legend and delay times --------
+            const char *names[4] = {"PAD", "BELL", "BASS", "PULSE"};
+            const float lx[4] = {8.f, 52.f, 100.f, 150.f};
+            for (int i = 0; i < 4; ++i)
+            {
+                nvgBeginPath(vg);
+                nvgRect(vg, lx[i], 112.f, 6.f, 6.f);
+                nvgFillColor(vg, colours[i]);
+                nvgFill(vg);
+                ag::text(vg, lx[i] + 10.f, 115.f, names[i], 7.f, ag::dim(), ag::ALIGN_L, 0.3f);
+            }
+            snprintf(buf, sizeof(buf), "ECHO %.0f MS   REV %.1f S", echoMs, revSec);
+            ag::text(vg, AMB_DW - 8.f, 115.f, buf, 7.f, ag::dim(), ag::ALIGN_R, 0.3f);
 
             Widget::drawLayer(args, layer);
         }
@@ -850,24 +1313,39 @@ struct AMBWidget : ModuleWidget
 
         addChild(new AMBDisplay(module));
 
-        addParam(createParamCentered<RoundBigBlackKnob>(Vec(68.f,  AMB_KBIG_CY), module, AMB::KEY_PARAM));
-        addParam(createParamCentered<RoundBigBlackKnob>(Vec(172.f, AMB_KBIG_CY), module, AMB::SCALE_PARAM));
+        // Row 1: KEY, SCALE, TEMPO, CHORD | PAD, BELL, BASS, PULSE
+        const float y1 = AMB_R1_TOP + AMB_CTRL_DY;
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(0), y1), module, AMB::KEY_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(1), y1), module, AMB::SCALE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(2), y1), module, AMB::TEMPO_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(3), y1), module, AMB::CHORD_INT_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(4), y1), module, AMB::PAD_LEVEL_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(5), y1), module, AMB::BELL_LEVEL_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(6), y1), module, AMB::BASS_LEVEL_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(7), y1), module, AMB::PULSE_LEVEL_PARAM));
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[0], AMB_KS1_CY), module, AMB::TEMPO_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[1], AMB_KS1_CY), module, AMB::PAD_LEVEL_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[2], AMB_KS1_CY), module, AMB::BELL_LEVEL_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[3], AMB_KS1_CY), module, AMB::BASS_LEVEL_PARAM));
+        // Row 2: echo TIME, FBK, MIX | reverb DECAY, DAMP, MIX | DARK, FREEZE
+        const float y2 = AMB_R2_TOP + AMB_CTRL_DY;
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(0), y2), module, AMB::ECHO_TIME_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(1), y2), module, AMB::ECHO_FBK_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(2), y2), module, AMB::ECHO_MIX_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(3), y2), module, AMB::REVERB_DECAY_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(4), y2), module, AMB::REVERB_DAMP_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(5), y2), module, AMB::REVERB_MIX_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(ambCellX(6), y2), module, AMB::DARK_PARAM));
+        addParam(createParamCentered<LEDButton>(Vec(ambCellX(7), y2), module, AMB::FREEZE_PARAM));
+        addChild(createLightCentered<MediumLight<agmm::CyanLight>>(Vec(ambCellX(7), y2), module, AMB::FREEZE_LIGHT));
 
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[0], AMB_KS2_CY), module, AMB::PULSE_LEVEL_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[1], AMB_KS2_CY), module, AMB::ECHO_MIX_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[2], AMB_KS2_CY), module, AMB::ECHO_FBK_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[3], AMB_KS2_CY), module, AMB::REVERB_MIX_PARAM));
-
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[0], AMB_KS3_CY), module, AMB::REVERB_DECAY_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(AMB_KCOL[1], AMB_KS3_CY), module, AMB::CHORD_INT_PARAM));
-
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(68.f,  AMB_IO_CY), module, AMB::OUT_L_OUTPUT));
-        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(172.f, AMB_IO_CY), module, AMB::OUT_R_OUTPUT));
+        // Row 3: FRZ IN | OUT L, OUT R, CHORD, BELL, TRIG, CLOCK, LEVEL
+        const float y3 = AMB_R3_TOP + AMB_CTRL_DY;
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(ambCellX(0), y3), module, AMB::FREEZE_INPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(1), y3), module, AMB::OUT_L_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(2), y3), module, AMB::OUT_R_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(3), y3), module, AMB::CHORD_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(4), y3), module, AMB::BELL_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(5), y3), module, AMB::TRIG_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(6), y3), module, AMB::CLOCK_OUTPUT));
+        addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(7), y3), module, AMB::LEVEL_OUTPUT));
     }
 };
 

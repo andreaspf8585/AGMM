@@ -23,7 +23,7 @@ Key features:
 
 ## Module Screenshot
 
-![ExpressArpeggiator VCV Rack Module](images/expressarpeggiator.png)
+![ExpressArpeggiator VCV Rack Module](images/ExpressArpeggiator.png)
 
 ## 2. Architecture
 

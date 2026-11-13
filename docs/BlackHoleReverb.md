@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![BlackHoleReverb VCV Rack Module](images/blackholereverb.png)
+![BlackHoleReverb VCV Rack Module](images/BlackHoleReverb.png)
 
 ## 2. Architecture
 

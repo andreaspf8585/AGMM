@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![XBodyProblem VCV Rack Module](images/xbodyproblem.png)
+![XBodyProblem VCV Rack Module](images/XBodyProblem.png)
 
 ## 2. Architecture
 

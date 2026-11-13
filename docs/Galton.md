@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![Galton VCV Rack Module](images/galton.png)
+![Galton VCV Rack Module](images/Galton.png)
 
 ## 2. Architecture
 

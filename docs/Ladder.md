@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![Ladder VCV Rack Module](images/ladder.png)
+![Ladder VCV Rack Module](images/Ladder.png)
 
 ## 2. Architecture
 

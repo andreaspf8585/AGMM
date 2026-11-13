@@ -7,394 +7,481 @@ Source: AMB.cpp
 
 ## 1. Overview
 
-`AMB` is a generative ambient machine inspired by Brian Eno's *Discreet Music* and the AMB-1 algorithm. It layers five independent voices under a shared key and scale, driven by a single BPM clock. The result is a slowly evolving, always-musical texture that never exactly repeats.
+`AMB` is a 28 HP generative ambient machine in the spirit of Brian Eno's AMB-1 tapes. It composes by itself: it picks a chord every few seconds, plays eight long bell loops of unequal prime lengths against it, holds a sub bass, adds a low rumble and soft Euclidean heartbeats, and sends the whole mix through a tape echo and a very long reverb. Nothing ever repeats exactly.
 
 Key features:
-- 8-voice detuned pad with per-voice LFO
-- 8 tape-loop bells with mutually prime loop lengths (17–47 beats)
-- Sub-bass with LFO amplitude
-- 6 Euclidean pulse layers on a 32-beat cycle
-- Ping-pong tape echo with cross-feedback
-- Dattorro-style plate reverb with modulated tank
-- Selectable key (C–B) and scale (Major, Minor, Dorian, Phrygian, Lydian, Mixolydian)
-- Chord-change interval knob (4–60 s)
-- Real-time note history scope
+- Ten scales (major, minor, dorian, phrygian, lydian, mixolydian, harmonic minor, locrian, minor pentatonic, whole tone)
+- Automatic chord progression with equal-power cross-fade over 7 s
+- Eight bell loops of unequal prime lengths (17, 23, 29, 31, 37, 41, 43, 47 beats)
+- Six Euclidean heartbeat layers
+- Tape-style ping-pong echo with wow, flutter, drift and saturating feedback
+- Eight-line FDN reverb with Hadamard matrix (RT60 up to 32 s), freezable
+- CV / gate outputs: chord root, bell pitch, bell trigger, clock, level
 
 ## Module Screenshot
 
-![AMB VCV Rack Module](images/amb.png)
+![AMB VCV Rack Module](images/AMB.png)
 
 ## 2. Architecture
 
 ### Main Classes
 
-- `AMB`: Core module class inheriting from `rack::Module`
-- `AmbEngine`: The full DSP engine (separate struct)
-- `AMBPanel`: Static panel artwork
-- `AMBDisplay`: Live note-history scope
-- ParamQuantity subclasses: `KeyParamQuantity`, `ScaleParamQuantity`, `TempoParamQuantity`, `ChordIntervalParamQuantity`
+- `AMB` — Rack module class inheriting from `rack::Module`
+- `AmbEngine` — the entire generative engine (no Rack dependencies)
+- `ambdsp::DelayLine`, `ambdsp::Allpass` — primitive DSP blocks
+- `ambdsp::Reverb` — 8-line FDN with Hadamard mixing
+- `ambdsp::Echo` — tape-style ping-pong delay
+- `AMBPanel` — static panel artwork
+- `AMBDisplay` — 380 × 124 piano-roll history + meters
 
 ### Inheritance
 
 - `AMB` inherits from `rack::Module`
+- `AmbEngine` is a standalone struct held by value in the module
 - `AMBPanel` and `AMBDisplay` inherit from `rack::TransparentWidget`
-- The ParamQuantity subclasses inherit from `rack::engine::ParamQuantity`
 
 ### Structures
 
-- `AmbEngine::NoteEvent { float age; float pitch; int layer; }` — one note in the display history
-- `AmbEngine::Allpass` — Schroeder all-pass for the reverb diffuser
-- `AmbEngine::ModAllpass` — modulated all-pass for the reverb tank
-- `std::vector<NoteEvent> history` — recent note events (up to 128)
+- `ambdsp::DelayLine { std::vector<float> buf; int w; int size; }` — linear-interpolated fractional delay
+- `ambdsp::Allpass { std::vector<float> buf; int idx; float g; }` — fixed-integer Schroeder allpass
+- `ambdsp::Reverb` — 8 delay lines + 3+3 allpasses + pre-delay + per-line LFO + Hadamard matrix
+- `ambdsp::Echo` — 2 delay lines + wow/flutter/drift LFOs + feedback filtering
+- `AmbEngine::PadSet { float note[4]; float phase[8]; float freq[8]; float gain; }`
+- `AmbEngine::NoteEvent { double born; double end; float pitch; int layer; }`
 
-### Engine State (grouped)
+### State (grouped)
 
 | Group | Storage |
 |-------|---------|
-| Transport | `beatPhase`, `lastSampleRate` |
-| Pad | `padPhase[8]`, `padDetune[8]`, `padLfo[8]`, `padLfoRate[8]`, `padChordRoot`, `padTargetRoot`, `padChordTimer` |
-| Bells | `bellLoopPos[8]`, `bellDegree[8]`, `bellPhase[8]`, `bellEnv[8]`, `bellFreq[8]`, `bellModPhase[8]`, `bellMod`, `bellIndex` |
-| Bass | `bassPhaseSub`, `bassPhaseMid`, `bassPitch`, `bassTarget`, `bassLfoPhase` |
-| Pulse | `euclidStep[6]`, `pulseEnv[6]`, `pulseHatEnv[6]`, `pulsePhase[6]`, `hatLP[6]`, `euclidPat[6][32]`, `euclidLen[6]` |
-| Echo | `echoBufL/R` (96000 samples), `echoWrite`, `echoTap1`, `echoTap2` |
-| Reverb | `preBuf[440]`, `ap1..ap4`, `tankAP[8]`, `tankDelay[4]` |
-| Output | `meterL`, `meterR`, `curChordRoot`, `outL`, `outR`, `masterLP_L/R` |
-| RNG | `std::mt19937 rng`, `std::uniform_real_distribution<float> dist01` |
+| Parameters | 16 floats on the module (key, scale, tempo, layer levels, echo / reverb, dark, chord interval) |
+| Transport | `double beatPhase`, `int lastBeat`, `double time` |
+| Pad | `PadSet pad[2]`, `int padCur`, `float padFade`, `float padLfo[8]`, `float padLfoRate[8]`, `float padTimer`, `int lastDegree` |
+| Bells | `float bellPh[8]`, `bellModPh[8]`, `bellEnv[8]`, `bellAge[8]`, `bellFreq[8]`, `bellRatio[8]`, `bellVel[8]`, `bellPan[8]`, `int bellCycle[8]` |
+| Bass / rumble | `float bassPitch, bassTarget, bassPhase, bassLfo`, `float texLp1, texLp2` |
+| Pulse | `int euclidStep[6]`, `float pulseEnv[6], pulsePhase[6], tickEnv[6], tickLp[6]`, `bool euclidPat[6][32]`, `int euclidLen[6]` |
+| Master | `mLp1L, mLp2L, mLp1R, mLp2R`, `dcXL, dcYL, dcXR, dcYR` |
+| Outputs / display | `float outL, outR, level, meterL, meterR, chordRoot, lastBellSemis`, `int bellTrigCount, beatCount`, `float echoMs, reverbSec` |
+| History | `NoteEvent hist[160]`, `int histPos` |
+| RNG | `uint32_t rngState` |
 
 ## 3. DSP Theory
 
-### Transport
+### Generative chord scheduling
 
-A single phase accumulator advances at the master BPM:
-
-$$
-\phi(t) = \phi(t-1) + \frac{\text{BPM}}{60} \cdot \Delta t
-$$
-
-All rhythm layers derive their position from this phase, so changing the BPM time-stretches every layer in sync.
-
-### Pad chord generation
-
-The pad plays an 8-voice detuned chord. The chord root is chosen from the current scale, folded into a one-octave-plus range (C3..E5):
+The engine re-picks a chord every `CHORD` seconds (4 – 60 s, default 24 s). The previous chord and the new one are kept as two separate `PadSet` structures, and their gains cross-fade over 7 s using an equal-power curve:
 
 $$
-\text{root} = 12 + \text{scale}[\text{degree}] + \text{key} \pmod{12}, \quad \text{root} \in [12, 28]
+g_{\text{new}} = \sin\!\left(\tfrac{\pi}{2} t\right), \quad g_{\text{old}} = \cos\!\left(\tfrac{\pi}{2} t\right), \quad t = \min\!\left(1,\ \frac{\text{padFade}}{7\text{s}}\right)
 $$
 
-The chord glides toward its target exponentially (τ ≈ 2 s):
+A cross-faded amplitude relation ensures the perceived loudness stays constant during the transition.
+
+### Scale degree → semitones
+
+Degrees are wrapped to the scale length `n` and mapped through the interval table:
 
 $$
-p_{\text{chord}}(t) = p_{\text{chord}}(t-1) + \left(p_{\text{target}} - p_{\text{chord}}(t-1)\right)\left(1 - e^{-\Delta t / 2}\right)
+\text{degSemis}(d) = \text{INTERVALS}[(d \bmod n)] + 12 \left\lfloor \frac{d}{n} \right\rfloor
 $$
 
-### Detuned pad
+`degSemis` handles negative degrees by using an exact integer division (`floorDiv`).
 
-The 8 pad voices share the chord root but have a fixed detune table:
+### Chord picking
 
-$$
-D = \{-0.08, -0.055, -0.03, -0.01, 0.01, 0.03, 0.055, 0.08\}
-$$
+1. Weighted random choice among the first 7 degrees (weights: 0.30, 0.08, 0.14, 0.18, 0.16, 0.10, 0.04).
+2. Try up to 3 times to avoid repeating `lastDegree` (with 30 % acceptance of a repeat).
+3. Root = `(degSemis(deg) + key) mod 12`, brought into [-4, 7] (kept low so the pad is dark).
+4. Third = `degSemis(deg + 2) - degSemis(deg)`.
+5. Fifth = `degSemis(deg + 4) - degSemis(deg)`.
+6. Colour = ninth (`degSemis(deg + 1) - degSemis(deg) + 12`), seventh (`degSemis(deg + 6) - …`) or octave (12), picked uniformly.
 
-so each voice is detuned by $D[v]$ semitones. Each voice also gets a slow LFO (0.03–0.15 Hz) that modulates amplitude between 0.6 and 1.0, giving the pad a gentle breathing quality.
-
-### Bell tape loops
-
-Each of the 8 bells has a loop length in beats from a mutually prime set:
-
-$$
-L = \{17, 23, 29, 31, 37, 41, 43, 47\}
-$$
-
-Its position is:
+The four note pitches are detuned per voice:
 
 $$
-\text{pos}_b(t) = \phi(t) \bmod L_b
+f_{k,j} = 130.81 \cdot 2^{(n_k + \delta_{k,j})/12}, \quad \delta = \pm[0.05, 0.10] \text{ semitones}
 $$
 
-On every wrap (pos_b drops below its previous value) the bell re-fires: a new scale degree and octave are rolled, the envelope is reset, and the FM phase is zeroed. Because the loop lengths share no common factor, the composite bell pattern never exactly repeats.
+so eight oscillators are always active (four notes × two detuned voices).
 
-The bell is a phase-modulated sine:
+### Bell scheduling (unequal loops)
 
-$$
-\text{bell} = \sin(2\pi\phi_c + I\sin(2\pi\phi_m))
-$$
-
-with $I = 0.5$ and $f_m = 1.5 f_c$.
-
-### Euclidean pulses
-
-Six layers use Euclidean rhythms $E(k, n)$ encoded on a 32-beat cycle:
+Each of the eight bell layers has a loop length `L_b` in beats (17, 23, 29, 31, 37, 41, 43, 47), all prime so that they never align. The engine tests whether the current beat crossed a loop boundary:
 
 $$
-E(k, n)[i] = \left((i \cdot k) \bmod n\right) < k
+c_b = \left\lfloor \frac{\text{beatPhase} + \text{off}_b \, L_b}{L_b} \right\rfloor
 $$
 
-The six patterns are `{32,5}`, `{24,4}`, `{16,2}`, `{28,3}`, `{20,5}`, `{12,3}`. The step index for pattern $p$ is:
+When `c_b ≠ bellCycle[b]`, there is a 78 % chance the layer fires a new bell:
+- **Pitch**: 55 % chance a chord note + 12 or + 24 semitones; 45 % chance a random scale degree + key + 12 or + 24.
+- **Clamp**: semitones in [12, 33] (one octave above C3 to roughly C5).
+- **FM**: index `idx = (0.35 + 0.9 (1 − dark)) · vel · env² · 1.6` (bright = more FM modulation).
+- **Envelope**: `exp(−dt/3.8)` — a very long bell tail, no release stage.
+- **Pan**: uniform in [-0.8, +0.8].
 
-$$
-\text{step}_p(t) = \left\lfloor \frac{\phi(t)}{32} \cdot n_p \right\rfloor \bmod n_p
-$$
+### Pad synthesis
 
-When a pulse fires, the layer spawns a short thump (30–80 Hz sine) and a decaying hat (band-passed noise) with exponential envelopes.
-
-### Tape echo
-
-The echo is a cross-feedback stereo delay:
+Each pad voice is a three-partial additive sine with one LFO per voice controlling both brightness and amplitude:
 
 $$
 \begin{aligned}
-\text{echoL}[n] &= \text{dry}[n] + \text{echoR}[n - T_1] f + \text{echoR}[n - T_2] \tfrac{f}{2} \\
-\text{echoR}[n] &= \text{dry}[n] + \text{echoL}[n - T_1] f + \text{echoL}[n - T_2] \tfrac{f}{2}
+v &= \sin\theta + 0.5\, h_b \sin 2\theta + 0.28\, h_b \sin 3\theta \\
+h_b &= \text{bright}\cdot (0.35 + 0.65\, lfo) \\
+\text{amp} &= (0.55 + 0.45\, lfo) \cdot a_k
 \end{aligned}
 $$
 
-with $T_1 = 0.30\,\text{s}$, $T_2 = 1.20\,\text{s}$, and $f = \min(f_{\text{knob}}, 0.9) \cdot 0.65$. The 0.65 scaling keeps the loop stable even at maximum feedback.
+where `bright = 0.06 + 0.55 (1 − dark)` and `a_0 = 1.15`, `a_k = 0.8` (root is a little stronger). Pan alternates between the two detuned voices (approximately ±0.3 around the note's base pan).
 
-### Dattorro plate reverb
+### Bass
 
-The reverb is a classic Dattorro topology: four fixed all-passes diffuse the input, then a tank of eight modulated all-passes and four delay lines provides a dense, slowly evolving tail. Feedback is $0.30 + 0.40 \cdot \text{decay}$ per round trip, capped at 0.70 to ensure the tail decays within ~10 s.
-
-### Output chain
+A sine wave plus 22 % second harmonic, with a 0.5 Hz LFO multiplying the whole signal by `0.72 + 0.28 sin`, and a smoothed pitch following the chord root minus 12 semitones (clamped to [-12, 0] semitones relative to C3):
 
 $$
-\text{out} = \tanh\left(\text{LP}_{4\text{kHz}}\left(\text{mix}_{\text{echo}} + \text{mix}_{\text{reverb}}\right)\right) \cdot 5
+f_{\text{bass}} = 130.81 \cdot 2^{\,p_{\text{bass}}/12}
 $$
 
-The 4 kHz master low-pass keeps the tail from sounding brittle, and the `tanh` limits the output to ±5 V.
+A low-passed noise rumble at 90 Hz is added on top (a two-pole lowpass of white noise × 9 × its own 0.5 Hz LFO).
+
+### Heartbeat pulses (Euclidean)
+
+Six layers with cycle lengths and pulse counts:
+
+| Layer | Cycle | Pulses | Sound |
+|---|---|---|---|
+| 0 | 32 | 5 | low kick (~44 Hz) |
+| 1 | 24 | 4 | low kick (~58 Hz) |
+| 2 | 16 | 2 | low kick (~72 Hz) |
+| 3 | 28 | 3 | low kick |
+| 4 | 20 | 5 | low kick |
+| 5 | 12 | 3 | low kick |
+
+The pattern for each layer is stored as `euclidPat[p][i] = ((i·pulses) mod steps) < pulses`, i.e. a Bjorklund-style distribution. The engine detects a new step each sample and, with probability 85 %, fires both a low-frequency sine "pulse" (0.28 s exponential decay) and a filtered-noise "tick" (0.03 s decay, 1800 Hz lowpass).
+
+### Tape echo
+
+A stereo ping-pong delay with independent delay times per side:
+
+$$
+t_L = \text{timeSm} \cdot f_s \cdot (1 + w), \quad t_R = 1.5\, t_L \cdot (1 - 0.8 w)
+$$
+
+with `w` a combination of three LFOs (0.31 Hz, 4.7 Hz, 0.053 Hz) and timeSm gliding at 1.5 Hz. The feedback path (right into left, left into right) has a lowpass at `2800 · 0.35^dark`, a highpass at 150 Hz, and a soft clip.
+
+### Reverb (8-line FDN)
+
+The reverb uses an 8-line feedback delay network:
+
+$$
+\mathbf{y}_i = \text{lp}_i \cdot g_i, \quad \mathbf{f} = H_8 \mathbf{y}, \quad \mathbf{x}_i[w] \mathrel{+}= (\text{inL}\cdot\sigma_i + \text{inR}\cdot\epsilon_i)\cdot 0.5
+$$
+
+with $H_8$ the orthonormal 8×8 Hadamard matrix (`HH^T = I`, scaled by `1/√8`). Per-line RT60 gains:
+
+$$
+g_i = 10^{-3 \cdot d_i / (f_s \cdot T)}
+$$
+
+where `T` is RT60 in seconds and `d_i` is the delay length in samples. Each line has a one-pole lowpass at `fc = 12000 \cdot 0.0667^damp`, and a slow LFO modulating the read position by up to `modBase = 6` samples. **Freeze** sets `g_i = 1`, disables modulation, and mutes the input.
+
+Three allpasses per side (~142, 107, 379 samples) diffuse the input before the FDN; a 30 ms pre-delay precedes them. Output is a Hadamard-style Hadamard-style Walsh sum (odd/even split for L/R), scaled by `0.55 / √max(T, 1)`.
+
+A 15 Hz DC blocker finishes the reverb.
+
+### Master
+
+Two-pole lowpass whose cutoff follows the DARK knob:
+
+$$
+f_c = 12000 \cdot 0.06^{\text{dark}} \quad(\text{clamped to } [500, 0.45 f_s])
+$$
+
+a 12 Hz DC blocker, then `tanh(1.1 x)` for soft saturation.
+
+### Xorshift32 RNG
+
+All randomness (chord choice, bell pitch, detune, heartbeat acceptance) uses an xorshift32:
+
+$$
+x \leftarrow x \oplus (x \ll 13), \quad x \leftarrow x \oplus (x \gg 17), \quad x \leftarrow x \oplus (x \ll 5)
+$$
+
+The output is `(x >> 8) / 2²⁴ ∈ [0, 1)`.
 
 ## 4. Parameters and Controls
 
 ### Knobs
 
 | Parameter | Min | Max | Default | Description |
-|-----------|-----|-----|---------|-------------|
-| `KEY_PARAM` | 0 | 11 | 0 | Key note (C–B) |
-| `SCALE_PARAM` | 0 | 5 | 0 | Scale |
-| `TEMPO_PARAM` | 40 | 180 | 120 | BPM |
-| `PAD_LEVEL_PARAM` | 0 | 1 | 0.55 | Pad volume |
-| `BELL_LEVEL_PARAM` | 0 | 1 | 0.55 | Bell volume |
-| `BASS_LEVEL_PARAM` | 0 | 1 | 0.55 | Bass volume |
-| `PULSE_LEVEL_PARAM` | 0 | 1 | 0.50 | Pulse volume |
-| `ECHO_MIX_PARAM` | 0 | 1 | 0.40 | Echo dry/wet |
-| `ECHO_FBK_PARAM` | 0 | 0.9 | 0.55 | Echo feedback |
-| `REVERB_MIX_PARAM` | 0 | 1 | 0.55 | Reverb dry/wet |
-| `REVERB_DECAY_PARAM` | 0 | 1 | 0.55 | Reverb RT60 (0.3–0.7) |
-| `CHORD_INT_PARAM` | 4 | 60 | 24 | Chord change interval (s) |
+|---|---|---|---|---|
+| `KEY_PARAM` | 0 | 11 | 0 | Key (C, C#, D, … B), snapped |
+| `SCALE_PARAM` | 0 | 9 | 1 | Scale (Major … Whole Tone) |
+| `TEMPO_PARAM` | 40 | 180 | 72 | Tempo in BPM |
+| `CHORD_INT_PARAM` | 4 | 60 | 24 | Chord change interval (seconds) |
+| `PAD_LEVEL_PARAM` | 0 | 1 | 0.60 | Pad level |
+| `BELL_LEVEL_PARAM` | 0 | 1 | 0.45 | Bell level |
+| `BASS_LEVEL_PARAM` | 0 | 1 | 0.50 | Bass level |
+| `PULSE_LEVEL_PARAM` | 0 | 1 | 0.25 | Pulse (heartbeat) level |
+| `ECHO_TIME_PARAM` | 0.12 | 1.2 | 0.50 | Echo time (s) |
+| `ECHO_FBK_PARAM` | 0 | 0.9 | 0.60 | Echo feedback |
+| `ECHO_MIX_PARAM` | 0 | 1 | 0.45 | Echo mix |
+| `REVERB_DECAY_PARAM` | 0 | 1 | 0.70 | Reverb decay (0.8 – 32 s RT60) |
+| `REVERB_DAMP_PARAM` | 0 | 1 | 0.55 | Reverb damping |
+| `REVERB_MIX_PARAM` | 0 | 1 | 0.60 | Reverb mix |
+| `DARK_PARAM` | 0 | 1 | 0.60 | Overall tone (low = bright, high = dark) |
+| `FREEZE_PARAM` | 0 / 1 | — | — | Latching reverb freeze |
 
-### Buttons / Switches
+### Button
 
-None.
-
-### Outputs
-
-| Output | Type | Range | Description |
-|--------|------|-------|-------------|
-| `OUT_L_OUTPUT` | Audio | ±5 V | Left |
-| `OUT_R_OUTPUT` | Audio | ±5 V | Right |
-
-### Enumerations
-
-- `ParamId`: Key, Scale, Tempo, Pad, Bell, Bass, Pulse, EchoMix, EchoFbk, ReverbMix, ReverbDecay, ChordInterval
-- `InputId`: none
-- `OutputId`: OutL, OutR
-- `LightId`: none
+| Parameter | Description |
+|---|---|
+| `FREEZE_PARAM` | Momentary toggle that latches the freeze state (saved with the patch) |
 
 ## 5. Inputs and Outputs
 
-### Input
-
-None — the module is a self-contained generator with no CV inputs.
-
-### Output
+### Inputs
 
 | Name | Type | Range | Description |
-|------|------|-------|-------------|
-| `OUT_L_OUTPUT` | Audio | ±5 V | Left output |
-| `OUT_R_OUTPUT` | Audio | ±5 V | Right output |
+|---|---|---|---|
+| `FREEZE_INPUT` | Gate | 0..10 V | > 1 V freezes the reverb (OR with the button) |
 
-### Signal Levels
+### Outputs
 
-All five layers are summed and soft-clipped with `tanh`, so the output can never exceed ±5 V. Each layer's level knob goes from silence (0) to full (1); with all layers at 1, the output is heavily saturated (intentional — Eno-style ambience likes a bit of compression).
+| Name | Type | Range | Description |
+|---|---|---|---|
+| `OUT_L_OUTPUT` | Audio | ±5 V | Left stereo audio |
+| `OUT_R_OUTPUT` | Audio | ±5 V | Right stereo audio |
+| `CHORD_OUTPUT` | CV | 1 V/oct | Chord root, C4 = 0 V |
+| `BELL_OUTPUT` | CV | 1 V/oct | Pitch of the last bell |
+| `TRIG_OUTPUT` | Trigger | 0/10 V | 5 ms pulse on every new bell |
+| `CLOCK_OUTPUT` | Trigger | 0/10 V | 5 ms pulse on every beat |
+| `LEVEL_OUTPUT` | CV | 0..10 V | Current output peak level (0 – 10 V) |
+
+The `LEVEL_OUTPUT` is `clamp(level · 18, 0, 10)` where `level = max(meterL, meterR)`.
+
+### Lights
+
+- `FREEZE_LIGHT` — illuminated while the reverb is frozen (button or gate).
+
+### Menu
+
+No menu options.
 
 ## 6. Signal Processing Pipeline
 
-1. Scale change detection — If the key or scale knob changed since the last sample, call `pickNewChord()` immediately.
-2. Transport — `beatPhase += (BPM / 60) * dt`.
-3. Pad chord timer — When `padChordTimer >= chordInterval`, pick a new chord.
-4. Pad synthesis — For each of the 8 voices: update LFO, compute frequency, update phase, accumulate into pad L/R with pan.
-5. Bell synthesis — For each of the 8 bells: update loop position; on wrap, re-arm envelope and re-roll degree; if envelope is active, render an FM sine bell.
-6. Bass synthesis — Slew `bassPitch` toward `bassTarget`, generate sub + mid sines with harmonics, apply LFO amplitude.
-7. Pulse synthesis — For each of the 6 Euclidean patterns: advance step index; on a pulse, trigger thump and hat envelopes; render active envelopes.
-8. Dry sum — Mix the four layers with their level knobs, apply `tanh`.
-9. Echo — Read two taps from the shared delay line, write back the cross-feedback, mix dry/wet.
-10. Reverb — Pre-delay → 4 fixed all-passes → tank (8 modulated all-passes + 4 delay lines) → mix dry/wet.
-11. Master — Final 4 kHz low-pass + `tanh` + ×5 V scaling.
-12. UI snapshot — Update meters, advance trail ages, push new note events to the history buffer.
+1. **Sample rate** — `engine.setSampleRate(sr)` initialises the echo and reverb on the first sample after a rate change.
+2. **Key / scale change** — if either changed, set `engine.key / scaleIdx`; first start calls `startChord()`, subsequent changes call `pickNewChord()`.
+3. **Freeze** — button latches via `SchmittTrigger`; gate OR; light shows `frozen || gate > 1 V`.
+4. **Copy parameters** — 16 values transferred into `AmbEngine`.
+5. **`engine.process(dt)`** — the full DSP described in §3.
+6. **Audio outputs** — `outL/R` × 5 V.
+7. **Pitch outputs** — `(chordRoot - 12) / 12` and `(lastBellSemis - 12) / 12` (1 V/oct, C4 = 0 V).
+8. **Trigger outputs** — edge-count change → 5 ms pulse via `dsp::PulseGenerator`.
+9. **LEVEL output** — `clamp(level · 18, 0, 10)`.
+
+Inside `engine.process`:
+1. Smooth level controls (~50 ms one-pole).
+2. Advance transport (`beatPhase`).
+3. Scheduler: chord change if `padTimer ≥ chordInterval`; pad cross-fade step; `chordRoot` one-pole toward the new root (0.15 Hz).
+4. Render pad (2 chord sets × 8 voices).
+5. Render bells (8 loops).
+6. Render bass + rumble.
+7. Render heartbeats (6 Euclidean layers).
+8. Dry sum with `tanh` soft clip.
+9. Echo (`echo.process`) on dry.
+10. Reverb (`reverb.process`) on dry + echoes.
+11. Master: two-pole lowpass following DARK, 12 Hz DC blocker, `tanh`, meter decay.
 
 ## 7. Important Functions
 
-### `pickNewChord()`
+### `void AmbEngine::pickNewChord()`
 
-Chooses a new pad chord root and bass note within the current scale, re-rolls all 8 bell degrees, and pushes the pad and bass notes into the note history.
+Chooses a new chord (see §3), starts the 7 s equal-power cross-fade, updates the bass target, and closes / opens the corresponding history events.
 
-```cpp
-int octave = 1 + (dist01(rng) < 0.6f ? 0 : 1);
-int degree = std::min(6, (int)(dist01(rng) * 7.f));
-int semitone = octave * 12 + scale[degree] + key;
-while (semitone > 28) semitone -= 12;
-while (semitone < 12) semitone += 12;
-padTargetRoot = (float)semitone;
-```
+### `void AmbEngine::startChord()`
 
-### `addHistory(float pitch, int layer)`
+First-time chord: calls `pickNewChord()` then snaps `padFade = 1` and `bassPitch = bassTarget` (no cross-fade).
 
-Pushes a note event into the 128-entry ring buffer, dropping the oldest if full.
+### `int AmbEngine::degSemis(int deg) const`
 
-```cpp
-if (history.size() >= HIST_MAX)
-    history.erase(history.begin());
-history.push_back({ 0.f, pitch, layer });
-```
+Maps a scale degree (can be negative) to semitones above C3 using the current scale table.
 
-### `process(float sampleRate, float dt)`
+### `void AmbEngine::process(float dt)`
 
-The full 12-step audio loop described in §6.
+The main per-sample engine callback described in §6.
 
-### `Allpass::process(float x)`
+### `void ambdsp::Reverb::init(float sr)` / `void ambdsp::Reverb::process(...)`
 
-Standard Schroeder all-pass used in the input diffuser.
+Allocates all ring buffers and runs the FDN per sample (per §3).
 
-```cpp
-float yn = buf[idx];
-float vn = x + g * yn;
-buf[idx] = vn;
-idx = (idx + 1) % n;
-return yn - g * vn;
-```
+### `void ambdsp::Echo::init(float sr)` / `void ambdsp::Echo::process(...)`
 
-### `ModAllpass::process(float x, float sr)`
+Allocates the two delay lines and runs the tape echo per sample.
 
-Same as `Allpass` but with a sine-modulated read index for the tank diffusers.
+### `void AMB::process(const ProcessArgs &args)`
+
+The Rack-module wrapper: copies params, handles key / scale / freeze, calls `engine.process`, writes outputs and triggers.
+
+### `json_t *AMB::dataToJson()` / `void AMB::dataFromJson(json_t *)`
+
+Persist the `frozen` state with the patch.
 
 ## 8. Mathematical Implementation
 
-### Pad detune table
+### Scale degree lookup
 
 $$
-D = \{-0.08, -0.055, -0.03, -0.01, 0.01, 0.03, 0.055, 0.08\}
+\text{semis}(d) = \text{INTERVALS}\!\left[(d \bmod n + n) \bmod n\right] + 12 \left\lfloor \frac{d}{n} \right\rfloor
 $$
 
-### Bell pitch
+### Pad cross-fade (equal power)
 
 $$
-f_{\text{bell}} = 130.81 \cdot 2^{\left(\text{oct} \cdot 12 + \text{scale}[\text{deg}] + \text{key}\right)/12}
+g_\text{new} = \sin\!\left(\tfrac{\pi}{2} t\right), \quad g_\text{old} = \cos\!\left(\tfrac{\pi}{2} t\right), \quad t = \min(1,\, \text{padFade}/7)
 $$
 
-with `oct` ∈ {1, 2}.
-
-### Bell FM
+### Pad voice
 
 $$
-\text{out} = \sin\left(2\pi\phi_c + 0.5 \sin(2\pi\phi_m)\right), \quad f_m = 1.5 f_c
+\begin{aligned}
+v(t) &= \sin\theta + 0.5\, h_b \sin 2\theta + 0.28\, h_b \sin 3\theta \\
+h_b &= \text{bright} \cdot (0.35 + 0.65\, \text{lfo}_k) \\
+\text{bright} &= 0.06 + 0.55 (1 - \text{dark}) \\
+\text{amp} &= (0.55 + 0.45\, \text{lfo}_k) \cdot a_k \cdot 0.105 \cdot g_\text{set}
+\end{aligned}
 $$
 
-### Bass voice
+### Bell loop cycle
 
 $$
-\text{bass} = 0.5 \sin\phi_s + 0.15 \sin 2\phi_s + 0.075 \sin 3\phi_s + 0.15 \sin 2\phi_m + 0.0375 \sin 4\phi_m
+c_b = \left\lfloor \frac{\text{beatPhase} + \text{off}_b \, L_b}{L_b} \right\rfloor, \quad \text{off}_b = 0.93, 0.80, 0.61, 0.45, 0.30, 0.20, 0.12, 0.05
 $$
 
-with $\phi_s = 2\pi f_{\text{sub}} t$ and $\phi_m = 2\phi_s$.
+A new bell is generated when `c_b` changes with probability 0.78.
 
-### Euclidean generation
-
-```cpp
-for (int i = 0; i < steps; i++)
-    euclidPat[p][i] = ((i * pulses) % steps) < pulses;
-```
-
-### Reverb feedback bound
+### Bell FM synthesis
 
 $$
-f_{\text{reverb}} = 0.30 + 0.40 \cdot \text{decay} \le 0.70
+\text{idx} = (0.35 + 0.9 (1 - \text{dark})) \cdot \text{vel} \cdot \text{env}^2 \cdot 1.6
 $$
 
-### Echo feedback scaling
-
 $$
-f_{\text{echo}} = \min(\text{knob}, 0.9) \cdot 0.65
+\text{carrier} = \sin(2\pi \theta + \text{idx} \cdot \sin(2\pi \theta_m)), \quad \text{env}_{n+1} = \text{env}_n\, e^{-dt/3.8}
 $$
 
-### Final output
+### Euclidean rhythm
 
 $$
-\text{out} = \tanh\left(\text{LP}_{4\text{kHz}}\left(\text{mix}\right)\right) \cdot 5
+\text{pat}_p[i] = \left((i \cdot \text{pulses}_p) \bmod \text{steps}_p\right) < \text{pulses}_p
+$$
+
+### Reverb RT60 gain (per line, per control period)
+
+$$
+g_i = 10^{-3 \cdot d_i / (f_s \cdot T)}, \quad T = 0.8 \cdot 40^{\text{decay01}}
+$$
+
+`g_i` clamped to `< 1` outside freeze mode.
+
+### Reverb Hadamard (orthonormal)
+
+$$
+H_8 = \frac{1}{\sqrt{8}} \begin{bmatrix}
+1 & 1 & 1 & 1 & 1 & 1 & 1 & 1 \\
+1 & -1 & 1 & -1 & 1 & -1 & 1 & -1 \\
+\vdots & & & & & & & \vdots
+\end{bmatrix}
+$$
+
+Applied in three butterfly passes then scaled by `1/√8`.
+
+### Echo time (with wow / flutter / drift)
+
+$$
+t_L = \text{timeSm} \cdot f_s \cdot (1 + w), \quad t_R = 1.5\, t_L \cdot (1 - 0.8 w)
+$$
+
+$$
+w = 0.0030 \sin(2\pi \phi_w) + 0.0007 \sin(2\pi \phi_f) + 0.0020 \sin(2\pi \phi_d)
+$$
+
+with $\phi_w, \phi_f, \phi_d$ free-running at 0.31 Hz, 4.7 Hz, 0.053 Hz.
+
+### Master lowpass
+
+$$
+f_c = 12000 \cdot 0.06^{\text{dark}}, \quad \alpha = 1 - e^{-2\pi f_c dt}
+$$
+
+$$
+y \leftarrow y + \alpha (x - y) \quad \text{twice for a two-pole lowpass}
+$$
+
+### Level output
+
+$$
+V_\text{level} = \text{clamp}(\max(m_L, m_R) \cdot 18,\, 0,\, 10)
 $$
 
 ## 9. Performance and Optimization
 
 ### CPU Usage
 
-- Bells: 8 × (sin + FM sine + envelope + exp decay) ≈ 8 × 25 flops
-- Pad: 8 × (sin + LFO sine + phase wrap) ≈ 8 × 15 flops
-- Pulse: 6 × (conditional thump + conditional hat) ≈ 6 × 10 flops
-- Reverb: 8 tank all-passes + 4 delay lines + 4 pre-delay all-passes ≈ 200 flops
-- Echo: 2 tap reads + 2 writes ≈ 20 flops
-- Total: ~600–800 flops/sample plus ~30 sin calls
+- Pad: 16 oscillators (four notes × two voices per chord set × two chord sets, with one inactive set at any time), each with 3 harmonics + per-voice LFO
+- Bells: 8 FM oscillators, all active but often with tiny envelopes (env > 0.0008 required to run)
+- Bass: 1 sine + 1 second harmonic + noise lowpass pair + 3 LFOs
+- Pulse: 6 Euclidean layers × (sine + filtered noise)
+- Echo: 2 delay lines with 3 wow / flutter / drift LFOs and a filtered feedback path
+- Reverb: 8 FDN lines + 6 allpasses + 2 pre-delay lines (per sample)
+- Master: 2 one-pole + DC blocker + tanh
+
+Rough estimate: ≈ 2000–3000 flops per sample, mostly in the reverb, bells and pad.
 
 ### Memory Allocation
 
-- All delay buffers are allocated once in the `AmbEngine` constructor
-- No allocation occurs in `process()`
-- `history` is a `std::vector` reserved to `HIST_MAX + 2`, so `push_back` never reallocates after warm-up
-
-### Buffers
-
-- `echoBufL` / `echoBufR`: 96000 floats each (~384 KB each)
-- `preBuf`: 440 floats
-- `tankDelay[4]`: 4453 + 3720 + 4217 + 3163 ≈ 15.5 K floats
-- `tankAP[8]`: 672–2656 floats each
-- Total ~100 K floats ≈ 400 KB
+- All buffers allocated in `setSampleRate()`; no allocation in `process()`
+- Reverb: 8 lines × `next_pow2(~5195)` samples ≈ 8 × 8192 × 4 B ≈ 260 KB
+- Echo: 2 lines × `2.4 s × f_s` × 4 B ≈ 2 × 115 200 × 4 B ≈ 920 KB worst case
+- History: `160 × NoteEvent` ≈ 6 KB
 
 ### Real-time Processing
 
-- All loops have fixed, bounded iteration counts
-- No blocking operations or allocations in `process()`
-- The engine is fully sample-deterministic
+- All inner loops fixed-size (8 pad voices, 8 bells, 6 pulses, 8 FDN lines)
+- No allocation, no locks in the audio path
 
 ### Thread Safety
 
-- All engine state is written by the audio thread and read by the UI thread via torn reads (documented as "cosmetic only")
-- The note history is a separate ring buffer that's read-only from the UI
+- All engine state written by the audio thread
+- Display reads via torn reads (cosmetic only)
 
 ### Numerical Stability
 
-- All voices use `tanh` soft clipping in the output path
-- Master `tanh` limits to ±5 V
-- Bells and bass use exponential-decay envelopes that decay to zero
-- The 0.65 echo-feedback scaling prevents runaway
-- The 0.70 reverb feedback cap prevents runaway
+- Xorshift32 RNG is deterministic for a given seed and never produces 0
+- Bell envelope guaranteed > 0.0008 before running (avoids very long zero-multiplications)
+- Echo time clamped to `[8 samples, 2.2 s]`
+- Reverb feedback `g_i < 1` in normal mode; **freeze** sets `g_i = 1` and mutes the input, so the loop is lossless
+- Master soft-clips with `tanh` before the output
+- All output voltages clamped by Rack
 
 ## 10. Dependencies
 
 ### Libraries/Headers
 
 - `plugin.hpp` — VCV Rack core
-- `agmm_ui.hpp` — shared AGMM UI helpers (`panelBase`, `bezel`, `cell`, etc.)
-- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<vector>`, `<random>`
+- `agmm_ui.hpp` — shared AGMM UI helpers
+- `<cmath>`, `<cstdint>`, `<cstdio>`, `<cstring>`, `<algorithm>`, `<vector>`
 
 ### External Classes
 
-- `rack::Module` — base module class
-- `rack::TransparentWidget` — transparent overlay widget
-- `rack::engine::ParamQuantity` — parameter descriptor
-- `rack::random::uniform()` — RNG utility
-- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::screen`, `agmm::plotFrame`, `agmm::text`, `agmm::meter`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::dim`, `agmm::bright`, `agmm::warm`, `agmm::textCol`, `agmm::ALIGN_L/C/R`
+- `rack::Module`, `rack::ModuleWidget`, `rack::TransparentWidget`
+- `rack::ParamQuantity` and subclasses (`KeyParamQuantity`, `TempoParamQuantity`, `ChordIntervalParamQuantity`, `EchoTimeParamQuantity`)
+- `dsp::SchmittTrigger`, `dsp::PulseGenerator`
+- `rack::random` (only for the initial seed)
+- `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::sectionHeader`, `agmm::screen`, `agmm::plotFrame`, `agmm::meter`, `agmm::chip`, `agmm::text`, `agmm::accent`, `agmm::violet`, `agmm::warm`, `agmm::bright`, `agmm::dim`, `agmm::withA`, `agmm::ALIGN_L/C/R`
 
 ## 11. Summary
 
-`AMB` is a generative ambient module that combines five independent synthesis layers under a shared key and scale. Its design emphasizes slow, organic evolution: chord changes every 4–60 s, mutually prime bell loop lengths, and a wandering pad detune table all contribute to a texture that never exactly repeats.
+`AMB` is a self-contained generative ambient instrument. Every few seconds it picks a new chord, and eight long bell loops of unequal prime lengths weave a slowly-shifting melody against it. A sub bass, a low rumble and six Euclidean heartbeats fill out the rhythm, and the whole mix runs through a tape echo and a very long, freezable FDN reverb.
 
-The DSP is built from small, focused primitives (all-pass, modulated all-pass, one-pole LP, ring buffer) and combined into larger structures (pad, bells, pulses, echo, reverb) that are each individually simple but together produce a rich, layered sound. All loops are bounded, all buffers are pre-allocated, and soft clipping at every stage ensures the output stays within ±5 V.
+The result never repeats: the prime loop lengths guarantee the bells never realign, the chord picker avoids the same root twice in a row (probabilistically), and the xorshift RNG is reseeded on every patch load. The single `FREEZE` gate is enough to lock the reverb into an endless drone, which is a natural performance point for the module — a single gate from a MIDI keyboard or a sequencer turns the generative background into a held pad on cue.
 
-Because it has no CV inputs, `AMB` is meant to be a self-contained texture source — patch its stereo output into a mixer or another effect and let it run. The two knobs that most change its character are **CHORD INT** (how often the harmony shifts) and **SCALE** (the mood of the harmony).
+The display is a 20-second piano-roll history with colour-coded layers (pad = violet, bell = cyan, bass = warm, pulse = grey) plus stereo output meters. `CHORD`, `BELL`, `TRIG` and `CLOCK` outputs make it easy to route the generative material into other voices that track the harmony and rhythm.
