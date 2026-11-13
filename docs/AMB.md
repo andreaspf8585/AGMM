@@ -27,7 +27,7 @@ Key features:
 
 ## Module Screenshot
 
-![AMB VCV Rack Module](images/amb.png)
+![AMB VCV Rack Module](images/AMB.png)
 
 ## 2. Architecture
 
