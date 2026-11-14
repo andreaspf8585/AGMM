@@ -472,6 +472,16 @@
         "random",
         "generative"
       ]
+    },
+    {
+      "slug": "Plot",
+      "name": "Plot",
+      "description": "Signal visualization",
+      "tags": [
+        "visualization",
+        "scope",
+        "signal"
+      ]
     }
   ]
 }

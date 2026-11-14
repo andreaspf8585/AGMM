@@ -59,6 +59,7 @@ void init(Plugin *p)
 	p->addModel(modelAMB);
 	p->addModel(modelGalton);
 	p->addModel(modelAMB_MINI);
+	p->addModel(modelPlot);
 
 
 	// Any other plugin initialization may go here.

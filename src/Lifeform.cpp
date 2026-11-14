@@ -1289,10 +1289,10 @@ struct LifeformWidget : ModuleWidget
         addChild(new LFPanelBackground());
         addChild(new LifeformDisplay(module));
 
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
         const float by = LF_BTN_TOP + 25.f;
         addParam(createParamCentered<TL1105>(Vec(LF_COL[0], by), module, LifeformModule::PAUSE_PARAM));

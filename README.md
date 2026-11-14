@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 # AGMM Module Catalogue
 
-The plugin is a collection of **55 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **56 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
@@ -189,11 +189,12 @@ The plugin is a collection of **55 modules** grouped into functional families. M
 ---
 
 ## 17. Visualisers
-*Audio-reactive graphics and generative eye candy.*
+*Audio-reactive graphics, generative eye candy and live signal monitors.*
 
 | Module | Description |
 |--------|-------------|
 | **Lifeform** | Audio-reactive 3D ferrofluid visualiser. A glossy black lobed blob with ~140 Rosensweig spikes and orbiting droplets tumbles inside a glass dish. Low/mid/high bands, onset detection and silence detection drive shape, spikes and droplet orbits. |
+| **Plot** | 24 HP polyphonic oscilloscope / signal visualizer. Two polyphonic inputs (A and B) and two polyphonic thru outputs. Free / Auto / Normal trigger with Schmitt hysteresis and sub-sample interpolation, external trigger input, 10 × 8 voltage/time grid, min/max envelope traces, display hold, and per-window statistics (Vpp, Max, Min, RMS, Avg, frequency) for the focus channel of each input. |
 
 ---
 
@@ -217,8 +218,8 @@ The plugin is a collection of **55 modules** grouped into functional families. M
 | Envelopes | 1 | FancyADSR |
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
-| Visualisers | 1 | Lifeform |
-| **Total** | **55** | |
+| Visualisers | 2 | Lifeform, Plot |
+| **Total** | **56** | |
 ## Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)

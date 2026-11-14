@@ -702,10 +702,10 @@ struct StaggerWidget : ModuleWidget {
         box.size = Vec(ST_W, ST_H);
 
         addChild(new STPanel());
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+        addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
+        addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, box.size.y - RACK_GRID_WIDTH)));
 
         addChild(new STDisplay(module));
 
