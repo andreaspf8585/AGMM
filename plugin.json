@@ -16,17 +16,17 @@
     {
       "slug": "Reverb",
       "name": "Reverb",
-      "description": "reverb",
+      "description": "Reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
       "slug": "BlackHoleReverb",
       "name": "BlackHoleReverb",
-      "description": "reverb",
+      "description": "Reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -34,7 +34,7 @@
       "name": "DarkHall",
       "description": "reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -60,7 +60,7 @@
       "name": "SickDelay",
       "description": "delay",
       "tags": [
-        "delay"
+        "Delay"
       ]
     },
     {
@@ -68,7 +68,7 @@
       "name": "PsyDelay",
       "description": "delay",
       "tags": [
-        "delay"
+        "Delay"
       ]
     },
     {
@@ -104,9 +104,9 @@
       "name": "BouncingBalls",
       "description": "gate, trigger",
       "tags": [
-        "gate",
-        "trigger",
-        "polyphonic"
+        "Gate",
+        "Trigger",
+        "Tolyphonic"
       ]
     },
     {
@@ -114,7 +114,7 @@
       "name": "PsyReverb",
       "description": "reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -156,8 +156,8 @@
       "name": "RainStorm",
       "description": "reverb",
       "tags": [
-        "reverb",
-        "distortion"
+        "Reverb",
+        "Distortion"
       ]
     },
     {
@@ -173,22 +173,22 @@
       "name": "PsySeq",
       "description": "sequencer",
       "tags": [
-        "sequencer",
-        "random"
+        "Sequencer",
+        "Random"
       ]
     },
     {
       "slug": "HeatRev",
       "name": "HeatRev",
       "description": "",
-      "tags": []
+      "tags": ["Reverb"]
     },
     {
       "slug": "Ambience",
       "name": "Ambience",
       "description": "revirb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -212,7 +212,7 @@
       "name": "Mixer3",
       "description": "mixer",
       "tags": [
-        "mixer"
+        "Mixer"
       ]
     },
     {
@@ -220,7 +220,7 @@
       "name": "Mixer6",
       "description": "mixer",
       "tags": [
-        "mixer"
+        "Mixer"
       ]
     },
     {
@@ -228,7 +228,7 @@
       "name": "Swapper",
       "description": "Swap signals",
       "tags": [
-        "Swap signals, Effect"
+        "Swap", "Effect"
       ]
     },
     {
@@ -270,7 +270,7 @@
       "name": "Sampler",
       "description": "sampler",
       "tags": [
-        "sampler"
+        "Sampler"
       ]
     },
     {
@@ -278,7 +278,7 @@
       "name": "Whirlpool",
       "description": "reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -286,7 +286,7 @@
       "name": "Vortex",
       "description": "reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -310,7 +310,7 @@
       "name": "PsyReverb2",
       "description": "reverb",
       "tags": [
-        "reverb"
+        "Reverb"
       ]
     },
     {
@@ -326,7 +326,7 @@
       "name": "Spikes",
       "description": "LFO",
       "tags": [
-        "lfo"
+        "Lfo"
       ]
     },
     {
@@ -342,7 +342,7 @@
       "name": "Bastion",
       "description": "filter",
       "tags": [
-        "filter"
+        "Filter"
       ]
     },
     {
@@ -368,7 +368,7 @@
       "name": "Phasmal",
       "description": "phaser",
       "tags": [
-        "phaser"
+        "Phaser"
       ]
     },
     {
@@ -376,7 +376,7 @@
       "name": "Stasis",
       "description": "sample and hold",
       "tags": [
-        "sample and hold"
+        "Sample and hold"
       ]
     },
     {
@@ -400,7 +400,7 @@
       "name": "Quantara",
       "description": "quantizer",
       "tags": [
-        "quantizer"
+        "Quantizer"
       ]
     },
     {
@@ -417,7 +417,7 @@
       "description": "VCO",
       "tags": [
         "VCO",
-        "polyphonic"
+        "Polyphonic"
       ]
     },
     {
@@ -442,7 +442,7 @@
       "description": "Tritone Paradox illusion",
       "tags": [
         "VCO",
-        "illusion"
+        "Illusion"
       ]
     },
     {
@@ -450,8 +450,8 @@
       "name": "AMB",
       "description": "Ambient machine",
       "tags": [
-        "generative",
-        "ambient"
+        "Generative",
+        "Ambient"
       ]
     },
     {
@@ -460,7 +460,7 @@
       "description": "Polyphonic random gates simulating Galton Board",
       "tags": [
         "Gate",
-        "trigger"
+        "Trigger"
       ]
     },
     {
@@ -468,9 +468,9 @@
       "name": "AMB_MINI",
       "description": "Ambient sounds like AMB module",
       "tags": [
-        "ambient",
-        "random",
-        "generative"
+        "Ambient",
+        "Random",
+        "Generative"
       ]
     },
     {
@@ -478,9 +478,9 @@
       "name": "Plot",
       "description": "Signal visualization",
       "tags": [
-        "visualization",
-        "scope",
-        "signal"
+        "Visualization",
+        "Oscilloscope",
+        "Signal"
       ]
     }
   ]
