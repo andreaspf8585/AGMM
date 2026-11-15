@@ -1,7 +1,7 @@
 
 #!/usr/bin/env bash
 
-set -Eeuxo pipefail
+set -Eeuo pipefail
 
 echo "========================================"
 echo " AGMM BUILD SCRIPT"
@@ -9,22 +9,27 @@ echo "========================================"
 
 echo
 echo "[1/5] Cleaning..."
+echo "========================================"
 make clean V=1
 
 echo
-echo "[2/5] Building (16 parallel jobs)..."
-make -j16 V=1
+echo "[2/5] Building (32 parallel jobs)..."
+echo "========================================"
+time make -j32 V=1 
 
 echo
 echo "[3/5] Creating distribution..."
-make dist V=1
+echo "========================================"
+time make dist V=1
 
 echo
 echo "[4/5] Installing..."
-make install V=1
+echo "========================================"
+time make install V=1
 
 echo
 echo "[5/5] Copying plugin to Rack 2..."
+echo "========================================"
 
 PLUGIN="dist/AGMM-2.0.0-win-x64.vcvplugin"
 DEST="/c/Users/andreas/AppData/Local/Rack2/plugins-win-x64"
