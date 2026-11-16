@@ -13,16 +13,27 @@
 // OVERVIEW
 // -----------------------------------------------------------------------------
 // FancyADSR is a 20 HP envelope generator with per-stage CV control, selectable
-// linear/exponential attack and release shapes, an optional looping mode, and a
-// live scope that shows both the ideal ADSR curve implied by the current knobs
-// (violet preview) and the actual envelope output history (cyan live trace).
+// linear/exponential attack and release shapes, an optional looping mode, a
+// selectable ADSR / AD mode, and a live scope that shows both the ideal curve
+// implied by the current knobs (violet preview) and the actual envelope output
+// history (cyan live trace).
 //
-// The envelope runs through ATTACK -> DECAY -> SUSTAIN -> RELEASE -> IDLE.
-// Attack and release are timed so that an exponential segment reaches within
-// 0.1% of its target after exactly the configured duration; decay is always
-// exponential (the usual ADSR behaviour). An end-of-release (EOR) pulse fires
-// for 5 ms when the envelope reaches zero, and a LOOP switch makes the envelope
-// retrigger from the gate while it is held.
+// ADSR mode (default):
+//   The envelope runs through ATTACK -> DECAY -> SUSTAIN -> RELEASE -> IDLE.
+//   Attack and release are timed so that an exponential segment reaches within
+//   0.1% of its target after exactly the configured duration; decay is always
+//   exponential (the usual ADSR behaviour). An end-of-release (EOR) pulse fires
+//   for 5 ms when the envelope reaches zero, and a LOOP switch makes the
+//   envelope retrigger from the gate while it is held.
+//
+// AD mode:
+//   The envelope runs ATTACK -> DECAY (down to zero) -> IDLE, using only the
+//   ATTACK and DECAY times. SUSTAIN and RELEASE are ignored. The gate input
+//   acts purely as a trigger: a rising edge starts the envelope (retriggering
+//   from the current level if it is already running) and the falling edge is
+//   ignored, so the envelope always plays through. The RETRIG input also
+//   starts it. The EOR output pulses at the end of the decay. With LOOP on,
+//   the envelope repeats for as long as the gate is held high.
 //
 // Each stage has its own CV input (5 V adds one second, or 100% for sustain),
 // and the scope's time axis is user-selectable via the TIME knob.
@@ -64,16 +75,20 @@ static const float FA_CHIP_Y = 92.f, FA_CHIP_H = 12.f;
 // Rows below the display
 static const float FA_ENV_HEAD_Y = 158.f;
 static const float FA_ROWA_TOP = 166.f, FA_ROWA_H = 74.f; // envelope knobs + CV jacks
-static const float FA_ROWB_TOP = 246.f, FA_ROWB_H = 48.f; // shapes, loop, time
+static const float FA_ROWB_TOP = 246.f, FA_ROWB_H = 48.f; // mode, shapes, loop, time
 static const float FA_IO_HEAD_Y = 303.f;
 static const float FA_ROWC_TOP = 311.f, FA_ROWC_H = 46.f; // I/O
 static const float FA_CELL_W = 66.f;
+static const float FA_CELL5_W = 54.f; // cell width for the five-column row B
 
 // Horizontal centre of column i (0..3) for the four-column control rows.
 static float faColX(int i) { return 37.5f + 75.f * i; }
 
+// Horizontal centre of column i (0..4) for the five-column row B.
+static float faColX5(int i) { return 30.f + 60.f * i; }
+
 // ------------------------------------------------------------
-// Fancy ADSR Module (DSP unchanged)
+// Fancy ADSR Module
 // ------------------------------------------------------------
 struct FancyADSR : Module
 {
@@ -87,6 +102,8 @@ struct FancyADSR : Module
         RELEASE_SHAPE_PARAM,
         LOOP_TOGGLE_PARAM,
         TIME_SCALE_PARAM, // seconds per full graph width
+        MODE_PARAM,       // 0 = ADSR, 1 = AD (appended last: keeps old patches compatible)
+        TEST_PARAM,       // momentary button: acts as a gate while held
         NUM_PARAMS
     };
     enum InputIds
@@ -123,6 +140,9 @@ struct FancyADSR : Module
     Stage stage = STAGE_IDLE;
     float env = 0.0f;
     float stageTime = 0.0f;
+    float attackStart = 0.0f; // level the current attack rises from (0 in ADSR mode)
+    float decayStart = 1.0f;  // level the current AD-mode decay falls from
+    float releaseStart = 0.0f; // level the current release falls from (captured when it begins)
     float eorPulseRemaining = 0.0f;
     bool lastGateState = false;
     bool lastTriggerState = false;
@@ -139,6 +159,7 @@ struct FancyADSR : Module
     float dispAttack = 0.01f, dispDecay = 0.1f, dispSustain = 0.8f, dispRelease = 0.5f;
     float dispAttackShape = 1.f, dispReleaseShape = 1.f;
     bool dispGate = false;
+    bool dispAD = false;
     float eorFlash = 0.f;
 
     // Parameter helpers (with CV)
@@ -152,6 +173,8 @@ struct FancyADSR : Module
     float getRelease() { return rack::math::clamp(params[RELEASE_PARAM].getValue() + inputs[RELEASE_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
     // True when the LOOP switch is on.
     bool getLoop() { return params[LOOP_TOGGLE_PARAM].getValue() > 0.5f; }
+    // True when the MODE switch is set to AD.
+    bool getAD() { return params[MODE_PARAM].getValue() > 0.5f; }
     // Scope time (full graph width in seconds), clamped to 50 ms .. 5 s.
     float getTimeScale() { return rack::math::clamp(params[TIME_SCALE_PARAM].getValue(), 0.05f, 5.0f); }
 
@@ -168,6 +191,8 @@ struct FancyADSR : Module
         configSwitch(RELEASE_SHAPE_PARAM, 0.f, 1.f, 1.f, "Release shape", {"Linear", "Exponential"});
         configSwitch(LOOP_TOGGLE_PARAM, 0.f, 1.f, 0.f, "Loop mode", {"Off", "On"});
         configParam(TIME_SCALE_PARAM, 0.05f, 5.0f, 1.0f, "Scope time (full width)", " s");
+        configSwitch(MODE_PARAM, 0.f, 1.f, 0.f, "Envelope mode", {"ADSR", "AD (gate acts as trigger)"});
+        configButton(TEST_PARAM, "Test gate (held = gate high)");
 
         configInput(GATE_INPUT, "Gate");
         configInput(TRIGGER_INPUT, "Retrigger");
@@ -176,7 +201,7 @@ struct FancyADSR : Module
         configInput(SUSTAIN_CV_INPUT, "Sustain CV (5 V adds 100%)");
         configInput(RELEASE_CV_INPUT, "Release CV (5 V adds 1 s)");
         configOutput(ENV_OUTPUT, "Envelope (0 to 10 V)");
-        configOutput(EOR_OUTPUT, "End of release");
+        configOutput(EOR_OUTPUT, "End of release (end of decay in AD mode)");
 
         configLight(LOOP_LIGHT, "Loop mode");
 
@@ -190,6 +215,9 @@ struct FancyADSR : Module
         stage = STAGE_IDLE;
         env = 0.0f;
         stageTime = 0.0f;
+        attackStart = 0.0f;
+        decayStart = 1.0f;
+        releaseStart = 0.0f;
         eorPulseRemaining = 0.0f;
         lastGateState = false;
         lastTriggerState = false;
@@ -230,22 +258,40 @@ struct FancyADSR : Module
         }
     }
 
-    // Handles a gate transition: a rising edge starts (or restarts) the
-    // attack from IDLE/RELEASE (and from SUSTAIN when looping); a falling
-    // edge starts the release from ATTACK/DECAY/SUSTAIN.
+    // Starts the attack stage. In ADSR mode it always rises from 0 (the
+    // original behaviour); in AD mode it rises from the current level so a
+    // retrigger mid-envelope does not snap to zero.
+    void startAttack(bool fromCurrentLevel)
+    {
+        stage = STAGE_ATTACK;
+        stageTime = 0.0f;
+        attackStart = fromCurrentLevel ? env : 0.0f;
+    }
+
+    // Handles a gate transition.
+    // ADSR mode: a rising edge starts (or restarts) the attack from
+    // IDLE/RELEASE (and from SUSTAIN when looping); a falling edge starts the
+    // release from ATTACK/DECAY/SUSTAIN.
+    // AD mode: a rising edge starts the envelope from any stage; the falling
+    // edge is ignored (the gate acts only as a trigger).
     void onGate(bool high)
     {
+        if (getAD())
+        {
+            if (high)
+                startAttack(true);
+            return;
+        }
+
         if (high)
         {
             if (stage == STAGE_IDLE || stage == STAGE_RELEASE)
             {
-                stage = STAGE_ATTACK;
-                stageTime = 0.0f;
+                startAttack(false);
             }
             else if (stage == STAGE_SUSTAIN && getLoop())
             {
-                stage = STAGE_ATTACK;
-                stageTime = 0.0f;
+                startAttack(false);
             }
         }
         else
@@ -254,18 +300,26 @@ struct FancyADSR : Module
             {
                 stage = STAGE_RELEASE;
                 stageTime = 0.0f;
+                releaseStart = env; // capture once: the release falls from here
             }
         }
     }
 
-    // Handles a trigger edge: while not idle, a rising trigger restarts the
-    // attack from the beginning.
+    // Handles a trigger edge.
+    // ADSR mode: while not idle, a rising trigger restarts the attack from
+    // the beginning.
+    // AD mode: a rising trigger starts the envelope from any stage.
     void onTrigger(bool high)
     {
-        if (high && stage != STAGE_IDLE)
+        if (!high)
+            return;
+        if (getAD())
         {
-            stage = STAGE_ATTACK;
-            stageTime = 0.0f;
+            startAttack(true);
+        }
+        else if (stage != STAGE_IDLE)
+        {
+            startAttack(false);
         }
     }
 
@@ -276,9 +330,12 @@ struct FancyADSR : Module
     void process(const ProcessArgs &args) override
     {
         float sampleTime = args.sampleTime;
+        const bool adMode = getAD();
 
         // Gate / trigger edges
-        bool gateHigh = inputs[GATE_INPUT].getVoltage() > 1.0f;
+        // The TEST button acts as a gate for as long as it is held.
+        bool gateHigh = inputs[GATE_INPUT].getVoltage() > 1.0f
+                     || params[TEST_PARAM].getValue() > 0.5f;
         if (gateHigh && !lastGateState)
             onGate(true);
         else if (!gateHigh && lastGateState)
@@ -289,6 +346,15 @@ struct FancyADSR : Module
         if (triggerHigh && !lastTriggerState)
             onTrigger(true);
         lastTriggerState = triggerHigh;
+
+        // Switching to AD mode while sitting in SUSTAIN: fall away to zero
+        // through the decay stage instead of hanging forever.
+        if (adMode && stage == STAGE_SUSTAIN)
+        {
+            stage = STAGE_DECAY;
+            stageTime = 0.0f;
+            decayStart = env;
+        }
 
         float attackTime = getAttack();
         float decayTime = getDecay();
@@ -301,25 +367,46 @@ struct FancyADSR : Module
         switch (stage)
         {
         case STAGE_ATTACK:
-            env = runSegment(0.0f, 1.0f, attackTime, stageTime, attackShape);
+            env = runSegment(attackStart, 1.0f, attackTime, stageTime, attackShape);
             stageTime += sampleTime;
             if (stageTime >= attackTime)
             {
                 env = 1.0f;
                 stage = STAGE_DECAY;
                 stageTime = 0.0f;
+                decayStart = 1.0f;
             }
             break;
 
         case STAGE_DECAY:
-            // Decay is always exponential (typical ADSR), timing is correct
-            env = runSegment(1.0f, sustainLev, decayTime, stageTime, 1.0f);
+            // Decay is always exponential (typical ADSR), timing is correct.
+            // ADSR mode falls to the sustain level; AD mode falls to zero.
+            env = runSegment(adMode ? decayStart : 1.0f, adMode ? 0.0f : sustainLev,
+                             decayTime, stageTime, 1.0f);
             stageTime += sampleTime;
             if (stageTime >= decayTime)
             {
-                env = sustainLev;
-                stage = STAGE_SUSTAIN;
-                stageTime = 0.0f;
+                if (adMode)
+                {
+                    env = 0.0f;
+                    eorPulseRemaining = 0.005f; // 5 ms pulse at the end of the decay
+                    eorFlash = 1.f;
+                    if (getLoop() && gateHigh)
+                    {
+                        startAttack(false); // loop: repeat while the gate is held
+                    }
+                    else
+                    {
+                        stage = STAGE_IDLE;
+                        stageTime = 0.0f;
+                    }
+                }
+                else
+                {
+                    env = sustainLev;
+                    stage = STAGE_SUSTAIN;
+                    stageTime = 0.0f;
+                }
             }
             break;
 
@@ -327,13 +414,15 @@ struct FancyADSR : Module
             env = sustainLev;
             if (getLoop() && gateHigh)
             {
-                stage = STAGE_ATTACK;
-                stageTime = 0.0f;
+                startAttack(false);
             }
             break;
 
         case STAGE_RELEASE:
-            env = runSegment(env, 0.0f, releaseTime, stageTime, releaseShape);
+            // Fall from the level captured when the release began. (Using the
+            // live `env` as the start made the curve compound every sample,
+            // so the release finished far faster than the RELEASE knob.)
+            env = runSegment(releaseStart, 0.0f, releaseTime, stageTime, releaseShape);
             stageTime += sampleTime;
             if (stageTime >= releaseTime)
             {
@@ -375,6 +464,7 @@ struct FancyADSR : Module
         dispAttackShape = attackShape;
         dispReleaseShape = releaseShape;
         dispGate = gateHigh;
+        dispAD = adMode;
         eorFlash = std::max(0.f, eorFlash - 5.f * sampleTime);
 
         // ----- Real-time graph sampling -----
@@ -438,8 +528,8 @@ namespace
 
         // Draws all static panel art: base panel, display bezel, the
         // ENVELOPE section with its four knob cells (and CV sub-labels), the
-        // four shape/loop/time cells with their EXP/LIN labels, and the I/O
-        // row with its four tinted jack cells.
+        // five mode/shape/loop/time cells with their state labels, and the
+        // I/O row with its four tinted jack cells.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -456,15 +546,18 @@ namespace
                 agmm::text(vg, cx + 16.f, FA_ROWA_TOP + 58.f, "CV", 7.f, agmm::dim(), agmm::ALIGN_C);
             }
 
-            // ---- row B: shapes, loop, time (label above, state names beside the switches) ----
-            const char *b[4] = {"ATK SHAPE", "REL SHAPE", "LOOP", "TIME"};
-            for (int i = 0; i < 4; ++i)
-                agmm::cell(vg, faColX(i), FA_ROWB_TOP, FA_CELL_W, FA_ROWB_H, b[i]);
+            // ---- row B: mode, shapes, loop, time (label above, state names beside the switches) ----
+            const char *b[5] = {"MODE", "ATK SHAPE", "REL SHAPE", "LOOP", "TIME"};
+            for (int i = 0; i < 5; ++i)
+                agmm::cell(vg, faColX5(i), FA_ROWB_TOP, FA_CELL5_W, FA_ROWB_H, b[i]);
             const float by = FA_ROWB_TOP + 30.f;
-            for (int i = 0; i < 2; ++i)
+            // MODE: switch up = AD (value 1), down = ADSR (value 0)
+            agmm::text(vg, faColX5(0) + 13.f, by - 8.f, "AD", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
+            agmm::text(vg, faColX5(0) + 13.f, by + 8.f, "ADSR", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
+            for (int i = 1; i < 3; ++i)
             {
-                agmm::text(vg, faColX(i) + 16.f, by - 8.f, "EXP", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
-                agmm::text(vg, faColX(i) + 16.f, by + 8.f, "LIN", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
+                agmm::text(vg, faColX5(i) + 13.f, by - 8.f, "EXP", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
+                agmm::text(vg, faColX5(i) + 13.f, by + 8.f, "LIN", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
             }
 
             // ---- row C: I/O (outputs tinted) ----
@@ -472,6 +565,8 @@ namespace
             const char *io[4] = {"GATE", "RETRIG", "ENV OUT", "EOR"};
             for (int i = 0; i < 4; ++i)
                 agmm::cell(vg, faColX(i), FA_ROWC_TOP, FA_CELL_W, FA_ROWC_H, io[i], i >= 2);
+            // label for the TEST button that sits beside the GATE jack
+            agmm::text(vg, faColX(0) + 17.f, FA_ROWC_TOP + 42.f, "TEST", 7.f, agmm::dim(), agmm::ALIGN_C, 0.3f);
 
             Widget::draw(args);
         }
@@ -539,7 +634,7 @@ namespace
             Widget::draw(args);
         }
 
-        // Layer-1 overlay: draws the readout row, the violet ideal-ADSR
+        // Layer-1 overlay: draws the readout row, the violet ideal-envelope
         // preview, the cyan live trace with a fill and end dot, the level
         // meter, the legend row, and the stage/state chips (with an EOR
         // flash ring). Falls back to a sample envelope in the module browser.
@@ -555,7 +650,7 @@ namespace
 
             // ---- gather state (live, or a sample scene in the module browser) ----
             float A, D, S, R, aShape, rShape, envV, timeScale;
-            bool gate, loop;
+            bool gate, loop, ad;
             int stage;
             float eor;
             int n;
@@ -572,6 +667,7 @@ namespace
                 envV = module->env * 10.f;
                 timeScale = module->getTimeScale();
                 gate = module->dispGate;
+                ad = module->dispAD;
                 loop = module->params[FancyADSR::LOOP_TOGGLE_PARAM].getValue() > 0.5f;
                 stage = (int)module->stage;
                 eor = module->eorFlash;
@@ -590,6 +686,7 @@ namespace
                 timeScale = 2.f;
                 gate = false;
                 loop = false;
+                ad = false;
                 stage = FancyADSR::STAGE_RELEASE;
                 eor = 0.f;
                 n = 300;
@@ -615,15 +712,20 @@ namespace
             char buf[64];
 
             // ---- readout row ----
-            snprintf(buf, sizeof(buf), "A %.2f  D %.2f  S %.0f%%  R %.2f", A, D, S * 100.f, R);
+            if (ad)
+                snprintf(buf, sizeof(buf), "A %.2f  D %.2f  S --  R --", A, D);
+            else
+                snprintf(buf, sizeof(buf), "A %.2f  D %.2f  S %.0f%%  R %.2f", A, D, S * 100.f, R);
             agmm::text(vg, 6.f, 9.f, buf, 7.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
             snprintf(buf, sizeof(buf), "%.1fV", envV);
             agmm::text(vg, W - 6.f, 9.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), agmm::ALIGN_R, 0.5f);
 
-            // ---- ideal ADSR preview (the shape the current knobs describe) ----
+            // ---- ideal preview (the shape the current knobs describe) ----
+            // ADSR: attack, decay to sustain, hold, release.
+            // AD:   attack, decay to zero, short tail of silence.
             {
-                float hold = 0.25f * (A + D + R);
-                float total = A + D + hold + R;
+                float hold = ad ? 0.25f * (A + D) : 0.25f * (A + D + R);
+                float total = ad ? (A + D + hold) : (A + D + hold + R);
                 const int N = 100;
                 nvgBeginPath(vg);
                 for (int i = 0; i <= N; ++i)
@@ -633,11 +735,11 @@ namespace
                     if (t < A)
                         v = segCurve(0.f, 1.f, A, t, aShape);
                     else if (t < A + D)
-                        v = segCurve(1.f, S, D, t - A, 1.f);
+                        v = segCurve(1.f, ad ? 0.f : S, D, t - A, 1.f);
                     else if (t < A + D + hold)
-                        v = S;
+                        v = ad ? 0.f : S;
                     else
-                        v = segCurve(S, 0.f, R, t - A - D - hold, rShape);
+                        v = ad ? 0.f : segCurve(S, 0.f, R, t - A - D - hold, rShape);
                     float x = FA_SX0 + FA_SW * (float)i / (float)N;
                     float y = vy(v * 10.f);
                     if (i == 0)
@@ -719,19 +821,22 @@ namespace
             }
 
             // ---- stage / state chips (widths measured from the text) ----
+            // SUS and REL are never active in AD mode; the EOR flash ring
+            // moves to the DEC chip there, since AD ends at the end of decay.
             {
                 const char *txt[6] = {"ATK", "DEC", "SUS", "REL", "GATE", "LOOP"};
                 bool on[6] = {stage == FancyADSR::STAGE_ATTACK, stage == FancyADSR::STAGE_DECAY,
                               stage == FancyADSR::STAGE_SUSTAIN, stage == FancyADSR::STAGE_RELEASE, gate, loop};
                 NVGcolor col[6] = {agmm::accent(), agmm::accent(), agmm::accent(), agmm::violet(),
                                    agmm::accent(), agmm::violet()};
+                const int flashChip = ad ? 1 : 3;
                 float x = 8.f;
                 for (int i = 0; i < 6; ++i)
                 {
                     float w = agmm::textWidth(vg, txt[i], 7.f, 0.5f) + 10.f;
                     agmm::chip(vg, x, FA_CHIP_Y, w, FA_CHIP_H, txt[i], on[i], col[i]);
-                    if (i == 3 && eor > 0.02f)
-                    { // end-of-release flash around the REL chip
+                    if (i == flashChip && eor > 0.02f)
+                    { // end-of-envelope flash ring around the REL (or DEC) chip
                         nvgBeginPath(vg);
                         nvgRoundedRect(vg, x - 1.5f, FA_CHIP_Y - 1.5f, w + 3.f, FA_CHIP_H + 3.f, 4.f);
                         nvgStrokeColor(vg, agmm::withA(agmm::violet(), 0.9f * eor));
@@ -750,15 +855,15 @@ namespace
 
 // ------------------------------------------------------------
 // Module Widget: adds the static panel, screws, the live display, the four
-// envelope knobs with their CV jacks, the shape/loop/time controls, and the
-// gate/retrigger inputs plus envelope/EOR outputs.
+// envelope knobs with their CV jacks, the mode/shape/loop/time controls, and
+// the gate/retrigger inputs plus envelope/EOR outputs.
 // ------------------------------------------------------------
 struct FancyADSRWidget : ModuleWidget
 {
     // Builds the widget tree: static background, screws, the scope display,
-    // row A (four knobs + four CV jacks), row B (two shape switches, the loop
-    // switch plus its light, and the time knob), and row C (two inputs + two
-    // outputs).
+    // row A (four knobs + four CV jacks), row B (mode switch, two shape
+    // switches, the loop switch plus its light, and the time knob), and row C
+    // (two inputs + two outputs).
     FancyADSRWidget(FancyADSR *module)
     {
         setModule(module);
@@ -785,17 +890,19 @@ struct FancyADSRWidget : ModuleWidget
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 8.f, FA_ROWA_TOP + 58.f), module, cvIds[i]));
         }
 
-        // ---- row B: shapes, loop, time ----
+        // ---- row B: mode, shapes, loop, time ----
         const float by = FA_ROWB_TOP + 30.f;
-        addParam(createParamCentered<CKSS>(Vec(faColX(0) - 8.f, by), module, FancyADSR::ATTACK_SHAPE_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(faColX(1) - 8.f, by), module, FancyADSR::RELEASE_SHAPE_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(faColX(2) - 8.f, by), module, FancyADSR::LOOP_TOGGLE_PARAM));
-        addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(faColX(2) + 14.f, by), module, FancyADSR::LOOP_LIGHT));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(faColX(3), by), module, FancyADSR::TIME_SCALE_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(faColX5(0) - 9.f, by), module, FancyADSR::MODE_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(faColX5(1) - 9.f, by), module, FancyADSR::ATTACK_SHAPE_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(faColX5(2) - 9.f, by), module, FancyADSR::RELEASE_SHAPE_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(faColX5(3) - 9.f, by), module, FancyADSR::LOOP_TOGGLE_PARAM));
+        addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(faColX5(3) + 12.f, by), module, FancyADSR::LOOP_LIGHT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(faColX5(4), by), module, FancyADSR::TIME_SCALE_PARAM));
 
         // ---- row C: I/O ----
         const float cy = FA_ROWC_TOP + 31.f;
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(faColX(0), cy), module, FancyADSR::GATE_INPUT));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(faColX(0) - 10.f, cy), module, FancyADSR::GATE_INPUT));
+        addParam(createParamCentered<TL1105>(Vec(faColX(0) + 17.f, cy - 3.f), module, FancyADSR::TEST_PARAM));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(faColX(1), cy), module, FancyADSR::TRIGGER_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(faColX(2), cy), module, FancyADSR::ENV_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(faColX(3), cy), module, FancyADSR::EOR_OUTPUT));

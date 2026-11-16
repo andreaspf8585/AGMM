@@ -22,6 +22,10 @@
 // audible — the outermost partial always has ~13.5 % of the peak amplitude.
 // At the default 6 partials sigma ≈ 1.25, which is the classic Shepard feel.
 //
+// Click prevention: FREQ/FINE and the partial span are slewed, per-partial
+// gains are smoothed, and phases are never reset, so parameter jumps do not
+// produce discontinuities in the output.
+//
 // Controls:
 //   FREQ      perceived pitch (default C4), shown as note name or Hz
 //   FINE      fine tune (±100 cents)
@@ -295,7 +299,12 @@ struct Ladder : Module
 
     float phases[LD_MAX_PARTIALS] = {};
     float sweep = 0.f;
-    int prevNumOscs = 6;
+
+    // Click-prevention state
+    float smoothSemis = 0.f;               // slewed FREQ + FINE
+    float smoothHalfSpan = 2.5f;           // slewed (numOscs - 1) / 2
+    bool smoothInit = false;
+    float ampSmooth[LD_MAX_PARTIALS] = {}; // per-partial gain smoothing
 
     // Display snapshot
     float dispPitchSemis = 0.f;
@@ -334,27 +343,46 @@ struct Ladder : Module
         configOutput(OUT_R_OUTPUT, "R out");
     }
 
+    void onReset() override
+    {
+        smoothInit = false;
+        for (int i = 0; i < LD_MAX_PARTIALS; ++i)
+            ampSmooth[i] = 0.f;
+    }
+
     void process(const ProcessArgs &args) override
     {
         const float sr = args.sampleRate;
 
         // ---- controls ----
-        float baseSemis = params[FREQ_PARAM].getValue()
-                        + params[FINE_PARAM].getValue() / 100.f
-                        + inputs[VOCT_INPUT].getVoltage() * 12.f;
+        float knobSemis = params[FREQ_PARAM].getValue()
+                        + params[FINE_PARAM].getValue() / 100.f;
         float speed = params[LADDER_SPEED_PARAM].getValue();
         int wave = rack::math::clamp((int)std::round(params[WAVE_PARAM].getValue()), 0, 3);
         float pw = params[PULSE_WIDTH_PARAM].getValue();
         int numOscs = rack::math::clamp((int)std::round(params[NUM_OSCS_PARAM].getValue()), 1, LD_MAX_PARTIALS);
         bool descending = params[DIRECTION_PARAM].getValue() > 0.5f;
 
-        // Reset phases when the partial count changes.
-        if (numOscs != prevNumOscs)
+        const float targetHalfSpan = (float)(numOscs - 1) * 0.5f;
+        if (!smoothInit)
         {
-            for (int i = 0; i < LD_MAX_PARTIALS; ++i)
-                phases[i] = 0.f;
-            prevNumOscs = numOscs;
+            smoothSemis = knobSemis;
+            smoothHalfSpan = targetHalfSpan;
+            smoothInit = true;
         }
+
+        // ~8 ms one-pole slew on FREQ+FINE: removes the click on frequency
+        // jumps while still feeling instant. V/OCT stays unslewed so CV
+        // tracking is not affected.
+        const float pitchCoef = 1.f - std::exp(-args.sampleTime / 0.008f);
+        smoothSemis += (knobSemis - smoothSemis) * pitchCoef;
+
+        // Slower slew on the partial span. Changing OSCS shifts every
+        // partial by half an octave per step; slewing avoids a hard jump.
+        const float spanCoef = 1.f - std::exp(-args.sampleTime / 0.020f);
+        smoothHalfSpan += (targetHalfSpan - smoothHalfSpan) * spanCoef;
+
+        float baseSemis = smoothSemis + inputs[VOCT_INPUT].getVoltage() * 12.f;
 
         // ---- Shepard sweep ----
         if (speed > 0.001f)
@@ -379,16 +407,23 @@ struct Ladder : Module
         // sigma scales with N: sigma = max(1, (N-1)/4). This keeps the
         // outermost partial at exp(-2) ≈ 0.135 of the peak, so all chosen
         // oscillators are audible. For N=6, sigma ≈ 1.25 ≈ classic Shepard.
-        float sigma = std::max(1.0f, (float)(numOscs - 1) * 0.25f);
+        // Computed from the slewed span so it changes smoothly with OSCS.
+        float sigma = std::max(1.0f, smoothHalfSpan * 2.f * 0.25f);
         float stereoWidth = 0.55f;
         float centerLog2 = baseSemis / 12.f;
-        float halfSpan = (float)(numOscs - 1) * 0.5f;
+        float halfSpan = smoothHalfSpan;
+
+        // ~5 ms per-partial gain smoothing (fades partials in/out on OSCS changes)
+        const float ampCoef = 1.f - std::exp(-args.sampleTime / 0.005f);
 
         float outL = 0.f, outR = 0.f;
         float sumAmpSq = 0.f;
 
-        for (int i = 0; i < numOscs; ++i)
+        // Runs over every slot so inactive partials fade out smoothly and
+        // phases are never reset.
+        for (int i = 0; i < LD_MAX_PARTIALS; ++i)
         {
+            bool active = i < numOscs;
             float offsetOct = (float)i - halfSpan;
             float semis = baseSemis + sweep + offsetOct * 12.f;
             float freqIdeal = ldSemisToHz(semis);
@@ -398,22 +433,25 @@ struct Ladder : Module
             // and show up in the display.
             float logF = std::log2(std::max(freqIdeal, 1.f) / 261.625565f);
             float dist = logF - centerLog2;
-            float amp = std::exp(-dist * dist / (2.f * sigma * sigma));
+            float target = active ? std::exp(-dist * dist / (2.f * sigma * sigma)) : 0.f;
 
             float fc = rack::math::clamp(freqIdeal, 10.f, sr * 0.45f);
             phases[i] += fc * args.sampleTime;
             phases[i] -= std::floor(phases[i]);
 
-            dispAmp[i] = amp;
+            ampSmooth[i] += (target - ampSmooth[i]) * ampCoef;
+            float amp = ampSmooth[i];
+
+            dispAmp[i] = target;
             dispFreqs[i] = fc;
             dispPhases[i] = phases[i];
-            sumAmpSq += amp * amp;
 
             if (amp < 1e-4f)
             {
                 dispPan[i] = 0.f;
                 continue;
             }
+            sumAmpSq += amp * amp;
 
             float s = ldWaveSample(phases[i], wave, pw);
 
