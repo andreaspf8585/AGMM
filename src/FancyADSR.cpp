@@ -12,11 +12,25 @@
 // -----------------------------------------------------------------------------
 // OVERVIEW
 // -----------------------------------------------------------------------------
-// FancyADSR is a 20 HP envelope generator with per-stage CV control, selectable
-// linear/exponential attack and release shapes, an optional looping mode, a
-// selectable ADSR / AD mode, and a live scope that shows both the ideal curve
-// implied by the current knobs (violet preview) and the actual envelope output
-// history (cyan live trace).
+// FancyADSR is a 20 HP polyphonic (up to 16 channels) envelope generator with
+// per-stage CV control, selectable linear/exponential attack and release
+// shapes, an optional looping mode, a selectable ADSR / AD mode, a TEST button,
+// and a live scope that shows both the ideal curve implied by the current knobs
+// (violet preview) and the actual envelope output history (cyan live trace).
+//
+// POLYPHONY
+//   The channel count follows the GATE and RETRIG inputs (whichever has more
+//   channels; minimum 1). Each channel runs its own independent envelope.
+//   ENV OUT and EOR carry the same number of channels. The four CV inputs are
+//   polyphonic too: a polyphonic CV modulates each channel separately, while a
+//   monophonic CV is applied to every channel. A monophonic GATE or RETRIG
+//   is likewise seen by every channel. The knobs, mode, shape, loop and time
+//   controls are shared by all channels. The TEST button gates every channel.
+//   The scope plots every active channel's envelope at the same time (the
+//   selected channel bright with a fill, the others as thinner coloured
+//   traces). The readouts, stage chips and level meter follow the selected
+//   channel: channel 1 by default, choose another from the right-click menu
+//   ("Display channel").
 //
 // ADSR mode (default):
 //   The envelope runs through ATTACK -> DECAY -> SUSTAIN -> RELEASE -> IDLE.
@@ -40,8 +54,8 @@
 //
 // File structure:
 //   1. Layout constants (20 HP = 300x380 px).
-//   2. FancyADSR module: state, param helpers, envelope maths, process() and
-//      the scope history buffer.
+//   2. FancyADSR module: per-channel voice state, param helpers, envelope
+//      maths, process() and the scope history buffer.
 //   3. Anonymous-namespace UI: segCurve helper, FAPanelBackground (static
 //      artwork) and FADisplayWidget (scope + readouts + chips).
 //   4. FancyADSRWidget: places knobs, jacks, switches and the display.
@@ -137,19 +151,44 @@ struct FancyADSR : Module
         STAGE_SUSTAIN,
         STAGE_RELEASE
     };
-    Stage stage = STAGE_IDLE;
-    float env = 0.0f;
-    float stageTime = 0.0f;
-    float attackStart = 0.0f; // level the current attack rises from (0 in ADSR mode)
-    float decayStart = 1.0f;  // level the current AD-mode decay falls from
-    float releaseStart = 0.0f; // level the current release falls from (captured when it begins)
-    float eorPulseRemaining = 0.0f;
-    bool lastGateState = false;
-    bool lastTriggerState = false;
 
-    // Real-time graph history (0-10V)
+    static const int MAX_VOICES = 16;
+
+    // State of one polyphony channel.
+    struct Voice
+    {
+        Stage stage = STAGE_IDLE;
+        float env = 0.0f;
+        float stageTime = 0.0f;
+        float attackStart = 0.0f;  // level the current attack rises from (0 in ADSR mode)
+        float decayStart = 1.0f;   // level the current AD-mode decay falls from
+        float releaseStart = 0.0f; // level the current release falls from (captured when it begins)
+        float eorPulseRemaining = 0.0f;
+        bool lastGate = false;
+        bool lastTrigger = false;
+
+        void reset()
+        {
+            stage = STAGE_IDLE;
+            env = 0.0f;
+            stageTime = 0.0f;
+            attackStart = 0.0f;
+            decayStart = 1.0f;
+            releaseStart = 0.0f;
+            eorPulseRemaining = 0.0f;
+            lastGate = false;
+            lastTrigger = false;
+        }
+    };
+    Voice voices[MAX_VOICES];
+
+    // Which channel the readouts, chips and meter show (0-based). Saved with the patch.
+    int displayChannel = 0;
+
+    // Real-time graph history (0-10V), one ring buffer per channel. All
+    // channels are sampled together so they share one write position.
     static const int HISTORY_SIZE = 400;
-    float history[HISTORY_SIZE];
+    float history[MAX_VOICES][HISTORY_SIZE];
     int historyCount = 0;
     int historyWritePos = 0;
     float sampleAccumulator = 0.0f;
@@ -158,19 +197,23 @@ struct FancyADSR : Module
     // a torn read is only cosmetic)
     float dispAttack = 0.01f, dispDecay = 0.1f, dispSustain = 0.8f, dispRelease = 0.5f;
     float dispAttackShape = 1.f, dispReleaseShape = 1.f;
+    float dispEnv = 0.f; // 0..1, displayed channel
+    int dispStage = STAGE_IDLE;
+    int dispChannels = 1;     // active channel count
+    int dispChannelShown = 0; // channel the scope is showing (0-based)
     bool dispGate = false;
     bool dispAD = false;
     float eorFlash = 0.f;
 
-    // Parameter helpers (with CV)
+    // Parameter helpers (with per-channel CV; a monophonic CV applies to all channels)
     // Attack time from the knob plus its CV, clamped to 1 ms .. 10 s.
-    float getAttack() { return rack::math::clamp(params[ATTACK_PARAM].getValue() + inputs[ATTACK_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    float getAttack(int c) { return rack::math::clamp(params[ATTACK_PARAM].getValue() + inputs[ATTACK_CV_INPUT].getPolyVoltage(c) / 5.0f, 0.001f, 10.0f); }
     // Decay time from the knob plus its CV, clamped to 1 ms .. 10 s.
-    float getDecay() { return rack::math::clamp(params[DECAY_PARAM].getValue() + inputs[DECAY_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    float getDecay(int c) { return rack::math::clamp(params[DECAY_PARAM].getValue() + inputs[DECAY_CV_INPUT].getPolyVoltage(c) / 5.0f, 0.001f, 10.0f); }
     // Sustain level from the knob plus its CV, clamped to 0..1.
-    float getSustain() { return rack::math::clamp(params[SUSTAIN_PARAM].getValue() + inputs[SUSTAIN_CV_INPUT].getVoltage() / 5.0f, 0.0f, 1.0f); }
+    float getSustain(int c) { return rack::math::clamp(params[SUSTAIN_PARAM].getValue() + inputs[SUSTAIN_CV_INPUT].getPolyVoltage(c) / 5.0f, 0.0f, 1.0f); }
     // Release time from the knob plus its CV, clamped to 1 ms .. 10 s.
-    float getRelease() { return rack::math::clamp(params[RELEASE_PARAM].getValue() + inputs[RELEASE_CV_INPUT].getVoltage() / 5.0f, 0.001f, 10.0f); }
+    float getRelease(int c) { return rack::math::clamp(params[RELEASE_PARAM].getValue() + inputs[RELEASE_CV_INPUT].getPolyVoltage(c) / 5.0f, 0.001f, 10.0f); }
     // True when the LOOP switch is on.
     bool getLoop() { return params[LOOP_TOGGLE_PARAM].getValue() > 0.5f; }
     // True when the MODE switch is set to AD.
@@ -192,40 +235,40 @@ struct FancyADSR : Module
         configSwitch(LOOP_TOGGLE_PARAM, 0.f, 1.f, 0.f, "Loop mode", {"Off", "On"});
         configParam(TIME_SCALE_PARAM, 0.05f, 5.0f, 1.0f, "Scope time (full width)", " s");
         configSwitch(MODE_PARAM, 0.f, 1.f, 0.f, "Envelope mode", {"ADSR", "AD (gate acts as trigger)"});
-        configButton(TEST_PARAM, "Test gate (held = gate high)");
+        configButton(TEST_PARAM, "Test gate (held = gate high, all channels)");
 
-        configInput(GATE_INPUT, "Gate");
-        configInput(TRIGGER_INPUT, "Retrigger");
-        configInput(ATTACK_CV_INPUT, "Attack CV (5 V adds 1 s)");
-        configInput(DECAY_CV_INPUT, "Decay CV (5 V adds 1 s)");
-        configInput(SUSTAIN_CV_INPUT, "Sustain CV (5 V adds 100%)");
-        configInput(RELEASE_CV_INPUT, "Release CV (5 V adds 1 s)");
-        configOutput(ENV_OUTPUT, "Envelope (0 to 10 V)");
-        configOutput(EOR_OUTPUT, "End of release (end of decay in AD mode)");
+        configInput(GATE_INPUT, "Gate (polyphonic)");
+        configInput(TRIGGER_INPUT, "Retrigger (polyphonic)");
+        configInput(ATTACK_CV_INPUT, "Attack CV (5 V adds 1 s, polyphonic)");
+        configInput(DECAY_CV_INPUT, "Decay CV (5 V adds 1 s, polyphonic)");
+        configInput(SUSTAIN_CV_INPUT, "Sustain CV (5 V adds 100%, polyphonic)");
+        configInput(RELEASE_CV_INPUT, "Release CV (5 V adds 1 s, polyphonic)");
+        configOutput(ENV_OUTPUT, "Envelope (0 to 10 V, polyphonic)");
+        configOutput(EOR_OUTPUT, "End of release (end of decay in AD mode, polyphonic)");
 
         configLight(LOOP_LIGHT, "Loop mode");
 
         resetState();
     }
 
-    // Clears the envelope, stage, EOR pulse and scope history to a known
-    // starting state.
-    void resetState()
+    // Clears the scope history buffer.
+    void clearHistory()
     {
-        stage = STAGE_IDLE;
-        env = 0.0f;
-        stageTime = 0.0f;
-        attackStart = 0.0f;
-        decayStart = 1.0f;
-        releaseStart = 0.0f;
-        eorPulseRemaining = 0.0f;
-        lastGateState = false;
-        lastTriggerState = false;
         historyCount = 0;
         historyWritePos = 0;
         sampleAccumulator = 0.0f;
-        for (int i = 0; i < HISTORY_SIZE; ++i)
-            history[i] = 0.0f;
+        for (int c = 0; c < MAX_VOICES; ++c)
+            for (int i = 0; i < HISTORY_SIZE; ++i)
+                history[c][i] = 0.0f;
+    }
+
+    // Clears every channel's envelope state and the scope history to a known
+    // starting state.
+    void resetState()
+    {
+        for (int c = 0; c < MAX_VOICES; ++c)
+            voices[c].reset();
+        clearHistory();
     }
 
     // Rack reset hook: clears envelope and scope state.
@@ -258,224 +301,258 @@ struct FancyADSR : Module
         }
     }
 
-    // Starts the attack stage. In ADSR mode it always rises from 0 (the
+    // Starts a voice's attack stage. In ADSR mode it always rises from 0 (the
     // original behaviour); in AD mode it rises from the current level so a
     // retrigger mid-envelope does not snap to zero.
-    void startAttack(bool fromCurrentLevel)
+    void startAttack(Voice &v, bool fromCurrentLevel)
     {
-        stage = STAGE_ATTACK;
-        stageTime = 0.0f;
-        attackStart = fromCurrentLevel ? env : 0.0f;
+        v.stage = STAGE_ATTACK;
+        v.stageTime = 0.0f;
+        v.attackStart = fromCurrentLevel ? v.env : 0.0f;
     }
 
-    // Handles a gate transition.
+    // Handles a gate transition for one voice.
     // ADSR mode: a rising edge starts (or restarts) the attack from
     // IDLE/RELEASE (and from SUSTAIN when looping); a falling edge starts the
     // release from ATTACK/DECAY/SUSTAIN.
     // AD mode: a rising edge starts the envelope from any stage; the falling
     // edge is ignored (the gate acts only as a trigger).
-    void onGate(bool high)
+    void onGate(Voice &v, bool high, bool adMode, bool loop)
     {
-        if (getAD())
+        if (adMode)
         {
             if (high)
-                startAttack(true);
+                startAttack(v, true);
             return;
         }
 
         if (high)
         {
-            if (stage == STAGE_IDLE || stage == STAGE_RELEASE)
+            if (v.stage == STAGE_IDLE || v.stage == STAGE_RELEASE)
             {
-                startAttack(false);
+                startAttack(v, false);
             }
-            else if (stage == STAGE_SUSTAIN && getLoop())
+            else if (v.stage == STAGE_SUSTAIN && loop)
             {
-                startAttack(false);
+                startAttack(v, false);
             }
         }
         else
         {
-            if (stage == STAGE_ATTACK || stage == STAGE_DECAY || stage == STAGE_SUSTAIN)
+            if (v.stage == STAGE_ATTACK || v.stage == STAGE_DECAY || v.stage == STAGE_SUSTAIN)
             {
-                stage = STAGE_RELEASE;
-                stageTime = 0.0f;
-                releaseStart = env; // capture once: the release falls from here
+                v.stage = STAGE_RELEASE;
+                v.stageTime = 0.0f;
+                v.releaseStart = v.env; // capture once: the release falls from here
             }
         }
     }
 
-    // Handles a trigger edge.
+    // Handles a trigger edge for one voice.
     // ADSR mode: while not idle, a rising trigger restarts the attack from
     // the beginning.
     // AD mode: a rising trigger starts the envelope from any stage.
-    void onTrigger(bool high)
+    void onTrigger(Voice &v, bool high, bool adMode)
     {
         if (!high)
             return;
-        if (getAD())
+        if (adMode)
         {
-            startAttack(true);
+            startAttack(v, true);
         }
-        else if (stage != STAGE_IDLE)
+        else if (v.stage != STAGE_IDLE)
         {
-            startAttack(false);
+            startAttack(v, false);
         }
     }
 
-    // Main audio callback: reads gate/trigger edges, evaluates the current
-    // stage's envelope value, advances stages when their durations elapse,
-    // writes the envelope and EOR outputs, updates the loop light, and
-    // samples the envelope into the scope history at the chosen time base.
+    // Main audio callback: for every active channel, reads gate/trigger
+    // edges, evaluates the current stage's envelope value, advances stages
+    // when their durations elapse and writes the envelope and EOR outputs.
+    // Also updates the loop light and samples the displayed channel into the
+    // scope history at the chosen time base.
     void process(const ProcessArgs &args) override
     {
-        float sampleTime = args.sampleTime;
+        const float sampleTime = args.sampleTime;
         const bool adMode = getAD();
+        const bool loop = getLoop();
+        // The TEST button acts as a gate on every channel for as long as it is held.
+        const bool test = params[TEST_PARAM].getValue() > 0.5f;
+        const float attackShape = params[ATTACK_SHAPE_PARAM].getValue();
+        const float releaseShape = params[RELEASE_SHAPE_PARAM].getValue();
 
-        // Gate / trigger edges
-        // The TEST button acts as a gate for as long as it is held.
-        bool gateHigh = inputs[GATE_INPUT].getVoltage() > 1.0f
-                     || params[TEST_PARAM].getValue() > 0.5f;
-        if (gateHigh && !lastGateState)
-            onGate(true);
-        else if (!gateHigh && lastGateState)
-            onGate(false);
-        lastGateState = gateHigh;
+        // Channel count follows the gate / retrigger inputs.
+        int channels = std::max(1, std::max(inputs[GATE_INPUT].getChannels(), inputs[TRIGGER_INPUT].getChannels()));
+        channels = std::min(channels, MAX_VOICES);
+        outputs[ENV_OUTPUT].setChannels(channels);
+        outputs[EOR_OUTPUT].setChannels(channels);
 
-        bool triggerHigh = inputs[TRIGGER_INPUT].getVoltage() > 1.0f;
-        if (triggerHigh && !lastTriggerState)
-            onTrigger(true);
-        lastTriggerState = triggerHigh;
+        // Which channel the readouts, chips and meter show (clamped to the
+        // active channels). The scope plots all channels.
+        const int dispCh = rack::math::clamp(displayChannel, 0, channels - 1);
+        float outV[MAX_VOICES] = {}; // this sample's output of every channel (0 when inactive)
 
-        // Switching to AD mode while sitting in SUSTAIN: fall away to zero
-        // through the decay stage instead of hanging forever.
-        if (adMode && stage == STAGE_SUSTAIN)
+        for (int c = 0; c < channels; ++c)
         {
-            stage = STAGE_DECAY;
-            stageTime = 0.0f;
-            decayStart = env;
-        }
+            Voice &v = voices[c];
 
-        float attackTime = getAttack();
-        float decayTime = getDecay();
-        float sustainLev = getSustain();
-        float releaseTime = getRelease();
-        float attackShape = params[ATTACK_SHAPE_PARAM].getValue();
-        float releaseShape = params[RELEASE_SHAPE_PARAM].getValue();
+            // Gate / trigger edges
+            bool gateHigh = inputs[GATE_INPUT].getPolyVoltage(c) > 1.0f || test;
+            if (gateHigh && !v.lastGate)
+                onGate(v, true, adMode, loop);
+            else if (!gateHigh && v.lastGate)
+                onGate(v, false, adMode, loop);
+            v.lastGate = gateHigh;
 
-        // Advance envelope
-        switch (stage)
-        {
-        case STAGE_ATTACK:
-            env = runSegment(attackStart, 1.0f, attackTime, stageTime, attackShape);
-            stageTime += sampleTime;
-            if (stageTime >= attackTime)
+            bool triggerHigh = inputs[TRIGGER_INPUT].getPolyVoltage(c) > 1.0f;
+            if (triggerHigh && !v.lastTrigger)
+                onTrigger(v, true, adMode);
+            v.lastTrigger = triggerHigh;
+
+            // Switching to AD mode while sitting in SUSTAIN: fall away to zero
+            // through the decay stage instead of hanging forever.
+            if (adMode && v.stage == STAGE_SUSTAIN)
             {
-                env = 1.0f;
-                stage = STAGE_DECAY;
-                stageTime = 0.0f;
-                decayStart = 1.0f;
+                v.stage = STAGE_DECAY;
+                v.stageTime = 0.0f;
+                v.decayStart = v.env;
             }
-            break;
 
-        case STAGE_DECAY:
-            // Decay is always exponential (typical ADSR), timing is correct.
-            // ADSR mode falls to the sustain level; AD mode falls to zero.
-            env = runSegment(adMode ? decayStart : 1.0f, adMode ? 0.0f : sustainLev,
-                             decayTime, stageTime, 1.0f);
-            stageTime += sampleTime;
-            if (stageTime >= decayTime)
+            const float attackTime = getAttack(c);
+            const float decayTime = getDecay(c);
+            const float sustainLev = getSustain(c);
+            const float releaseTime = getRelease(c);
+
+            bool eorFired = false;
+
+            // Advance envelope
+            switch (v.stage)
             {
-                if (adMode)
+            case STAGE_ATTACK:
+                v.env = runSegment(v.attackStart, 1.0f, attackTime, v.stageTime, attackShape);
+                v.stageTime += sampleTime;
+                if (v.stageTime >= attackTime)
                 {
-                    env = 0.0f;
-                    eorPulseRemaining = 0.005f; // 5 ms pulse at the end of the decay
-                    eorFlash = 1.f;
-                    if (getLoop() && gateHigh)
+                    v.env = 1.0f;
+                    v.stage = STAGE_DECAY;
+                    v.stageTime = 0.0f;
+                    v.decayStart = 1.0f;
+                }
+                break;
+
+            case STAGE_DECAY:
+                // Decay is always exponential (typical ADSR), timing is correct.
+                // ADSR mode falls to the sustain level; AD mode falls to zero.
+                v.env = runSegment(adMode ? v.decayStart : 1.0f, adMode ? 0.0f : sustainLev,
+                                   decayTime, v.stageTime, 1.0f);
+                v.stageTime += sampleTime;
+                if (v.stageTime >= decayTime)
+                {
+                    if (adMode)
                     {
-                        startAttack(false); // loop: repeat while the gate is held
+                        v.env = 0.0f;
+                        v.eorPulseRemaining = 0.005f; // 5 ms pulse at the end of the decay
+                        eorFired = true;
+                        if (loop && gateHigh)
+                        {
+                            startAttack(v, false); // loop: repeat while the gate is held
+                        }
+                        else
+                        {
+                            v.stage = STAGE_IDLE;
+                            v.stageTime = 0.0f;
+                        }
                     }
                     else
                     {
-                        stage = STAGE_IDLE;
-                        stageTime = 0.0f;
+                        v.env = sustainLev;
+                        v.stage = STAGE_SUSTAIN;
+                        v.stageTime = 0.0f;
                     }
                 }
-                else
+                break;
+
+            case STAGE_SUSTAIN:
+                v.env = sustainLev;
+                if (loop && gateHigh)
                 {
-                    env = sustainLev;
-                    stage = STAGE_SUSTAIN;
-                    stageTime = 0.0f;
+                    startAttack(v, false);
                 }
-            }
-            break;
+                break;
 
-        case STAGE_SUSTAIN:
-            env = sustainLev;
-            if (getLoop() && gateHigh)
+            case STAGE_RELEASE:
+                // Fall from the level captured when the release began.
+                v.env = runSegment(v.releaseStart, 0.0f, releaseTime, v.stageTime, releaseShape);
+                v.stageTime += sampleTime;
+                if (v.stageTime >= releaseTime)
+                {
+                    v.env = 0.0f;
+                    v.stage = STAGE_IDLE;
+                    v.eorPulseRemaining = 0.005f; // 5 ms pulse
+                    eorFired = true;
+                }
+                break;
+
+            default: // IDLE
+                v.env = 0.0f;
+                break;
+            }
+
+            const float outVoltage = v.env * 10.0f;
+            outputs[ENV_OUTPUT].setVoltage(outVoltage, c);
+            outV[c] = outVoltage;
+
+            // End-of-release trigger
+            if (v.eorPulseRemaining > 0.0f)
             {
-                startAttack(false);
+                v.eorPulseRemaining -= sampleTime;
+                outputs[EOR_OUTPUT].setVoltage(v.eorPulseRemaining > 0.0f ? 10.0f : 0.0f, c);
             }
-            break;
-
-        case STAGE_RELEASE:
-            // Fall from the level captured when the release began. (Using the
-            // live `env` as the start made the curve compound every sample,
-            // so the release finished far faster than the RELEASE knob.)
-            env = runSegment(releaseStart, 0.0f, releaseTime, stageTime, releaseShape);
-            stageTime += sampleTime;
-            if (stageTime >= releaseTime)
+            else
             {
-                env = 0.0f;
-                stage = STAGE_IDLE;
-                eorPulseRemaining = 0.005f; // 5 ms pulse
-                eorFlash = 1.f;
+                outputs[EOR_OUTPUT].setVoltage(0.0f, c);
             }
-            break;
 
-        default: // IDLE
-            env = 0.0f;
-            break;
+            // ---- display data for the shown channel ----
+            if (c == dispCh)
+            {
+                dispAttack = attackTime;
+                dispDecay = decayTime;
+                dispSustain = sustainLev;
+                dispRelease = releaseTime;
+                dispGate = gateHigh;
+                dispEnv = v.env;
+                dispStage = (int)v.stage;
+                if (eorFired)
+                    eorFlash = 1.f;
+            }
         }
 
-        float outVoltage = env * 10.0f;
-        outputs[ENV_OUTPUT].setVoltage(outVoltage);
+        // Channels that are no longer patched go back to idle so they start
+        // clean if the channel count grows again.
+        for (int c = channels; c < MAX_VOICES; ++c)
+            voices[c].reset();
 
-        // End-of-release trigger
-        if (eorPulseRemaining > 0.0f)
-        {
-            outputs[EOR_OUTPUT].setVoltage(10.0f);
-            eorPulseRemaining -= sampleTime;
-            if (eorPulseRemaining <= 0.0f)
-                outputs[EOR_OUTPUT].setVoltage(0.0f);
-        }
-        else
-        {
-            outputs[EOR_OUTPUT].setVoltage(0.0f);
-        }
+        lights[LOOP_LIGHT].setBrightness(loop ? 1.0f : 0.0f);
 
-        lights[LOOP_LIGHT].setBrightness(getLoop() ? 1.0f : 0.0f);
-
-        // ---- display data ----
-        dispAttack = attackTime;
-        dispDecay = decayTime;
-        dispSustain = sustainLev;
-        dispRelease = releaseTime;
         dispAttackShape = attackShape;
         dispReleaseShape = releaseShape;
-        dispGate = gateHigh;
         dispAD = adMode;
+        dispChannels = channels;
+        dispChannelShown = dispCh;
         eorFlash = std::max(0.f, eorFlash - 5.f * sampleTime);
 
         // ----- Real-time graph sampling -----
-        // Records the envelope output into a ring buffer at the current scope
-        // time base (one sample every timeScale/HISTORY_SIZE seconds).
+        // Records every channel's envelope output into its ring buffer at the
+        // current scope time base (one sample every timeScale/HISTORY_SIZE
+        // seconds). Inactive channels record 0.
         float timeScale = getTimeScale();
         float sampleInterval = timeScale / HISTORY_SIZE;
         sampleAccumulator += sampleTime;
         while (sampleAccumulator >= sampleInterval)
         {
-            history[historyWritePos] = outVoltage;
+            for (int c = 0; c < MAX_VOICES; ++c)
+                history[c][historyWritePos] = outV[c];
             historyWritePos = (historyWritePos + 1) % HISTORY_SIZE;
             if (historyCount < HISTORY_SIZE)
                 historyCount++;
@@ -483,19 +560,33 @@ struct FancyADSR : Module
         }
     }
 
+    json_t *dataToJson() override
+    {
+        json_t *root = json_object();
+        json_object_set_new(root, "displayChannel", json_integer(displayChannel));
+        return root;
+    }
+
+    void dataFromJson(json_t *root) override
+    {
+        json_t *j = json_object_get(root, "displayChannel");
+        if (j && json_is_integer(j))
+            displayChannel = rack::math::clamp((int)json_integer_value(j), 0, MAX_VOICES - 1);
+    }
+
     // For graph widget access
     // Returns the number of valid samples currently stored in the history
     // buffer (0 .. HISTORY_SIZE).
     int getHistorySize() const { return historyCount; }
-    // Returns the history sample at `index`, where 0 is the oldest stored
-    // sample and the newest is at index historyCount-1. Out-of-range indices
-    // return 0.
-    float getHistorySample(int index) const
+    // Returns channel `ch`'s history sample at `index`, where 0 is the oldest
+    // stored sample and the newest is at index historyCount-1. Out-of-range
+    // indices or channels return 0.
+    float getHistorySample(int ch, int index) const
     {
-        if (index < 0 || index >= historyCount)
+        if (ch < 0 || ch >= MAX_VOICES || index < 0 || index >= historyCount)
             return 0.0f;
         int oldest = (historyWritePos - historyCount + HISTORY_SIZE) % HISTORY_SIZE;
-        return history[(oldest + index) % HISTORY_SIZE];
+        return history[ch][(oldest + index) % HISTORY_SIZE];
     }
 };
 
@@ -637,7 +728,8 @@ namespace
         // Layer-1 overlay: draws the readout row, the violet ideal-envelope
         // preview, the cyan live trace with a fill and end dot, the level
         // meter, the legend row, and the stage/state chips (with an EOR
-        // flash ring). Falls back to a sample envelope in the module browser.
+        // flash ring). All of it shows the selected channel. Falls back to a
+        // sample envelope in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -652,6 +744,7 @@ namespace
             float A, D, S, R, aShape, rShape, envV, timeScale;
             bool gate, loop, ad;
             int stage;
+            int channels = 1, shownCh = 0;
             float eor;
             int n;
             float samples[FancyADSR::HISTORY_SIZE];
@@ -664,16 +757,18 @@ namespace
                 R = module->dispRelease;
                 aShape = module->dispAttackShape;
                 rShape = module->dispReleaseShape;
-                envV = module->env * 10.f;
+                envV = module->dispEnv * 10.f;
                 timeScale = module->getTimeScale();
                 gate = module->dispGate;
                 ad = module->dispAD;
                 loop = module->params[FancyADSR::LOOP_TOGGLE_PARAM].getValue() > 0.5f;
-                stage = (int)module->stage;
+                stage = module->dispStage;
+                channels = module->dispChannels;
+                shownCh = module->dispChannelShown;
                 eor = module->eorFlash;
                 n = std::min(std::max(module->getHistorySize(), 0), (int)FancyADSR::HISTORY_SIZE);
                 for (int i = 0; i < n; ++i)
-                    samples[i] = module->getHistorySample(i);
+                    samples[i] = module->getHistorySample(shownCh, i);
             }
             else
             {
@@ -717,7 +812,10 @@ namespace
             else
                 snprintf(buf, sizeof(buf), "A %.2f  D %.2f  S %.0f%%  R %.2f", A, D, S * 100.f, R);
             agmm::text(vg, 6.f, 9.f, buf, 7.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
-            snprintf(buf, sizeof(buf), "%.1fV", envV);
+            if (channels > 1)
+                snprintf(buf, sizeof(buf), "CH%d/%d  %.1fV", shownCh + 1, channels, envV);
+            else
+                snprintf(buf, sizeof(buf), "%.1fV", envV);
             agmm::text(vg, W - 6.f, 9.f, buf, 7.f, nvgRGB(0xff, 0xe6, 0x80), agmm::ALIGN_R, 0.5f);
 
             // ---- ideal preview (the shape the current knobs describe) ----
@@ -756,6 +854,33 @@ namespace
             // ---- live trace (flat fill + 1.5 px line) ----
             nvgSave(vg);
             nvgScissor(vg, FA_SX0, FA_SY0, FA_SW, FA_SH);
+
+            // other channels: thinner coloured traces behind the selected one
+            if (module && channels > 1 && n >= 2)
+            {
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    if (ch == shownCh)
+                        continue;
+                    nvgBeginPath(vg);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        float x = FA_SX0 + FA_SW * (float)i / (float)(FancyADSR::HISTORY_SIZE - 1);
+                        float y = vy(module->getHistorySample(ch, i));
+                        if (i == 0)
+                            nvgMoveTo(vg, x, y);
+                        else
+                            nvgLineTo(vg, x, y);
+                    }
+                    // hue sweeps cyan -> magenta across the channels
+                    nvgStrokeColor(vg, nvgHSLA(0.5f + 0.35f * (float)ch / 15.f, 0.7f, 0.6f, 160));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgLineJoin(vg, NVG_ROUND);
+                    nvgStroke(vg);
+                }
+            }
+
+            // selected channel: fill, bright line and head dot
             if (n >= 2)
             {
                 nvgBeginPath(vg);
@@ -856,14 +981,15 @@ namespace
 // ------------------------------------------------------------
 // Module Widget: adds the static panel, screws, the live display, the four
 // envelope knobs with their CV jacks, the mode/shape/loop/time controls, and
-// the gate/retrigger inputs plus envelope/EOR outputs.
+// the gate/retrigger inputs plus envelope/EOR outputs. The right-click menu
+// selects which polyphony channel the display shows.
 // ------------------------------------------------------------
 struct FancyADSRWidget : ModuleWidget
 {
     // Builds the widget tree: static background, screws, the scope display,
     // row A (four knobs + four CV jacks), row B (mode switch, two shape
     // switches, the loop switch plus its light, and the time knob), and row C
-    // (two inputs + two outputs).
+    // (gate jack + TEST button, retrigger jack, two outputs).
     FancyADSRWidget(FancyADSR *module)
     {
         setModule(module);
@@ -906,6 +1032,20 @@ struct FancyADSRWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(faColX(1), cy), module, FancyADSR::TRIGGER_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(faColX(2), cy), module, FancyADSR::ENV_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(faColX(3), cy), module, FancyADSR::EOR_OUTPUT));
+    }
+
+    // Right-click menu: choose which polyphony channel the display shows.
+    void appendContextMenu(Menu *menu) override
+    {
+        FancyADSR *m = dynamic_cast<FancyADSR *>(this->module);
+        if (!m)
+            return;
+
+        menu->addChild(new MenuSeparator);
+        std::vector<std::string> labels;
+        for (int i = 0; i < FancyADSR::MAX_VOICES; ++i)
+            labels.push_back(string::f("Channel %d", i + 1));
+        menu->addChild(createIndexPtrSubmenuItem("Display channel", labels, &m->displayChannel));
     }
 };
 

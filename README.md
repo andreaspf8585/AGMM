@@ -165,7 +165,7 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 
 | Module | Description |
 |--------|-------------|
-| **FancyADSR** | Envelope generator with per-stage CV, selectable linear/exponential attack and release shapes, loop mode, and a 5 ms end-of-release (EOR) pulse. Scope shows both the ideal ADSR preview and the live output trace. |
+| **FancyADSR** | Polyphonic (up to 16-channel) envelope generator with per-stage CV, selectable linear/exponential attack and release shapes, switchable ADSR/AD modes (AD treats the gate as a trigger), loop mode, a TEST gate button, and a 5 ms end-of-release (end-of-decay in AD mode) pulse. The scope overlays the ideal envelope preview with live traces for every channel, plus stage/state chips, A/D/S/R + output readouts, a level meter and a user-adjustable time axis; the right-click menu selects which channel's readouts are shown. |
 
 ---
 
