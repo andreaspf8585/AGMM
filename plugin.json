@@ -181,7 +181,9 @@
       "slug": "HeatRev",
       "name": "HeatRev",
       "description": "",
-      "tags": ["Reverb"]
+      "tags": [
+        "Reverb"
+      ]
     },
     {
       "slug": "Ambience",
@@ -228,7 +230,8 @@
       "name": "Swapper",
       "description": "Swap signals",
       "tags": [
-        "Swap", "Effect"
+        "Swap",
+        "Effect"
       ]
     },
     {
@@ -481,6 +484,14 @@
         "Visualization",
         "Oscilloscope",
         "Signal"
+      ]
+    },
+    {
+      "slug": "Evolved",
+      "name": "Evolved",
+      "description": "Lifeform reacting to sound",
+      "tags": [
+        "Visualization"
       ]
     }
   ]

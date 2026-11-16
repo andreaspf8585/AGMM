@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 # AGMM Module Catalogue
 
-The plugin is a collection of **56 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **57 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
@@ -193,6 +193,7 @@ The plugin is a collection of **56 modules** grouped into functional families. M
 
 | Module | Description |
 |--------|-------------|
+| **Evolved** | 36 HP "evolved" ferrofluid lifeform visualiser — the big brother of Lifeform. The glossy black 3D creature (lobed blob, Rosensweig spikes, orbiting droplets, perspective, depth sorting, normal-based gloss) lives in a wide rectangular glass tank and has a small brain of its own. It reacts to sound (three bands, onset detector, silence detector) but does not need it: it has **energy**, gets hungry, hunts food pellets, wanders, naps on the tank floor and remembers where it ate. It learns the **tempo** (onset intervals → beat period/phase) and anticipates the next beat even when a hit is missing. It senses the **mouse** — leaning spikes toward it, reaching out with droplets, swimming after it — and keeps a **trust** value: gentle motion earns trust, fast aggressive motion makes it wary and it darts away. Moods: RESTING, WANDERING, HUNTING, CURIOUS, DANCING, STARTLED. Controls: FIELD, MOTION, VISC, SPIKES, SENS, GLOSS, INTEL, CURIO, FOOD, SIZE (all with CV). Buttons: PAUSE, RESET, REACT (audio reactive), MOUSE (mouse sense). Outputs: ENV, FIELD, X, Y (±5 V), ENERGY (0–10 V), EAT (trigger). Purple bioluminescence in the dark, cyan-glowing food pellets. The brain runs in the module so outputs keep working even when the display is not visible. |
 | **Lifeform** | Audio-reactive 3D ferrofluid visualiser. A glossy black lobed blob with ~140 Rosensweig spikes and orbiting droplets tumbles inside a glass dish. Low/mid/high bands, onset detection and silence detection drive shape, spikes and droplet orbits. |
 | **Plot** | 24 HP polyphonic oscilloscope / signal visualizer. Two polyphonic inputs (A and B) and two polyphonic thru outputs. Free / Auto / Normal trigger with Schmitt hysteresis and sub-sample interpolation, external trigger input, 10 × 8 voltage/time grid, min/max envelope traces, display hold, and per-window statistics (Vpp, Max, Min, RMS, Avg, frequency) for the focus channel of each input. |
 
@@ -218,8 +219,8 @@ The plugin is a collection of **56 modules** grouped into functional families. M
 | Envelopes | 1 | FancyADSR |
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
-| Visualisers | 2 | Lifeform, Plot |
-| **Total** | **56** | |
+| Visualisers | 3 | Evolved, Lifeform, Plot |
+| **Total** | **57** | |
 ## Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
