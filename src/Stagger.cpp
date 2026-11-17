@@ -24,17 +24,18 @@
 // detune against each other, giving a wide, unstable, "staggering" tone.
 //
 // Controls:
-//   FREQ         Base frequency (10 Hz .. 6 kHz, logarithmic)
+//   FREQ         Base frequency (10 Hz .. 6 kHz, logarithmic), with the
+//                1 V/oct pitch input jack directly below it
 //   CHAOS        Depth of the random pitch drift
 //   WAVE         Waveform (sine / triangle / saw / square)
 //   PW           Pulse width of the square wave
 //   MULT         Chaos multiplier (x1, x2, x3, x5, x10)
 //   RANGE        CV input range (+-5 V or +-10 V)
 //   RESET        Resets the chaos drift to zero on a rising edge
-//   V/OCT        1 V/oct pitch input (polyphonic)
 //
-// Each of the four knob rows also has a dedicated CV input and attenuverter,
-// so chaos depth, waveform, and pulse width can all be modulated.
+// The chaos, waveform and pulse width knobs each have a dedicated CV input
+// and attenuverter, so they can all be modulated. The FREQ knob has only the
+// polyphonic 1 V/oct input (no attenuverter).
 //
 // Outputs:
 //   OUT L, OUT R   Polyphonic VCOs, one voice per channel of the 1 V/oct input.
@@ -80,14 +81,15 @@ static float stCol(int i) { return 42.f + 72.f * (float)i; }
 static const float ST_HDR_A = 122.f, ST_TOP_A = 130.f, ST_H_A = 84.f;
 static const float ST_A_KNOB = ST_TOP_A + 30.f, ST_A_CAP = ST_TOP_A + 50.f, ST_A_JACK = ST_TOP_A + 67.f;
 
-// Row B: MULT, RANGE, RESET, V/OCT. Control at +30
+// Row B: MULT, RANGE, RESET (3 cells, same columns as row C). Control at +30
 static const float ST_HDR_B = 224.f, ST_TOP_B = 232.f, ST_H_B = 50.f;
 static const float ST_B_Y = ST_TOP_B + 30.f;
 
 // Row C: CHAOS light, OUT L, OUT R. Control at +30
 static const float ST_HDR_C = 292.f, ST_TOP_C = 300.f, ST_H_C = 50.f;
 static const float ST_C_Y = ST_TOP_C + 30.f;
-// Returns the horizontal centre of the bottom-row cell i (0..2).
+// Returns the horizontal centre of the 3-cell row column i (0..2), used by
+// the CONTROL row and the OUTPUT row.
 static float stColC(int i) { return 78.f + 72.f * (float)i; }
 
 // -----------------------------------------------------------------------------
@@ -213,8 +215,8 @@ struct StFreqQ : rack::engine::ParamQuantity
 // Module
 // ============================================================================
 // Polyphonic stereo VCO with two independent filtered-random pitch drifts
-// (one per channel), configurable waveforms, and CV control over pitch,
-// chaos depth, waveform and pulse width.
+// (one per channel), configurable waveforms, and CV control over pitch
+// (1 V/oct), chaos depth, waveform and pulse width.
 struct Stagger : Module
 {
     enum ParamId
@@ -224,7 +226,6 @@ struct Stagger : Module
         CHAOS_MULT_PARAM,
         WAVE_PARAM,
         PW_PARAM,
-        PITCH_ATTEN_PARAM,
         CHAOS_ATTEN_PARAM,
         WAVE_ATTEN_PARAM,
         PW_ATTEN_PARAM,
@@ -233,8 +234,7 @@ struct Stagger : Module
     };
     enum InputId
     {
-        CV_INPUT,
-        PITCH_CV_INPUT,
+        CV_INPUT, // 1 V/oct pitch input (polyphonic), shown in the FREQ cell
         CHAOS_CV_INPUT,
         WAVE_CV_INPUT,
         PW_CV_INPUT,
@@ -304,14 +304,12 @@ struct Stagger : Module
         configSwitch(CHAOS_MULT_PARAM, 0.f, 4.f, 0.f, "Chaos multiplier", {"x1", "x2", "x3", "x5", "x10"});
         configSwitch(WAVE_PARAM, 0.f, 3.f, 0.f, "Waveform", {"Sine", "Triangle", "Saw", "Square"});
         configParam(PW_PARAM, 0.f, 1.f, 0.5f, "Pulse width", "%", 0.f, 100.f);
-        configParam(PITCH_ATTEN_PARAM, -1.f, 1.f, 0.f, "Pitch CV attenuverter", "%", 0.f, 100.f);
         configParam(CHAOS_ATTEN_PARAM, -1.f, 1.f, 0.f, "Chaos CV attenuverter", "%", 0.f, 100.f);
         configParam(WAVE_ATTEN_PARAM, -1.f, 1.f, 0.f, "Waveform CV attenuverter", "%", 0.f, 100.f);
         configParam(PW_ATTEN_PARAM, -1.f, 1.f, 0.f, "Pulse width CV attenuverter", "%", 0.f, 100.f);
         configSwitch(CV_RANGE_PARAM, 0.f, 1.f, 0.f, "CV range", {"+-5V", "+-10V"});
 
         configInput(CV_INPUT, "1V/octave pitch");
-        configInput(PITCH_CV_INPUT, "Pitch modulation CV");
         configInput(CHAOS_CV_INPUT, "Chaos depth modulation CV");
         configInput(WAVE_CV_INPUT, "Waveform selection CV");
         configInput(PW_CV_INPUT, "Pulse width modulation CV");
@@ -352,7 +350,6 @@ struct Stagger : Module
 
         float chaosMultiplier = multTable[clamp((int)std::nearbyint(chaosMultIndex), 0, 4)];
 
-        float pitchAtten = params[PITCH_ATTEN_PARAM].getValue();
         float chaosAtten = params[CHAOS_ATTEN_PARAM].getValue();
         float waveAtten = params[WAVE_ATTEN_PARAM].getValue();
         float pwAtten = params[PW_ATTEN_PARAM].getValue();
@@ -459,17 +456,16 @@ struct Stagger : Module
 
         for (int c = 0; c < channels; ++c)
         {
-            float pitchCV = inputs[PITCH_CV_INPUT].getPolyVoltage(c) * cvVoltageScale;
             float chaosCV = inputs[CHAOS_CV_INPUT].getPolyVoltage(c) * cvVoltageScale;
             float waveCV = inputs[WAVE_CV_INPUT].getPolyVoltage(c) * cvVoltageScale;
             float pwCV = inputs[PW_CV_INPUT].getPolyVoltage(c) * cvVoltageScale;
 
-            float modulatedPitchCV = pitchCV * pitchAtten;
             float modulatedChaosCV = chaosCV * chaosAtten;
             float modulatedWaveCV = waveCV * waveAtten;
             float modulatedPwCV = pwCV * pwAtten;
 
-            float totalPitchCV = basePitchVoltage + inputs[CV_INPUT].getPolyVoltage(c) + modulatedPitchCV;
+            // Pitch: knob + 1 V/oct input (no attenuverter)
+            float totalPitchCV = basePitchVoltage + inputs[CV_INPUT].getPolyVoltage(c);
 
             float chaosDepth = chaosKnob + modulatedChaosCV / 5.0f;
             chaosDepth = math::clamp(chaosDepth, 0.0f, 1.0f);
@@ -569,8 +565,9 @@ namespace
     // Panel background: title, display frame, one labelled cell per control
     // ------------------------------------------------------------
     // Static artwork: base panel, display bezel, the VCO section with its four
-    // knob cells and CV/ATT captions, the CONTROL section with four cells, and
-    // the OUTPUT section with its three cells.
+    // knob cells (FREQ has a centred V/OCT caption, the others CV/ATT
+    // captions), the CONTROL section with three cells, and the OUTPUT section
+    // with its three cells.
     struct STPanel : TransparentWidget
     {
         STPanel() { box.size = Vec(ST_W, ST_H); }
@@ -587,14 +584,22 @@ namespace
             {
                 float cx = stCol(i);
                 ag::cell(vg, cx, ST_TOP_A, ST_CW, ST_H_A, a[i]);
-                ag::text(vg, cx - 16.f, ST_A_CAP, "CV", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
-                ag::text(vg, cx + 16.f, ST_A_CAP, "ATT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+                if (i == 0)
+                {
+                    // FREQ: single 1 V/oct jack, no attenuverter
+                    ag::text(vg, cx, ST_A_CAP, "V/OCT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+                }
+                else
+                {
+                    ag::text(vg, cx - 16.f, ST_A_CAP, "CV", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+                    ag::text(vg, cx + 16.f, ST_A_CAP, "ATT", 7.f, ag::dim(), ag::ALIGN_C, 0.5f);
+                }
             }
 
             ag::sectionHeader(vg, ST_W, ST_HDR_B, "CONTROL", 10.f);
-            const char *b[4] = {"MULT", "RANGE", "RESET", "V/OCT"};
-            for (int i = 0; i < 4; ++i)
-                ag::cell(vg, stCol(i), ST_TOP_B, ST_CW, ST_H_B, b[i]);
+            const char *b[3] = {"MULT", "RANGE", "RESET"};
+            for (int i = 0; i < 3; ++i)
+                ag::cell(vg, stColC(i), ST_TOP_B, ST_CW, ST_H_B, b[i]);
 
             ag::sectionHeader(vg, ST_W, ST_HDR_C, "OUTPUT", 10.f);
             ag::cell(vg, stColC(0), ST_TOP_C, ST_CW, ST_H_C, "CHAOS");
@@ -778,8 +783,8 @@ namespace
 struct StaggerWidget : ModuleWidget
 {
     // Builds the widget tree: static panel, screws, display, row A
-    // (knob + CV + attenuverter per cell), row B (mult, range, reset, v/oct)
-    // and row C (chaos LED + two output jacks).
+    // (FREQ knob + V/OCT jack; chaos/wave/PW knob + CV + attenuverter),
+    // row B (mult, range, reset) and row C (chaos LED + two output jacks).
     StaggerWidget(Stagger *module)
     {
         setModule(module);
@@ -793,23 +798,26 @@ struct StaggerWidget : ModuleWidget
 
         addChild(new STDisplay(module));
 
-        // Row A: knob, CV input (left) and attenuverter (right) per cell
-        const int knob[4] = {Stagger::PITCH_PARAM, Stagger::CHAOS_PARAM, Stagger::WAVE_PARAM, Stagger::PW_PARAM};
-        const int att[4] = {Stagger::PITCH_ATTEN_PARAM, Stagger::CHAOS_ATTEN_PARAM, Stagger::WAVE_ATTEN_PARAM, Stagger::PW_ATTEN_PARAM};
-        const int cv[4] = {Stagger::PITCH_CV_INPUT, Stagger::CHAOS_CV_INPUT, Stagger::WAVE_CV_INPUT, Stagger::PW_CV_INPUT};
-        for (int i = 0; i < 4; ++i)
+        // Row A, FREQ cell: knob and the 1 V/oct jack, centred (no attenuverter)
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stCol(0), ST_A_KNOB), module, Stagger::PITCH_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(0), ST_A_JACK), module, Stagger::CV_INPUT));
+
+        // Row A, CHAOS / WAVE / PW cells: knob, CV input (left) and attenuverter (right)
+        const int knob[3] = {Stagger::CHAOS_PARAM, Stagger::WAVE_PARAM, Stagger::PW_PARAM};
+        const int att[3] = {Stagger::CHAOS_ATTEN_PARAM, Stagger::WAVE_ATTEN_PARAM, Stagger::PW_ATTEN_PARAM};
+        const int cv[3] = {Stagger::CHAOS_CV_INPUT, Stagger::WAVE_CV_INPUT, Stagger::PW_CV_INPUT};
+        for (int i = 0; i < 3; ++i)
         {
-            float cx = stCol(i);
+            float cx = stCol(i + 1);
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, ST_A_KNOB), module, knob[i]));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, ST_A_JACK), module, cv[i]));
             addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, ST_A_JACK), module, att[i]));
         }
 
         // Row B
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stCol(0), ST_B_Y), module, Stagger::CHAOS_MULT_PARAM));
-        addParam(createParamCentered<CKSS>(Vec(stCol(1), ST_B_Y), module, Stagger::CV_RANGE_PARAM));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(2), ST_B_Y), module, Stagger::CHAOS_RESET_INPUT));
-        addInput(createInputCentered<DarkPJ301MPort>(Vec(stCol(3), ST_B_Y), module, Stagger::CV_INPUT));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stColC(0), ST_B_Y), module, Stagger::CHAOS_MULT_PARAM));
+        addParam(createParamCentered<CKSS>(Vec(stColC(1), ST_B_Y), module, Stagger::CV_RANGE_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(Vec(stColC(2), ST_B_Y), module, Stagger::CHAOS_RESET_INPUT));
 
         // Row C: chaos light, then the outputs
         addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(stColC(0), ST_C_Y), module, Stagger::CHAOS_LIGHT));

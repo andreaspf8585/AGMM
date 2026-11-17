@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 #include <algorithm>
 
 // ============================================================
@@ -27,6 +29,10 @@
 // "mutation probability" knob and a "wait cycles" knob that snaps to
 // 0/4/8/16 cycles (0 = every cycle).
 //
+// Voltage knobs accept typed input in their right-click field: plain volts
+// ("2.5", "2.5v") or a note name with octave ("a#4v", "c3", "eb5"). Note
+// entry uses C4 = 0 V (1 V/oct) and switches the voltage range to -10..10.
+//
 // Outputs: CV out, inverted CV out, a short cycle gate (on each completed
 // forward/reverse cycle), and a short STEP trigger (on each visited clock).
 // Inputs: clock, reset, and a randomize trigger (which randomizes all step
@@ -42,13 +48,14 @@
 // File structure:
 //   1. Layout constants (38 HP = 570x380 px).
 //   2. WaitCyclesParamQuantity (snaps the mutation wait knob to 0/4/8/16).
-//   3. PsySeq module: state, mapping, randomization helpers, JSON
+//   3. VoltageParamQuantity (volt/note entry for the step voltage knobs).
+//   4. PsySeq module: state, mapping, randomization helpers, JSON
 //      persistence, and process().
-//   4. Anonymous-namespace UI: colour helpers, blockHeader, PSPanelBackground,
+//   5. Anonymous-namespace UI: colour helpers, blockHeader, PSPanelBackground,
 //      PSGridWidget, PSStatusWidget.
-//   5. PsySeqWidget: places controls, jacks, the grid, the status screen,
+//   6. PsySeqWidget: places controls, jacks, the grid, the status screen,
 //      the randomize button and the context menu.
-//   6. Model registration.
+//   7. Model registration.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -107,6 +114,18 @@ struct WaitCyclesParamQuantity : rack::engine::ParamQuantity
         }
         ParamQuantity::setValue(nearest);
     }
+};
+
+// ------------------------------------------------------------
+// Custom ParamQuantity for the step voltage knobs.
+// Shows the knob in volts (using the module's current range) and accepts
+// typed volts or note names ("a#4v"). Notes switch the range to -10..10.
+// Member functions are defined after the PsySeq struct.
+// ------------------------------------------------------------
+struct VoltageParamQuantity : rack::engine::ParamQuantity
+{
+    std::string getDisplayValueString() override;
+    void setDisplayValueString(std::string s) override;
 };
 
 // ------------------------------------------------------------
@@ -202,7 +221,8 @@ struct PsySeq : Module
 
         for (int i = 0; i < 64; i++)
         {
-            configParam(KNOB_OFFSET + i, 0.f, 1.f, 0.f, string::f("Step %d voltage", i + 1));
+            configParam<VoltageParamQuantity>(KNOB_OFFSET + i, 0.f, 1.f, 0.f,
+                                              string::f("Step %d voltage", i + 1), " V");
             configLight(LIGHT_OFFSET + i, string::f("Step %d", i + 1));
             configParam(PROB_OFFSET + i, 0.f, 1.f, 1.f,
                         string::f("Step %d visit probability", i + 1), "%", 0.f, 100.f);
@@ -253,7 +273,7 @@ struct PsySeq : Module
     }
 
     // Sets the voltage range and immediately refreshes the held CV (called
-    // from the context menu's "Voltage range" submenu).
+    // from the context menu's "Voltage range" submenu and by note entry).
     void setVoltageRange(float min, float max)
     {
         voltMin = min;
@@ -463,6 +483,154 @@ struct PsySeq : Module
         }
     }
 };
+
+// ------------------------------------------------------------
+// VoltageParamQuantity implementation
+// ------------------------------------------------------------
+namespace
+{
+    // Parses a note name with octave such as "a#4", "c3", "eb5", "g-1"
+    // (case-insensitive, optional trailing 'v', spaces ignored) into volts
+    // with C4 = 0 V at 1 V/oct. Returns false if the text is not a note.
+    bool psParseNote(const std::string &in, float &voltsOut)
+    {
+        std::string s;
+        for (char ch : in)
+        {
+            if (ch == ' ' || ch == '\t')
+                continue;
+            s += (char)std::tolower((unsigned char)ch);
+        }
+        if (!s.empty() && s.back() == 'v')
+            s.pop_back();
+        if (s.size() < 2)
+            return false;
+
+        int semi;
+        switch (s[0])
+        {
+        case 'c':
+            semi = 0;
+            break;
+        case 'd':
+            semi = 2;
+            break;
+        case 'e':
+            semi = 4;
+            break;
+        case 'f':
+            semi = 5;
+            break;
+        case 'g':
+            semi = 7;
+            break;
+        case 'a':
+            semi = 9;
+            break;
+        case 'b':
+            semi = 11;
+            break;
+        default:
+            return false;
+        }
+
+        size_t i = 1;
+        if (i < s.size() && s[i] == '#')
+        {
+            semi += 1;
+            ++i;
+        }
+        else if (i + 1 < s.size() && s[i] == 'b')
+        {
+            semi -= 1;
+            ++i;
+        }
+
+        bool neg = false;
+        if (i < s.size() && s[i] == '-')
+        {
+            neg = true;
+            ++i;
+        }
+        if (i >= s.size())
+            return false;
+        int oct = 0;
+        for (; i < s.size(); ++i)
+        {
+            if (s[i] < '0' || s[i] > '9')
+                return false;
+            oct = oct * 10 + (s[i] - '0');
+            if (oct > 100)
+                return false;
+        }
+        if (neg)
+            oct = -oct;
+
+        voltsOut = (float)(oct - 4) + (float)semi / 12.f;
+        return true;
+    }
+
+    // Parses plain volts such as "2.5" or "2.5v".
+    bool psParseVolts(const std::string &in, float &voltsOut)
+    {
+        std::string s;
+        for (char ch : in)
+        {
+            if (ch == ' ' || ch == '\t')
+                continue;
+            s += (char)std::tolower((unsigned char)ch);
+        }
+        if (!s.empty() && s.back() == 'v')
+            s.pop_back();
+        if (s.empty())
+            return false;
+        char *end = nullptr;
+        float v = std::strtof(s.c_str(), &end);
+        if (end == s.c_str() || *end != '\0')
+            return false;
+        voltsOut = v;
+        return true;
+    }
+} // namespace
+
+// Shows the knob value as volts in the module's current range.
+std::string VoltageParamQuantity::getDisplayValueString()
+{
+    PsySeq *m = dynamic_cast<PsySeq *>(module);
+    if (!m)
+        return ParamQuantity::getDisplayValueString();
+    float v = m->voltMin + getValue() * (m->voltMax - m->voltMin);
+    return string::f("%.3f", v);
+}
+
+// Accepts a note ("a#4v") or plain volts. Notes switch the range to
+// -10..10 V first; the knob is then set so the output equals the typed
+// voltage.
+void VoltageParamQuantity::setDisplayValueString(std::string s)
+{
+    PsySeq *m = dynamic_cast<PsySeq *>(module);
+    if (!m)
+    {
+        ParamQuantity::setDisplayValueString(s);
+        return;
+    }
+
+    float volts;
+    if (psParseNote(s, volts))
+    {
+        if (m->voltMin != -10.f || m->voltMax != 10.f)
+            m->setVoltageRange(-10.f, 10.f);
+    }
+    else if (!psParseVolts(s, volts))
+    {
+        return; // unrecognised text: ignore
+    }
+
+    float range = m->voltMax - m->voltMin;
+    float norm = (range > 0.f) ? (volts - m->voltMin) / range : 0.f;
+    setValue(math::clamp(norm, 0.f, 1.f));
+    m->updateHeldVoltage();
+}
 
 // Everything below lives in an anonymous namespace so the names cannot clash
 // with the same-named helpers in the other module files.
