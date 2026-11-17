@@ -15,28 +15,22 @@
 // OVERVIEW
 // -----------------------------------------------------------------------------
 // CellAutoGate runs a one-dimensional elementary cellular automaton (Wolfram
-// rules 0-255) on a 64-cell row and turns the cells into a 1-16 channel
-// polyphonic gate signal. Each channel samples the automaton at an evenly
-// spaced position along the row, so different channels fire different
-// rhythms from the same rule.
+// rules 0-255) on a 64- or 128-cell row (GRID switch) and turns the cells into
+// a 1-16 channel polyphonic gate signal. Each channel samples the automaton at
+// an evenly spaced position along the row, so different channels fire
+// different rhythms from the same rule.
 //
 // The module can be stepped either by its internal clock (SPEED knob) or by
-// an external clock patch into CLOCK. RANDOM fills the row with random bits,
-// RESET restarts from a single centre cell. The display shows the most recent
-// 64 rows of history (newest brightest), with a status row above and a rule
-// truth-table glyph row below.
+// an external clock patch into CLOCK. RANDOM picks a random rule (turning the
+// RULE knob) and fills the row with random bits, RESET restarts from a single
+// centre cell. Both have trigger inputs. The WRAP switch selects circular or
+// dead (zero) edges. The display shows the most recent rows of history (newest
+// brightest), with a status row above and a rule truth-table glyph row below.
 //
 // File structure:
 //   1. Layout constants (32 HP = 480x380 px).
-//   2. CellAutoGate module: automaton state, ruleset, history buffer,
-//      clocking and poly gate outputs.
-//   3. Anonymous-namespace UI helpers and widgets:
-//        - theme colours / font / text / plate / cell helpers
-//        - CAPanelBackground: static artwork
-//        - CellularDisplayWidget: history display (static grid + live cells)
-//        - CAStatusWidget: status text row above the display
-//        - CARuleTableWidget: rule truth-table glyphs under the display
-//        - TCaCyanLight: custom cyan LED widget
+//   2. Row type + CellAutoGate module.
+//   3. Anonymous-namespace UI helpers and widgets.
 //   4. CellAutoGateWidget: places all controls and LEDs.
 //   5. Model registration.
 // -----------------------------------------------------------------------------
@@ -49,7 +43,8 @@
 //   y  32      status readout (own row above the display)
 //   y  42-306  display bezel; display itself 256 x 256 at (112, 46)
 //   y  46-296  left column: RULE / SPEED / POLY / CLOCK (label above control)
-//   y  46-146  right column: RANDOM / RESET;  y 250-296: GATES output
+//   y  46-240  right column: RANDOM / RESET (button + CV in), GRID, WRAP
+//   y 250-296  right column: GATES output
 //   y 314-330  rule table glyphs (own row under the display)
 //   y 344      16 gate LEDs
 //   y 356      LED caption
@@ -57,11 +52,10 @@
 //
 // No text is ever drawn over the display; every control is inside its plate.
 // =============================================================================
-static const int CELL_SIZE = 4;
-static const int COLS = 64; // fits exactly in a uint64_t
-static const int ROWS = 64;
-static const float DISP_W = COLS * CELL_SIZE;         // 256
-static const float DISP_H = ROWS * CELL_SIZE;         // 256
+static const int MAX_COLS = 128; // doubled resolution
+static const int BASE_COLS = 64; // default resolution
+static const float DISP_W = 256.f;
+static const float DISP_H = 256.f;
 static const float PANEL_W = RACK_GRID_WIDTH * 32;    // 480
 static const float PANEL_H = RACK_GRID_HEIGHT;        // 380
 static const float DISP_X = (PANEL_W - DISP_W) / 2.f; // 112
@@ -86,12 +80,41 @@ static const float CA_CLOCK_TOP = 250.f, CA_CLOCK_H = 46.f;
 // Right column
 static const float CA_RAND_TOP = 46.f;
 static const float CA_RESET_TOP = 100.f;
+static const float CA_GRID_TOP = 154.f;
+static const float CA_EDGE_TOP = 200.f;
 static const float CA_GATES_TOP = 250.f;
 static const float CA_SMALL_H = 46.f;
+static const float CA_SWITCH_H = 40.f;
 
 static const float CA_LABEL_DY = 10.f;
-static const float CA_KNOB_DY = 36.f; // knob plates (h 58)
-static const float CA_JACK_DY = 31.f; // jack / button plates (h 46)
+static const float CA_KNOB_DY = 36.f;   // knob plates (h 58)
+static const float CA_JACK_DY = 31.f;   // jack / button plates (h 46)
+static const float CA_SWITCH_DY = 27.f; // switch plates (h 40)
+static const float CA_PAIR_DX = 20.f;   // button / jack offset in paired plates
+
+// =============================================================================
+// Row: up to 128 cells stored in two 64-bit words
+// =============================================================================
+struct Row
+{
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+
+    bool get(int i) const
+    {
+        return i < 64 ? ((lo >> i) & 1ULL) : ((hi >> (i - 64)) & 1ULL);
+    }
+    void set(int i, bool v)
+    {
+        uint64_t &w = (i < 64) ? lo : hi;
+        int b = i & 63;
+        if (v)
+            w |= (1ULL << b);
+        else
+            w &= ~(1ULL << b);
+    }
+    bool any() const { return lo != 0 || hi != 0; }
+};
 
 // =============================================================================
 // Module
@@ -105,11 +128,15 @@ struct CellAutoGate : Module
         POLY_PARAM,
         RANDOM_PARAM,
         RESET_PARAM,
+        RES_PARAM,  // 0 = 64x64, 1 = 128x128
+        EDGE_PARAM, // 0 = dead edges, 1 = wrap (default)
         PARAMS_LEN
     };
     enum InputId
     {
         CLOCK_INPUT,
+        RESET_INPUT,
+        RANDOM_INPUT,
         INPUTS_LEN
     };
     enum OutputId
@@ -124,23 +151,26 @@ struct CellAutoGate : Module
     };
 
     // Automaton state: one bit per column
-    uint64_t currentRow = 0;
+    Row currentRow;
+    int cols = BASE_COLS; // active grid size (cols == rows)
+    bool wrapEdges = true;
     int ruleset[8] = {0};
 
     // History ring buffer (read by the UI thread; a torn read is only cosmetic)
-    std::array<uint64_t, ROWS> history{};
+    std::array<Row, MAX_COLS> history{};
     int histHead = 0; // next write index
     int histCount = 0;
 
     // Timing / triggers
     float timeSinceLastStep = 0.f;
     dsp::SchmittTrigger randomTrigger, resetTrigger, clockTrigger;
+    dsp::SchmittTrigger randomInTrigger, resetInTrigger;
 
     int polyChannels = 1;
     int lastRule = -1;
     bool clockActive = false;
 
-    // Constructor: configures params, input, output and lights, builds the
+    // Constructor: configures params, inputs, output and lights, builds the
     // initial ruleset from the RULE knob and restarts the automaton.
     CellAutoGate()
     {
@@ -153,9 +183,14 @@ struct CellAutoGate : Module
         getParamQuantity(POLY_PARAM)->snapEnabled = true;
         getParamQuantity(SPEED_PARAM)->snapEnabled = true;
 
-        configButton(RANDOM_PARAM, "Randomize");
+        configButton(RANDOM_PARAM, "Randomize rule and row");
         configButton(RESET_PARAM, "Reset");
+        configSwitch(RES_PARAM, 0.f, 1.f, 0.f, "Grid resolution", {"64 x 64", "128 x 128"});
+        configSwitch(EDGE_PARAM, 0.f, 1.f, 1.f, "Edges", {"Dead (zero)", "Wrap (circular)"});
+
         configInput(CLOCK_INPUT, "Clock (overrides the speed knob)");
+        configInput(RESET_INPUT, "Reset trigger");
+        configInput(RANDOM_INPUT, "Randomize trigger");
         configOutput(GATE_OUTPUT, "Gates (polyphonic)");
 
         for (int i = 0; i < 16; ++i)
@@ -179,27 +214,28 @@ struct CellAutoGate : Module
     }
 
     // Writes one row into the history ring buffer, advancing the head and
-    // saturating the count at ROWS.
-    void pushHistory(uint64_t row)
+    // saturating the count at the active grid size.
+    void pushHistory(const Row &row)
     {
         history[histHead] = row;
-        histHead = (histHead + 1) % ROWS;
-        if (histCount < ROWS)
+        histHead = (histHead + 1) % cols;
+        if (histCount < cols)
             histCount++;
     }
 
-    // Row r (0 = oldest) for display
     // Returns the r-th history row counting from the oldest stored row.
-    uint64_t getHistoryRow(int r) const
+    Row getHistoryRow(int r) const
     {
-        int oldest = (histHead - histCount + ROWS * 2) % ROWS;
-        return history[(oldest + r) % ROWS];
+        int n = cols;
+        int oldest = (histHead - histCount + n * 2) % n;
+        return history[(oldest + r) % n];
     }
 
     // Restarts the automaton from a single centre cell and clears history.
     void restart()
     {
-        currentRow = 1ULL << (COLS / 2);
+        currentRow = Row();
+        currentRow.set(cols / 2, true);
         histHead = histCount = 0;
         pushHistory(currentRow);
     }
@@ -208,37 +244,105 @@ struct CellAutoGate : Module
     // history to just that row.
     void randomize()
     {
-        uint64_t r = 0;
-        for (int i = 0; i < COLS; ++i)
+        Row r;
+        for (int i = 0; i < cols; ++i)
             if (random::uniform() > 0.5f)
-                r |= (1ULL << i);
+                r.set(i, true);
         currentRow = r;
         histHead = histCount = 0;
         pushHistory(currentRow);
     }
 
-    // Advances the automaton by one generation, wrapping at the row edges
-    // (circular neighbourhood), and pushes the new row into history.
+    // Picks a random rule, turns the RULE knob to it, and randomizes the row.
+    void randomizeAll()
+    {
+        int rule = (int)(random::u32() % 256u);
+        params[RULE_PARAM].setValue((float)rule);
+        updateRuleset(rule);
+        lastRule = rule; // so process() doesn't see a "knob change" and restart
+        randomize();
+    }
+
+    // Switches grid size (64 or 128) and restarts.
+    void setResolution(int newCols)
+    {
+        cols = newCols;
+        restart();
+    }
+
+    // Advances the automaton by one generation (circular or dead edges) and
+    // pushes the new row into history.
     void stepAutomaton()
     {
-        uint64_t next = 0;
-        for (int i = 0; i < COLS; ++i)
+        Row next;
+        for (int i = 0; i < cols; ++i)
         {
-            int left = (currentRow >> ((i + COLS - 1) % COLS)) & 1;
-            int center = (currentRow >> i) & 1;
-            int right = (currentRow >> ((i + 1) % COLS)) & 1;
+            int left, right;
+            if (i == 0)
+                left = wrapEdges ? currentRow.get(cols - 1) : 0;
+            else
+                left = currentRow.get(i - 1);
+            if (i == cols - 1)
+                right = wrapEdges ? currentRow.get(0) : 0;
+            else
+                right = currentRow.get(i + 1);
+            int center = currentRow.get(i);
             int index = (left << 2) | (center << 1) | right;
-            next |= (uint64_t)ruleset[index] << i;
+            if (ruleset[index])
+                next.set(i, true);
         }
         currentRow = next;
         pushHistory(currentRow);
     }
 
-    // Main callback: rebuilds the ruleset if the rule changed, applies the
-    // RANDOM/RESET buttons, advances the automaton on the external clock or
-    // the internal SPEED timer, then writes the poly gate outputs and LEDs.
+    // Persist automaton state with the patch.
+    json_t *dataToJson() override
+    {
+        json_t *root = json_object();
+        json_object_set_new(root, "rowLo", json_integer((json_int_t)currentRow.lo));
+        json_object_set_new(root, "rowHi", json_integer((json_int_t)currentRow.hi));
+        json_object_set_new(root, "cols", json_integer(cols));
+        return root;
+    }
+
+    void dataFromJson(json_t *root) override
+    {
+        int rule = (int)params[RULE_PARAM].getValue();
+        updateRuleset(rule);
+        lastRule = rule;
+        wrapEdges = params[EDGE_PARAM].getValue() > 0.5f;
+
+        json_t *c = json_object_get(root, "cols");
+        cols = (c && json_integer_value(c) == MAX_COLS) ? MAX_COLS : BASE_COLS;
+
+        Row r;
+        json_t *lo = json_object_get(root, "rowLo");
+        json_t *hi = json_object_get(root, "rowHi");
+        if (lo)
+            r.lo = (uint64_t)json_integer_value(lo);
+        if (hi)
+            r.hi = (uint64_t)json_integer_value(hi);
+        if (cols == BASE_COLS)
+            r.hi = 0;
+        if (!r.any())
+            r.set(cols / 2, true);
+        currentRow = r;
+        histHead = histCount = 0;
+        pushHistory(currentRow);
+    }
+
+    // Main callback: syncs rule / grid / edge settings, applies the
+    // RANDOM/RESET buttons and inputs, advances the automaton on the external
+    // clock or the internal SPEED timer, then writes the poly gate outputs and
+    // LEDs.
     void process(const ProcessArgs &args) override
     {
+        wrapEdges = params[EDGE_PARAM].getValue() > 0.5f;
+
+        int wantCols = params[RES_PARAM].getValue() > 0.5f ? MAX_COLS : BASE_COLS;
+        if (wantCols != cols)
+            setResolution(wantCols);
+
         int rule = (int)params[RULE_PARAM].getValue();
         if (rule != lastRule)
         {
@@ -254,9 +358,14 @@ struct CellAutoGate : Module
             outputs[GATE_OUTPUT].setChannels(polyChannels);
         }
 
-        if (randomTrigger.process(params[RANDOM_PARAM].getValue()))
-            randomize();
-        if (resetTrigger.process(params[RESET_PARAM].getValue()))
+        bool rnd = randomTrigger.process(params[RANDOM_PARAM].getValue());
+        rnd |= randomInTrigger.process(inputs[RANDOM_INPUT].getVoltage(), 0.1f, 2.f);
+        if (rnd)
+            randomizeAll();
+
+        bool rst = resetTrigger.process(params[RESET_PARAM].getValue());
+        rst |= resetInTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 2.f);
+        if (rst)
             restart();
 
         clockActive = inputs[CLOCK_INPUT].isConnected();
@@ -282,10 +391,10 @@ struct CellAutoGate : Module
         int N = polyChannels;
         for (int ch = 0; ch < N; ++ch)
         {
-            int pos = ((ch + 1) * COLS) / (N + 1);
-            if (pos >= COLS)
-                pos = COLS - 1;
-            bool on = (currentRow >> pos) & 1;
+            int pos = ((ch + 1) * cols) / (N + 1);
+            if (pos >= cols)
+                pos = cols - 1;
+            bool on = currentRow.get(pos);
             outputs[GATE_OUTPUT].setVoltage(on ? 10.f : 0.f, ch);
             lights[GATE_LIGHT_1 + ch].setSmoothBrightness(on ? 1.f : 0.f, args.sampleTime);
         }
@@ -401,6 +510,8 @@ namespace
             // Right column (output tinted)
             cell(vg, CA_RIGHT_X, CA_RAND_TOP, CA_SMALL_H, "RANDOM");
             cell(vg, CA_RIGHT_X, CA_RESET_TOP, CA_SMALL_H, "RESET");
+            cell(vg, CA_RIGHT_X, CA_GRID_TOP, CA_SWITCH_H, "2X GRID");
+            cell(vg, CA_RIGHT_X, CA_EDGE_TOP, CA_SWITCH_H, "WRAP");
             cell(vg, CA_RIGHT_X, CA_GATES_TOP, CA_SMALL_H, "GATES", true);
 
             // LED caption
@@ -423,7 +534,8 @@ namespace
             box.size = Vec(DISP_W, DISP_H);
         }
 
-        // Static layer: dark display fill and a faint 8-cell grid.
+        // Static layer: dark display fill and a faint 8x8 grid (the grid
+        // lines stay 32 px apart at both resolutions).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -433,14 +545,14 @@ namespace
             nvgFillColor(vg, nvgRGB(0x05, 0x08, 0x0c));
             nvgFill(vg);
 
-            // Faint grid
             nvgBeginPath(vg);
-            for (int i = 0; i <= COLS; i += 8)
+            for (int i = 0; i <= 8; ++i)
             {
-                nvgMoveTo(vg, i * CELL_SIZE + 0.5f, 0);
-                nvgLineTo(vg, i * CELL_SIZE + 0.5f, DISP_H);
-                nvgMoveTo(vg, 0, i * CELL_SIZE + 0.5f);
-                nvgLineTo(vg, DISP_W, i * CELL_SIZE + 0.5f);
+                float p = i * (DISP_W / 8.f) + 0.5f;
+                nvgMoveTo(vg, p, 0);
+                nvgLineTo(vg, p, DISP_H);
+                nvgMoveTo(vg, 0, p);
+                nvgLineTo(vg, DISP_W, p);
             }
             nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 14));
             nvgStrokeWidth(vg, 1.f);
@@ -458,55 +570,61 @@ namespace
             {
                 NVGcontext *vg = args.vg;
 
-                int count = module ? module->histCount : 0;
-                uint64_t demoRows[ROWS];
+                int cols = module ? module->cols : BASE_COLS;
+                if (cols != BASE_COLS && cols != MAX_COLS)
+                    cols = BASE_COLS;
+                const float cs = DISP_W / (float)cols;
+                int count = module ? std::min(module->histCount, cols) : 0;
+
+                Row demoRows[BASE_COLS];
                 if (!module)
                 {
                     // Browser preview: render rule 30 from a single seed
-                    uint64_t cur = 1ULL << (COLS / 2);
-                    for (int r = 0; r < ROWS; ++r)
+                    Row cur;
+                    cur.set(cols / 2, true);
+                    for (int r = 0; r < cols; ++r)
                     {
                         demoRows[r] = cur;
-                        uint64_t next = 0;
-                        for (int i = 0; i < COLS; ++i)
+                        Row next;
+                        for (int i = 0; i < cols; ++i)
                         {
-                            int l = (cur >> ((i + COLS - 1) % COLS)) & 1;
-                            int c = (cur >> i) & 1;
-                            int rr = (cur >> ((i + 1) % COLS)) & 1;
-                            next |= (uint64_t)((30 >> ((l << 2) | (c << 1) | rr)) & 1) << i;
+                            int l = cur.get((i + cols - 1) % cols);
+                            int c = cur.get(i);
+                            int rr = cur.get((i + 1) % cols);
+                            if ((30 >> ((l << 2) | (c << 1) | rr)) & 1)
+                                next.set(i, true);
                         }
                         cur = next;
                     }
-                    count = ROWS;
+                    count = cols;
                 }
 
                 // Cells: newest row brightest
-                const float inset = 0.4f;
+                const float inset = cs * 0.1f;
                 for (int r = 0; r < count; ++r)
                 {
-                    uint64_t bits = module ? module->getHistoryRow(r) : demoRows[r];
-                    if (!bits)
+                    Row bits = module ? module->getHistoryRow(r) : demoRows[r];
+                    if (!bits.any())
                         continue;
                     float age = (float)(r + 1) / (float)std::max(count, 1); // 0..1 (1 = newest)
                     float a = 0.3f + 0.7f * age * age;
 
                     nvgBeginPath(vg);
-                    for (int x = 0; x < COLS; ++x)
+                    for (int x = 0; x < cols; ++x)
                     {
-                        if (!((bits >> x) & 1))
+                        if (!bits.get(x))
                             continue;
-                        nvgRect(vg, x * CELL_SIZE + inset, r * CELL_SIZE + inset,
-                                CELL_SIZE - 2 * inset, CELL_SIZE - 2 * inset);
+                        nvgRect(vg, x * cs + inset, r * cs + inset, cs - 2 * inset, cs - 2 * inset);
                     }
                     nvgFillColor(vg, nvgRGBAf(0.24f, 0.88f, 1.f, a));
                     nvgFill(vg);
                 }
 
                 // Newest-row marker line
-                if (module && count > 0 && count < ROWS)
+                if (module && count > 0 && count < cols)
                 {
                     nvgBeginPath(vg);
-                    nvgRect(vg, 0, count * CELL_SIZE, DISP_W, 1.f);
+                    nvgRect(vg, 0, count * cs, DISP_W, 1.f);
                     nvgFillColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 60));
                     nvgFill(vg);
                 }
@@ -529,8 +647,8 @@ namespace
         }
 
         // Layer-1 overlay: draws the status line (rule number, clock source,
-        // and poly channel count) above the display, or demo values in the
-        // module browser.
+        // poly channel count and grid size) above the display, or demo values
+        // in the module browser.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer == 1)
@@ -541,15 +659,15 @@ namespace
                 if (module)
                 {
                     if (module->clockActive)
-                        snprintf(status, sizeof(status), "RULE %03d | EXT CLOCK | %d CH",
-                                 rule, module->polyChannels);
+                        snprintf(status, sizeof(status), "RULE %03d | EXT CLK | %d CH | %d",
+                                 rule, module->polyChannels, module->cols);
                     else
-                        snprintf(status, sizeof(status), "RULE %03d | %.0f HZ | %d CH",
+                        snprintf(status, sizeof(status), "RULE %03d | %.0f HZ | %d CH | %d",
                                  rule, module->params[CellAutoGate::SPEED_PARAM].getValue(),
-                                 module->polyChannels);
+                                 module->polyChannels, module->cols);
                 }
                 else
-                    snprintf(status, sizeof(status), "RULE %03d | 10 HZ | 1 CH", rule);
+                    snprintf(status, sizeof(status), "RULE %03d | 10 HZ | 1 CH | 64", rule);
 
                 drawText(vg, DISP_W / 2.f, 6.f, status, 8.f, colAccent(), ALIGN_C, 1.5f);
             }
@@ -669,11 +787,23 @@ struct CellAutoGateWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(
             Vec(CA_LEFT_X, CA_CLOCK_TOP + CA_JACK_DY), module, CellAutoGate::CLOCK_INPUT));
 
-        // Right column
+        // Right column: button on the left, trigger input on the right
         addParam(createParamCentered<VCVButton>(
-            Vec(CA_RIGHT_X, CA_RAND_TOP + CA_JACK_DY), module, CellAutoGate::RANDOM_PARAM));
+            Vec(CA_RIGHT_X - CA_PAIR_DX, CA_RAND_TOP + CA_JACK_DY), module, CellAutoGate::RANDOM_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(
+            Vec(CA_RIGHT_X + CA_PAIR_DX, CA_RAND_TOP + CA_JACK_DY), module, CellAutoGate::RANDOM_INPUT));
+
         addParam(createParamCentered<VCVButton>(
-            Vec(CA_RIGHT_X, CA_RESET_TOP + CA_JACK_DY), module, CellAutoGate::RESET_PARAM));
+            Vec(CA_RIGHT_X - CA_PAIR_DX, CA_RESET_TOP + CA_JACK_DY), module, CellAutoGate::RESET_PARAM));
+        addInput(createInputCentered<DarkPJ301MPort>(
+            Vec(CA_RIGHT_X + CA_PAIR_DX, CA_RESET_TOP + CA_JACK_DY), module, CellAutoGate::RESET_INPUT));
+
+        // Latching switches (lit = on): 2X GRID (128x128) and WRAP (circular edges)
+        addParam(createParamCentered<VCVLatch>(
+            Vec(CA_RIGHT_X, CA_GRID_TOP + CA_SWITCH_DY), module, CellAutoGate::RES_PARAM));
+        addParam(createParamCentered<VCVLatch>(
+            Vec(CA_RIGHT_X, CA_EDGE_TOP + CA_SWITCH_DY), module, CellAutoGate::EDGE_PARAM));
+
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(CA_RIGHT_X, CA_GATES_TOP + CA_JACK_DY), module, CellAutoGate::GATE_OUTPUT));
 
