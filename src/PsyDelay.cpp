@@ -59,7 +59,7 @@ static const float PD_RCOL[2] = {452.f, 504.f};
 static const float PD_KCELL_W = 48.f;
 static const float PD_KCELL_H = 62.f;
 static const float PD_KTOP[3] = {58.f, 126.f, 194.f};
-static const float PD_CAP1_Y = 46.f;   // DELAY / FX captions
+static const float PD_CAP1_Y = 46.f; // DELAY / FX captions
 // Returns the knob centre y for knob row `row` (0..2).
 static float pdKnobY(int row) { return PD_KTOP[row] + 38.f; }
 
@@ -71,7 +71,7 @@ static const float PD_SW_W = 45.f;
 static float pdSwY() { return PD_SW_TOP + 34.f; }
 
 // Jack row
-static const float PD_CAP2_Y = 274.f;  // INPUT / CV INPUT / OUTPUT captions
+static const float PD_CAP2_Y = 274.f; // INPUT / CV INPUT / OUTPUT captions
 static const float PD_JACK_TOP = 283.f;
 static const float PD_JACK_H = 52.f;
 // Returns the jack centre y for the input/CV/output row.

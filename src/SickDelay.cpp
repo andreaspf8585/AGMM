@@ -52,14 +52,13 @@ static const float SD_KCOL[4] = {34.f, 91.f, 149.f, 206.f};
 static const float SD_CELL_W = 54.f;
 static const float SD_KTOP[2] = {132.f, 190.f}; // knob rows (cells 52 high, knob at +32)
 static const float SD_KCELL_H = 52.f;
-static const float SD_SWTOP = 248.f;            // switch row (cells 50 high, switch at +31)
+static const float SD_SWTOP = 248.f; // switch row (cells 50 high, switch at +31)
 static const float SD_SWCELL_H = 50.f;
-static const float SD_IOTOP = 306.f;            // jack row (cells 48 high, jack at +30)
+static const float SD_IOTOP = 306.f; // jack row (cells 48 high, jack at +30)
 static const float SD_IOCELL_H = 48.f;
 static const float SD_IOCELL_W = 36.f;
 // Returns the horizontal centre of I/O jack i (0..5) for the bottom row.
 static float sdIoX(int i) { return 24.f + 38.4f * (float)i; } // 6 jacks
-
 
 // Clock sync: the clock input is treated as one pulse per quarter note (beat).
 // The time knobs select one of these divisions when a clock is patched.
@@ -384,7 +383,6 @@ struct SickDelay : Module
         meterR = std::max(std::fabs(finalR), meterR * md);
     }
 };
-
 
 // Anonymous namespace: UI helpers and the two widgets.
 namespace

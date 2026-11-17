@@ -1106,10 +1106,10 @@ namespace
         {
             N_SPIKES = 160,
             N_DROPS = 16,
-            LAT = 48,  // surface resolution (was 16)
-            LON = 96,  // (was 32)
+            LAT = 48, // surface resolution (was 16)
+            LON = 96, // (was 32)
             GN = LAT * LON,
-            NB = 256   // silhouette bins (was 96)
+            NB = 256 // silhouette bins (was 96)
         };
 
         struct Spike
@@ -1155,9 +1155,9 @@ namespace
         float stretch = 0.f;
         float vStr = 0.f;
         float magA = 0.f, magLen = 0.f;
-        float offX = 0.f, offY = 0.f;  // total offset of the body centre from tank centre
-        float bx = 0.f, by = 0.f;      // brain position
-        float bvx = 0.f, bvy = 0.f;    // brain velocity
+        float offX = 0.f, offY = 0.f;                       // total offset of the body centre from tank centre
+        float bx = 0.f, by = 0.f;                           // brain position
+        float bvx = 0.f, bvy = 0.f;                         // brain velocity
         float slX = 0.f, slY = 0.f, slVX = 0.f, slVY = 0.f; // slosh (soft-body lag)
 
         float act = 0.f;

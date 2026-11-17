@@ -27,15 +27,15 @@
 // ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
-static const int WH_SCOPE_N = 222;                                           // waveform history bins (1 px each)
-static const int WH_SPEC_N = 4096;                                           // FFT size
-static const int WH_BANDS = 111;                                             // spectrum bands (2 px each)
-static const float WH_W = RACK_GRID_WIDTH * 20;                              // 300
-static const float WH_H = RACK_GRID_HEIGHT;                                  // 380
+static const int WH_SCOPE_N = 222;              // waveform history bins (1 px each)
+static const int WH_SPEC_N = 4096;              // FFT size
+static const int WH_BANDS = 111;                // spectrum bands (2 px each)
+static const float WH_W = RACK_GRID_WIDTH * 20; // 300
+static const float WH_H = RACK_GRID_HEIGHT;     // 380
 // Display (260 x 124) sits just under the title; the bezel adds 4 px around it.
 static const float WH_DX = 20.f, WH_DY = 26.f, WH_DW = 260.f, WH_DH = 124.f;
 static float whCol(int i) { return 38.f + 56.f * (float)i; }
-static const float WH_CELL_W = 52.f;                                          // every cell is 52 wide (4 px gaps)
+static const float WH_CELL_W = 52.f; // every cell is 52 wide (4 px gaps)
 // Row A: 5 knob cells, 52 x 88. Label +10, knob +33, CV jack / attenuverter +59, captions +80.
 static const float WH_RA = 162.f, WH_RAH = 88.f;
 static const float WH_KNOB_DY = 33.f, WH_SUB_DY = 59.f, WH_SUB_DX = 13.f, WH_CAP_DY = 80.f;
@@ -747,7 +747,6 @@ struct Whirlpool : Module
     }
 };
 
-
 // ============================================================
 // Drawing helpers (anonymous namespace — UI-only)
 // ------------------------------------------------------------
@@ -976,7 +975,6 @@ namespace
                 dbOut[b] = 10.f * std::log10(p / 25.f + 1e-12f); // 0 dB = 5 V amplitude
             }
         }
-
 
         // ---- static background (flat screen + plot frame) ----
         void draw(const DrawArgs &args) override
@@ -1330,7 +1328,6 @@ namespace
     };
 
 } // namespace
-
 
 // ------------------------------------------------------------
 // WhirlpoolWidget — Rack widget.

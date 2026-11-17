@@ -102,7 +102,7 @@ namespace
         // Returns a uniform float in [0, 1).
         inline float uni() { return (float)(nextU() >> 8) * (1.f / 16777216.f); } // [0,1)
         // Returns a uniform float in [-1, 1).
-        inline float bi() { return uni() * 2.f - 1.f; }                           // [-1,1)
+        inline float bi() { return uni() * 2.f - 1.f; } // [-1,1)
         // Returns a uniform float in [a, b).
         inline float range(float a, float b) { return a + (b - a) * uni(); }
     };
@@ -879,7 +879,7 @@ namespace
 
     // Display layout (display-local): header row, rain scene, bars, thunder rows, footer
     const float RS_SX = 8.f, RS_SY = 17.f, RS_SW = 222.f, RS_SH = 58.f; // rain scene
-    const float RS_BX = 22.f, RS_BW = 208.f;                             // thunder bars
+    const float RS_BX = 22.f, RS_BW = 208.f;                            // thunder bars
 
     // Knob cell: name on top, knob, optional CV caption + jack below
     // Draws the background plate for a knob cell and its name (and optionally

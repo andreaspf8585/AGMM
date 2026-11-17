@@ -221,6 +221,6 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 | Noise & Weather | 1 | RainStorm |
 | Visualisers | 3 | Evolved, Lifeform, Plot |
 | **Total** | **57** | |
-## Documentation
+## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)

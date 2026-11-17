@@ -54,12 +54,12 @@ static const float LD_DISP_W = 320.f;
 static const float LD_DISP_H = 112.f;
 static const float LD_DISP_X = (LD_PANEL_W - LD_DISP_W) / 2.f; // 20
 static const float LD_DISP_Y = 26.f;
-static const float LD_HEAD_LINE = 15.5f;                       // hairline under the header row
-static const float LD_PLOT_Y = 20.f, LD_PLOT_H = 72.f;         // both plots share this band
-static const float LD_FOOT_LINE = 96.5f;                       // hairline above the footer row
-static const float LD_FOOT_TXT = LD_DISP_H - 8.f;              // footer text centre line
-static const float LD_SCOPE_X = 8.f,   LD_SCOPE_W = 154.f;     // waveform scope
-static const float LD_SPEC_X  = 168.f, LD_SPEC_W  = 144.f;     // partial spectrum
+static const float LD_HEAD_LINE = 15.5f;                 // hairline under the header row
+static const float LD_PLOT_Y = 20.f, LD_PLOT_H = 72.f;   // both plots share this band
+static const float LD_FOOT_LINE = 96.5f;                 // hairline above the footer row
+static const float LD_FOOT_TXT = LD_DISP_H - 8.f;        // footer text centre line
+static const float LD_SCOPE_X = 8.f, LD_SCOPE_W = 154.f; // waveform scope
+static const float LD_SPEC_X = 168.f, LD_SPEC_W = 144.f; // partial spectrum
 
 // Control cells: 76 px wide, label centred 10 px below the top edge, control centre 32 px below it
 static const float LD_CELL_W = 76.f;
@@ -67,22 +67,22 @@ static const float LD_CELL_H = 52.f;
 static const float LD_CTL_DY = 32.f;
 
 // Row 1 (FREQ, FINE, WAVE, PULSE)
-static const float LD_VCO_HDR  = 150.f;
+static const float LD_VCO_HDR = 150.f;
 static const float LD_ROW1_TOP = 158.f;
-static const float LD_ROW1_Y   = LD_ROW1_TOP + LD_CTL_DY;
+static const float LD_ROW1_Y = LD_ROW1_TOP + LD_CTL_DY;
 static const float LD_ROW1_X[4] = {54.f, 138.f, 222.f, 306.f};
 
 // Row 2 (SPEED, OSCS, DIR)
 static const float LD_SHEP_HDR = 220.f;
 static const float LD_ROW2_TOP = 228.f;
-static const float LD_ROW2_Y   = LD_ROW2_TOP + LD_CTL_DY;
+static const float LD_ROW2_Y = LD_ROW2_TOP + LD_CTL_DY;
 static const float LD_ROW2_X[3] = {96.f, 180.f, 264.f};
 
 // I/O row (V/OCT, OUT L, OUT R): jack centred 30 px below the cell top
 static const float LD_IO_HDR = 290.f;
 static const float LD_IO_TOP = 298.f;
-static const float LD_IO_H   = 50.f;
-static const float LD_IO_Y   = LD_IO_TOP + 30.f;
+static const float LD_IO_H = 50.f;
+static const float LD_IO_Y = LD_IO_TOP + 30.f;
 static const float LD_IO_X[3] = {96.f, 180.f, 264.f};
 
 // ------------------------------------------------------------
@@ -135,14 +135,36 @@ namespace
         int pc = -1;
         switch (c)
         {
-        case 'C': case 'c': pc = 0; break;
-        case 'D': case 'd': pc = 2; break;
-        case 'E': case 'e': pc = 4; break;
-        case 'F': case 'f': pc = 5; break;
-        case 'G': case 'g': pc = 7; break;
-        case 'A': case 'a': pc = 9; break;
-        case 'B': case 'b': pc = 11; break;
-        default: return false;
+        case 'C':
+        case 'c':
+            pc = 0;
+            break;
+        case 'D':
+        case 'd':
+            pc = 2;
+            break;
+        case 'E':
+        case 'e':
+            pc = 4;
+            break;
+        case 'F':
+        case 'f':
+            pc = 5;
+            break;
+        case 'G':
+        case 'g':
+            pc = 7;
+            break;
+        case 'A':
+        case 'a':
+            pc = 9;
+            break;
+        case 'B':
+        case 'b':
+            pc = 11;
+            break;
+        default:
+            return false;
         }
         p++;
 
@@ -166,8 +188,15 @@ namespace
         while (*p == ' ' || *p == '\t')
             p++;
         int sign = 1;
-        if (*p == '-') { sign = -1; p++; }
-        else if (*p == '+') { p++; }
+        if (*p == '-')
+        {
+            sign = -1;
+            p++;
+        }
+        else if (*p == '+')
+        {
+            p++;
+        }
         if (*p < '0' || *p > '9')
             return false;
         int oct = 0;
@@ -301,8 +330,8 @@ struct Ladder : Module
     float sweep = 0.f;
 
     // Click-prevention state
-    float smoothSemis = 0.f;               // slewed FREQ + FINE
-    float smoothHalfSpan = 2.5f;           // slewed (numOscs - 1) / 2
+    float smoothSemis = 0.f;     // slewed FREQ + FINE
+    float smoothHalfSpan = 2.5f; // slewed (numOscs - 1) / 2
     bool smoothInit = false;
     float ampSmooth[LD_MAX_PARTIALS] = {}; // per-partial gain smoothing
 
@@ -355,8 +384,7 @@ struct Ladder : Module
         const float sr = args.sampleRate;
 
         // ---- controls ----
-        float knobSemis = params[FREQ_PARAM].getValue()
-                        + params[FINE_PARAM].getValue() / 100.f;
+        float knobSemis = params[FREQ_PARAM].getValue() + params[FINE_PARAM].getValue() / 100.f;
         float speed = params[LADDER_SPEED_PARAM].getValue();
         int wave = rack::math::clamp((int)std::round(params[WAVE_PARAM].getValue()), 0, 3);
         float pw = params[PULSE_WIDTH_PARAM].getValue();
@@ -731,11 +759,11 @@ namespace
                 nvgScissor(vg, LD_SPEC_X, LD_PLOT_Y, LD_SPEC_W, LD_PLOT_H);
 
                 const float cx = LD_SPEC_X + LD_SPEC_W / 2.f;
-                const float base = LD_PLOT_Y + LD_PLOT_H - 6.f;   // baseline
+                const float base = LD_PLOT_Y + LD_PLOT_H - 6.f; // baseline
                 const float maxH = LD_PLOT_H - 16.f;
                 const float halfSpan = (float)(numOscs - 1) * 0.5f;
                 const float sigma = std::max(1.0f, (float)(numOscs - 1) * 0.25f);
-                const float R = halfSpan + 1.25f;                  // octaves from centre to edge
+                const float R = halfSpan + 1.25f; // octaves from centre to edge
                 const float pxPerOct = (LD_SPEC_W / 2.f - 8.f) / R;
 
                 // Gaussian window (fixed): area + outline

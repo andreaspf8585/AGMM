@@ -50,9 +50,9 @@
 // ------------------------------------------------------------
 // Safety constants
 // ------------------------------------------------------------
-static const float HR_IN_LIM = 24.f;      // input guard, volts
-static const float HR_LOOP_LIM = 128.f;   // clamp inside the echo loop
-static const float HR_RUNAWAY = 5000.f;   // summed internal level that counts as a runaway
+static const float HR_IN_LIM = 24.f;    // input guard, volts
+static const float HR_LOOP_LIM = 128.f; // clamp inside the echo loop
+static const float HR_RUNAWAY = 5000.f; // summed internal level that counts as a runaway
 
 // ------------------------------------------------------------
 // DSP
@@ -872,7 +872,7 @@ namespace
         // so structure stays visible instead of the map looking empty.
         float m = std::sqrt(std::fabs(u));
         m = m > 1.f ? 1.f : m;
-        const float(*C)[3] = (u >= 0.f) ? POS : NEG;
+        const float (*C)[3] = (u >= 0.f) ? POS : NEG;
         int s = 0;
         while (s < 3 && m > STOP[s + 1])
             ++s;
