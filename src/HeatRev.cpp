@@ -22,13 +22,24 @@
 //   3. A 2D "heat grid" diffusion network that adds a slowly moving, warm
 //      resonant texture to the tail.
 //
-// The module exposes reverb controls (Diffusion, Decay, Size, Mix, Damping,
-// Level, Space) and delay controls (Time, Feedback, Level, Spread), and shows
-// a live heat-map of the grid plus a readout row with the grid size and the
-// cyan/violet sign legend.
+// The display shows the heat grid as a smooth, true-aspect thermal map with
+// the injection edges marked, plus level meters and a history
+// trace of the grid energy.
+//
+// ROBUSTNESS (why this version cannot "scream" after a bad start)
+//   - Inputs are sanitised (NaN/inf -> 0, hard limit) before they enter any
+//     feedback path, so a glitching upstream module at patch load cannot poison
+//     the echo loop.
+//   - The echo loop itself is clamped and finite-checked.
+//   - A watchdog looks at the internal levels every sample; if anything runs
+//     away, ALL state (echo, reverb, grid, filters) is flushed and the wet path
+//     fades back in. The old code only flushed on NaN and never flushed the echo.
+//   - All delay-line indexing is integer based and bounds-safe at any sample
+//     rate (the old fractional read could index one past the end).
+//   - Buffers are allocated once (no allocation on the audio thread).
 //
 // File structure:
-//   1. DSP building blocks: SimpleLPF, StereoDelay, Cathedral.
+//   1. DSP building blocks: SimpleLPF, StereoDelay, Cathedral, HeatGrid.
 //   2. Layout constants (12 HP = 180x380 px).
 //   3. HeatRev module: state, config, display snapshot and process().
 //   4. Anonymous-namespace UI: HRPanelBackground and HRDisplayWidget.
@@ -37,8 +48,23 @@
 // -----------------------------------------------------------------------------
 
 // ------------------------------------------------------------
+// Safety constants
+// ------------------------------------------------------------
+static const float HR_IN_LIM = 24.f;      // input guard, volts
+static const float HR_LOOP_LIM = 128.f;   // clamp inside the echo loop
+static const float HR_RUNAWAY = 5000.f;   // summed internal level that counts as a runaway
+
+// ------------------------------------------------------------
 // DSP
 // ------------------------------------------------------------
+
+// Replaces NaN/inf by 0 and clamps to +/-lim.
+static inline float hrSanitize(float x, float lim)
+{
+    if (!std::isfinite(x))
+        return 0.f;
+    return x > lim ? lim : (x < -lim ? -lim : x);
+}
 
 // One-pole low-pass
 // Simple one-pole low-pass filter used to tame the heat-grid taps.
@@ -47,21 +73,14 @@ struct SimpleLPF
     float y = 0.0f;
     float a = 0.0f;
 
-    // Sets the filter coefficient from a normalised cutoff (0..1, where 1 is
-    // Nyquist). Values at or below 0 mute the filter; at or above 1 pass the
-    // input through unchanged.
-    void setCutoff(float normCutoff)
+    // Sets the coefficient for a true cutoff of `fc` Hz at sample rate `sr`.
+    void setHz(float fc, float sr)
     {
-        if (normCutoff <= 0.0f)
-            a = 0.0f;
-        else if (normCutoff >= 1.0f)
-            a = 1.0f;
-        else
-            a = 1.0f - std::exp(-2.0f * float(M_PI) * normCutoff);
+        a = 1.0f - std::exp(-2.0f * float(M_PI) * fc / sr);
+        a = rack::math::clamp(a, 0.0f, 1.0f);
     }
 
-    // Processes one sample through the one-pole low-pass and returns the
-    // filtered value.
+    // Processes one sample through the one-pole low-pass.
     float process(float x)
     {
         y = y + a * (x - y);
@@ -70,43 +89,54 @@ struct SimpleLPF
 };
 
 // Stereo delay with feedback and fractional delay
-// Stereo delay line with independent L/R delay times, feedback and
-// linear-interpolated fractional reads.
+// Independent L/R delay times, smoothed so turning TIME glides instead of
+// clicking, linear-interpolated reads, buffers allocated once per sample rate.
 struct StereoDelay
 {
     std::vector<float> bufferL, bufferR;
     int writePos = 0;
     int bufferSize = 0;
     float sampleRate = 48000.0f;
-    float delayTimeL = 0.0f;
-    float delayTimeR = 0.0f;
+    float targetL = 0.f, targetR = 0.f; // samples
+    float curL = 0.f, curR = 0.f;       // smoothed samples
+    float smCoef = 0.001f;
     float feedback = 0.0f;
+    bool snap = true;
 
-    // Stores the current sample rate used to convert milliseconds to samples.
-    void setSampleRate(float sr) { sampleRate = sr; }
-
-    // Allocates (or reallocates) both delay buffers to hold maxDelaySamples+2
-    // samples and resets the write position. No-op if the size is unchanged.
-    void resize(int maxDelaySamples)
+    // Allocates both buffers (1.05 s, enough for the 1000 ms clamp) for the
+    // given sample rate. Called from prepare(), never from the audio loop.
+    void init(float sr)
     {
-        if (maxDelaySamples != bufferSize)
-        {
-            bufferSize = maxDelaySamples + 2;
-            bufferL.assign(bufferSize, 0.0f);
-            bufferR.assign(bufferSize, 0.0f);
-            writePos = 0;
-        }
+        sampleRate = sr;
+        bufferSize = (int)(sr * 1.05f) + 8;
+        bufferL.assign(bufferSize, 0.f);
+        bufferR.assign(bufferSize, 0.f);
+        writePos = 0;
+        smCoef = 1.f - std::exp(-1.f / (0.05f * sr)); // ~50 ms glide
+        snap = true;
     }
 
-    // Sets the L/R delay times in milliseconds and grows the buffers if the
-    // requested delay is longer than the current allocation.
+    // Silences the buffers.
+    void clear()
+    {
+        std::fill(bufferL.begin(), bufferL.end(), 0.f);
+        std::fill(bufferR.begin(), bufferR.end(), 0.f);
+        writePos = 0;
+        snap = true;
+    }
+
+    // Sets the L/R delay times in milliseconds.
     void setDelayMs(float msL, float msR)
     {
-        delayTimeL = msL * 0.001f * sampleRate;
-        delayTimeR = msR * 0.001f * sampleRate;
-        int maxSamples = static_cast<int>(std::max(delayTimeL, delayTimeR)) + 2;
-        if (maxSamples > bufferSize)
-            resize(maxSamples);
+        const float maxS = (float)(bufferSize - 4);
+        targetL = rack::math::clamp(msL * 0.001f * sampleRate, 1.f, maxS);
+        targetR = rack::math::clamp(msR * 0.001f * sampleRate, 1.f, maxS);
+        if (snap)
+        {
+            curL = targetL;
+            curR = targetR;
+            snap = false;
+        }
     }
 
     // Sets the feedback amount, clamped to 0..0.95 for stability.
@@ -116,33 +146,41 @@ struct StereoDelay
     // input plus feedback into the buffers, and returns the delayed pair.
     std::pair<float, float> process(float inL, float inR)
     {
-        float readL = readBuffer(bufferL, delayTimeL);
-        float readR = readBuffer(bufferR, delayTimeR);
+        curL += (targetL - curL) * smCoef;
+        curR += (targetR - curR) * smCoef;
+
+        const float readL = readBuffer(bufferL, curL);
+        const float readR = readBuffer(bufferR, curR);
 
         float writeL = inL + feedback * readL;
         float writeR = inR + feedback * readR;
-
-        bufferL[writePos] = writeL;
-        bufferR[writePos] = writeR;
-        writePos = (writePos + 1) % bufferSize;
+        if (!std::isfinite(writeL))
+            writeL = 0.f;
+        if (!std::isfinite(writeR))
+            writeR = 0.f;
+        bufferL[writePos] = rack::math::clamp(writeL, -HR_LOOP_LIM, HR_LOOP_LIM);
+        bufferR[writePos] = rack::math::clamp(writeR, -HR_LOOP_LIM, HR_LOOP_LIM);
+        if (++writePos >= bufferSize)
+            writePos = 0;
 
         return {readL, readR};
     }
 
 private:
-    // Reads one buffer at `delaySamples` behind the write head using linear
-    // interpolation. Returns 0 for non-positive delays.
-    float readBuffer(const std::vector<float> &buf, float delaySamples)
+    // Reads `d` samples behind the write head, integer + fraction so the index
+    // can never leave the buffer (the old float-position version could land on
+    // bufferSize through rounding).
+    float readBuffer(const std::vector<float> &buf, float d) const
     {
-        if (delaySamples <= 0.0f)
-            return 0.0f;
-        float readPos = static_cast<float>(writePos) - delaySamples;
-        if (readPos < 0.0f)
-            readPos += bufferSize;
-        int idx1 = static_cast<int>(readPos);
-        int idx2 = (idx1 + 1) % bufferSize;
-        float frac = readPos - idx1;
-        return buf[idx1] + frac * (buf[idx2] - buf[idx1]);
+        const int di = (int)d;
+        const float fr = d - (float)di;
+        int i0 = writePos - di;
+        if (i0 < 0)
+            i0 += bufferSize;
+        int i1 = i0 - 1;
+        if (i1 < 0)
+            i1 += bufferSize;
+        return buf[i0] + fr * (buf[i1] - buf[i0]);
     }
 };
 
@@ -228,11 +266,13 @@ struct Cathedral
     }
 
     // Runs one sample through a fixed-length all-pass delay line with gain
-    // `gain`, returning the all-pass output.
+    // `gain`, returning the all-pass output. `len` is clamped to the buffer.
     static float allpass(std::vector<float> &buf, int &idx, int len, float gain, float x)
     {
         if (len < 2)
             len = 2;
+        if (len > (int)buf.size())
+            len = (int)buf.size();
         if (idx >= len)
             idx = 0;
         const float d = buf[idx];
@@ -247,6 +287,7 @@ struct Cathedral
     // head using linear interpolation, with power-of-two wrapping.
     float readPD(const std::vector<float> &buf, float d) const
     {
+        d = std::min(d, (float)(PD - 4));
         const float pos = (float)pdW - d;
         int i0 = (int)std::floor(pos);
         const float fr = pos - (float)i0;
@@ -256,15 +297,15 @@ struct Cathedral
     }
 
     // fdn = diffuse tail, er = early reflections
-    // Runs the full Cathedral reverb for one stereo sample. `rt60`, `damping`,
-    // `scaleTarget`, `diffusion` and `space` control the tail; outputs are the
-    // FDN tail (fdnL/fdnR) and the early reflections (erL/erR).
+    // Runs the full Cathedral reverb for one stereo sample.
     void process(float inL, float inR, float sr, float rt60, float damping,
                  float scaleTarget, float diffusion, float space,
                  float &fdnL, float &fdnR, float &erL, float &erR)
     {
         const float srk = sr / 48000.f;
         const float twoPi = 6.2831853f;
+        rt60 = std::max(rt60, 0.1f);
+        const float maxLen = (float)(LINE - 16) - 8.f * srk; // leaves room for the LFO depth
 
         if (lastScale < 0.f)
             scaleSm = scaleTarget;
@@ -278,7 +319,7 @@ struct Cathedral
             float gm2 = 0.f;
             for (int i = 0; i < N; ++i)
             {
-                const float len = (float)CATH_BASE[i] * srk * scaleSm;
+                const float len = std::min((float)CATH_BASE[i] * srk * scaleSm, maxLen);
                 g[i] = std::pow(10.f, -3.f * len / (rt60 * sr));
                 gm2 += g[i] * g[i];
             }
@@ -330,7 +371,8 @@ struct Cathedral
         float x[N];
         for (int i = 0; i < N; ++i)
         {
-            const float len = (float)CATH_BASE[i] * srk * scaleSm + depth * std::sin(lfoPh[i]);
+            float len = std::min((float)CATH_BASE[i] * srk * scaleSm, maxLen) + depth * std::sin(lfoPh[i]);
+            len = rack::math::clamp(len, 4.f, (float)(LINE - 4));
             lfoPh[i] += twoPi * (0.11f + 0.037f * (float)i) / sr;
             if (lfoPh[i] > twoPi)
                 lfoPh[i] -= twoPi;
@@ -384,23 +426,101 @@ struct Cathedral
 };
 
 // ------------------------------------------------------------
+// HeatGrid: 2D diffusion plate
+//
+// Same maths as before (5-point Laplacian, reflecting edges, decay), but stored
+// with a one-cell ghost border so the inner loop has no per-cell branches. That
+// makes it vectorisable (several times faster at 64x64) and it is allocated
+// once for the maximum size, so changing SIZE never allocates on the audio
+// thread.
+// ------------------------------------------------------------
+struct HeatGrid
+{
+    enum
+    {
+        MAXN = 64,
+        MAXP = MAXN + 2
+    };
+    int n = 48, stride = 50;
+    std::vector<float> a, b;
+
+    HeatGrid()
+    {
+        a.assign(MAXP * MAXP, 0.f);
+        b.assign(MAXP * MAXP, 0.f);
+        setSize(48);
+    }
+
+    void setSize(int newN)
+    {
+        n = rack::math::clamp(newN, 4, (int)MAXN);
+        stride = n + 2;
+        clear();
+    }
+
+    void clear()
+    {
+        std::fill(a.begin(), a.end(), 0.f);
+        std::fill(b.begin(), b.end(), 0.f);
+    }
+
+    float &at(int x, int y) { return a[(y + 1) * stride + (x + 1)]; }
+    float get(int x, int y) const { return a[(y + 1) * stride + (x + 1)]; }
+
+    // One diffusion step with decay: next = (u + k * laplacian(u)) * fb.
+    void step(float k, float fb)
+    {
+        const int s = stride;
+        float *p = a.data();
+        // Reflecting boundary: the ghost cell mirrors the neighbour one cell in.
+        for (int y = 0; y < n; ++y)
+        {
+            float *row = p + (y + 1) * s;
+            row[0] = row[2];
+            row[n + 1] = row[n - 1];
+        }
+        std::memcpy(p, p + 2 * s, (size_t)s * sizeof(float));
+        std::memcpy(p + (n + 1) * s, p + (n - 1) * s, (size_t)s * sizeof(float));
+
+        float *q = b.data();
+        for (int y = 0; y < n; ++y)
+        {
+            const float *c = p + (y + 1) * s + 1;
+            const float *u = c - s;
+            const float *d = c + s;
+            float *o = q + (y + 1) * s + 1;
+            for (int x = 0; x < n; ++x)
+                o[x] = (c[x] + k * (c[x - 1] + c[x + 1] + u[x] + d[x] - 4.f * c[x])) * fb;
+        }
+        a.swap(b);
+    }
+
+    // Samples a cell at normalised coordinates (fx, fy).
+    float tap(float fx, float fy) const
+    {
+        const int tx = rack::math::clamp((int)(fx * n), 0, n - 1);
+        const int ty = rack::math::clamp((int)(fy * n), 0, n - 1);
+        return get(tx, ty);
+    }
+};
+
+// ------------------------------------------------------------
 // Layout constants
 // ------------------------------------------------------------
-static const int VIZ_COLS = 40;
-static const int VIZ_ROWS = 16;
-static const float VIZ_CELL = 4.f;
+static const int VIZ_N = 64; // display field resolution (max grid size)
 
 static const float HR_PANEL_W = RACK_GRID_WIDTH * 12; // 180
 static const float HR_PANEL_H = RACK_GRID_HEIGHT;     // 380
 
-// Display (bezel is drawn 4 px around it): heat map on top, readout row below it
-static const float HR_VIZ_W = VIZ_COLS * VIZ_CELL; // 160
-static const float HR_VIZ_H = VIZ_ROWS * VIZ_CELL; // 64
-static const float HR_DISP_W = HR_VIZ_W;
-static const float HR_DISP_H = HR_VIZ_H + 12.f; // 76
+// Display (bezel is drawn 4 px around it)
+static const float HR_DISP_W = 160.f;
+static const float HR_DISP_H = 78.f;
 static const float HR_DISP_X = (HR_PANEL_W - HR_DISP_W) / 2.f;
 static const float HR_DISP_Y = 26.f;
-static const float HR_FOOT_Y = HR_VIZ_H + 6.f; // readout row (inside display, under the map)
+
+// Inside the display: square thermal plate on the left, instruments on the right
+static const float HR_PLATE_X = 4.f, HR_PLATE_Y = 4.f, HR_PLATE = 70.f;
+static const float HR_RX = 80.f, HR_RW = 76.f; // right column
 
 // Every control sits in a plate with its label ABOVE it.
 static const float HR_KX3[3] = {30.f, 90.f, 150.f};
@@ -459,23 +579,32 @@ struct HeatRev : Module
     };
 
     // Heat grid (warmth layer + display)
-    std::vector<float> state, next;
-    int size;
-    float sampleRate;
+    HeatGrid grid;
+    float sampleRate = 0.f; // 0 = not prepared yet
     SimpleLPF lpL, lpR;
-    float dcL = 0.f, dcR = 0.f;
+    float dcL = 0.f, dcR = 0.f, dcCoef = 0.f;
 
     StereoDelay delay;
     Cathedral cathedral;
 
-    // Downsampled snapshot of the grid for the display (written by the audio thread,
-    // read by the UI thread; a torn read is only cosmetic)
-    float viz[VIZ_ROWS][VIZ_COLS] = {};
+    // Wet-path fade-in after load / reset / sample-rate change / watchdog flush
+    float fade = 0.f, fadeStep = 0.001f;
+    int flushCount = 0;
+
+    // Cached decay-derived values
+    float lastDecayP = -1.f, rt60 = 7.6f, gridFb = 0.9998f, tailComp = 1.f;
+
+    // Snapshot for the display (written by the audio thread, read by the UI
+    // thread; a torn read is only cosmetic)
+    float viz[VIZ_N][VIZ_N] = {};
+    int vizN = 48;
     float vizNorm = 1.f;
     int vizCounter = 0;
+    float vizEnergy = 0.f, vizPkL = 0.f, vizPkR = 0.f, vizRt60 = 7.6f;
+    float pkL = 0.f, pkR = 0.f, pkDecay = 0.9999f;
 
-    // Constructor: configures all parameters, inputs, outputs and bypass,
-    // allocates the heat grid, and initialises the delay and Cathedral DSP.
+    // Constructor: configures all parameters, inputs, outputs and bypass and
+    // allocates every buffer once.
     HeatRev()
     {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -499,57 +628,84 @@ struct HeatRev : Module
         configBypass(INPUT_L, OUTPUT_L);
         configBypass(INPUT_R, OUTPUT_R);
 
-        size = 48;
-        state.resize(size * size, 0.f);
-        next.resize(size * size, 0.f);
-        sampleRate = 48000.0f;
-        delay.setSampleRate(sampleRate);
         cathedral.init();
+        delay.init(48000.f); // real rate is applied on the first process()
     }
 
-    // Rack reset hook: clears the heat grid, the Cathedral engine and the
-    // DC-blocker state.
+    // (Re)initialises everything that depends on the sample rate and silences
+    // all state. Runs on the first process() call and whenever the rate changes.
+    void prepare(float sr)
+    {
+        sampleRate = sr;
+        delay.init(sr);
+        cathedral.reset();
+        grid.clear();
+        lpL.setHz(4000.f, sr);
+        lpR.setHz(4000.f, sr);
+        lpL.y = lpR.y = 0.f;
+        dcCoef = 1.0f - std::exp(-2.0f * float(M_PI) * 40.0f / sr);
+        dcL = dcR = 0.f;
+        fadeStep = 1.f / (0.08f * sr); // 80 ms wet fade-in
+        fade = 0.f;
+        pkDecay = std::exp(-1.f / (0.25f * sr));
+        pkL = pkR = 0.f;
+        vizCounter = 0;
+        lastDecayP = -1.f;
+    }
+
+    // Silences all state (echo, reverb, grid, filters) and restarts the fade-in.
+    void flushAll()
+    {
+        cathedral.reset();
+        grid.clear();
+        delay.clear();
+        lpL.y = lpR.y = 0.f;
+        dcL = dcR = 0.f;
+        pkL = pkR = 0.f;
+        fade = 0.f;
+    }
+
+    // Rack reset hook (Initialize).
     void onReset(const ResetEvent &e) override
     {
         Module::onReset(e);
-        std::fill(state.begin(), state.end(), 0.f);
-        std::fill(next.begin(), next.end(), 0.f);
-        cathedral.reset();
-        dcL = dcR = 0.f;
+        if (sampleRate > 0.f)
+            flushAll();
     }
 
-    // Downsamples the current heat grid into the `viz` snapshot for display
-    // and auto-scales it so the map stays readable at any signal level.
-    void updateViz()
+    // Publishes the grid to the display: full-resolution field, auto-scaled
+    // with a slow release so tails visibly fade, plus a few readouts.
+    void publishViz()
     {
-        float peak = 0.f;
-        for (int r = 0; r < VIZ_ROWS; ++r)
+        const int n = grid.n;
+        float peak = 0.f, ss = 0.f;
+        for (int y = 0; y < n; ++y)
         {
-            int sy = clamp((r * size) / VIZ_ROWS + size / (2 * VIZ_ROWS), 0, size - 1);
-            for (int c = 0; c < VIZ_COLS; ++c)
+            for (int x = 0; x < n; ++x)
             {
-                int sx = clamp((c * size) / VIZ_COLS + size / (2 * VIZ_COLS), 0, size - 1);
-                float s = state[sy * size + sx];
-                viz[r][c] = s;
-                peak = std::max(peak, std::fabs(s));
+                const float v = grid.get(x, y);
+                peak = std::max(peak, std::fabs(v));
+                ss += v * v;
             }
         }
-        // Auto-scale so the display stays readable at any level
-        vizNorm += (std::max(peak, 0.01f) - vizNorm) * (peak > vizNorm ? 0.6f : 0.03f);
-        const float k = 4.f / vizNorm; // the widget applies tanh(v * 0.25)
-        for (int r = 0; r < VIZ_ROWS; ++r)
-            for (int c = 0; c < VIZ_COLS; ++c)
-                viz[r][c] *= k;
+        vizEnergy = std::sqrt(ss / (float)(n * n));
+        // fast attack, ~3 s release: the map stays readable but a decaying tail visibly dims
+        vizNorm += (std::max(peak, 0.02f) - vizNorm) * (peak > vizNorm ? 0.6f : 0.004f);
+        const float k = 1.f / vizNorm;
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x)
+                viz[y][x] = grid.get(x, y) * k;
+        vizN = n;
+        vizPkL = pkL;
+        vizPkR = pkR;
+        vizRt60 = rt60;
     }
 
-    // Main audio callback: reads the controls, runs the delay, Cathedral
-    // reverb and heat-grid diffusion, mixes dry/wet, applies soft limiting and
-    // safety checks, writes the stereo outputs, and refreshes the display
-    // snapshot periodically.
+    // Main audio callback.
     void process(const ProcessArgs &args) override
     {
-        sampleRate = args.sampleRate;
-        delay.setSampleRate(sampleRate);
+        if (args.sampleRate != sampleRate)
+            prepare(args.sampleRate);
 
         const float diffusion = params[DIFFUSION_PARAM].getValue();
         const float decayP = params[DECAY_PARAM].getValue();
@@ -559,44 +715,40 @@ struct HeatRev : Module
         const float space = params[SPACE_PARAM].getValue();
         const float sizeP = params[SIZE_PARAM].getValue();
 
-        // Cathedral settings
-        const float rt60 = 0.5f * std::pow(30.0f, decayP);              // 0.5 s .. 15 s (7.6 s default)
-        const float scaleTarget = 0.6f + 1.4f * (sizeP - 4.0f) / 60.0f; // room scale 0.6 .. 2.0
-
-        // Heat-grid settings
-        float diffK = diffusion * 0.25f;
-        float gridFb = 1.0f - 0.01f * std::pow(1.0f - decayP, 2.5f);
-        gridFb = rack::math::clamp(gridFb, 0.99f, 0.99995f);
-        lpL.setCutoff(rack::math::clamp(4000.0f / (sampleRate * 0.5f), 0.0f, 1.0f));
-        lpR.setCutoff(rack::math::clamp(4000.0f / (sampleRate * 0.5f), 0.0f, 1.0f));
-
-        int newSize = static_cast<int>(std::round(sizeP));
-        newSize = rack::math::clamp(newSize, 4, 64);
-        if (newSize != size)
+        // Decay-derived values (cached: pow() per sample is wasted work)
+        if (decayP != lastDecayP)
         {
-            size = newSize;
-            state.assign(size * size, 0.f);
-            next.assign(size * size, 0.f);
+            lastDecayP = decayP;
+            rt60 = 0.5f * std::pow(30.0f, decayP); // 0.5 s .. 15 s (7.6 s default)
+            gridFb = 1.0f - 0.01f * std::pow(1.0f - decayP, 2.5f);
+            gridFb = rack::math::clamp(gridFb, 0.99f, 0.99995f);
+            tailComp = std::min(1.0f, std::sqrt((1.0f - gridFb) / 6e-4f));
         }
+        const float scaleTarget = 0.6f + 1.4f * (sizeP - 4.0f) / 60.0f; // room scale 0.6 .. 2.0
+        const float diffK = rack::math::clamp(diffusion, 0.f, 1.f) * 0.25f;
+
+        const int newSize = rack::math::clamp((int)std::round(sizeP), 4, 64);
+        if (newSize != grid.n)
+            grid.setSize(newSize);
 
         // Delay / Echo
-        float delayTimeMs = params[DELAY_TIME_PARAM].getValue();
-        float spreadMs = params[STEREO_SPREAD_PARAM].getValue();
-        float delayTimeL = delayTimeMs - spreadMs * 0.5f;
-        float delayTimeR = delayTimeMs + spreadMs * 0.5f;
-        delayTimeL = rack::math::clamp(delayTimeL, 5.0f, 1000.0f);
-        delayTimeR = rack::math::clamp(delayTimeR, 5.0f, 1000.0f);
+        const float delayTimeMs = params[DELAY_TIME_PARAM].getValue();
+        const float spreadMs = params[STEREO_SPREAD_PARAM].getValue();
+        const float delayTimeL = rack::math::clamp(delayTimeMs - spreadMs * 0.5f, 5.0f, 1000.0f);
+        const float delayTimeR = rack::math::clamp(delayTimeMs + spreadMs * 0.5f, 5.0f, 1000.0f);
         delay.setDelayMs(delayTimeL, delayTimeR);
         delay.setFeedback(params[DELAY_FEEDBACK_PARAM].getValue());
 
-        float inL_raw = inputs[INPUT_L].getVoltage();
-        float inR_raw = inputs[INPUT_R].getVoltage();
-        std::pair<float, float> delayed = delay.process(inL_raw, inR_raw);
-        float delayLevel = params[DELAY_LEVEL_PARAM].getValue();
+        // Input guard: NaN/inf from an upstream module (typical at patch load)
+        // never reaches a feedback path.
+        const float inL_raw = hrSanitize(inputs[INPUT_L].getVoltage(), HR_IN_LIM);
+        const float inR_raw = hrSanitize(inputs[INPUT_R].getVoltage(), HR_IN_LIM);
+        const std::pair<float, float> delayed = delay.process(inL_raw, inR_raw);
+        const float delayLevel = params[DELAY_LEVEL_PARAM].getValue();
 
         // The reverb hears the dry signal plus the echoes
-        float reverbInputL = inL_raw + delayed.first * delayLevel;
-        float reverbInputR = inR_raw + delayed.second * delayLevel;
+        const float reverbInputL = inL_raw + delayed.first * delayLevel;
+        const float reverbInputR = inR_raw + delayed.second * delayLevel;
 
         // ---- Cathedral ----
         float fdnL, fdnR, erL, erR;
@@ -604,45 +756,16 @@ struct HeatRev : Module
                           scaleTarget, diffusion, space, fdnL, fdnR, erL, erR);
 
         // ---- Heat grid: gentle excitation, bounded output ----
-        float tailComp = std::min(1.0f, std::sqrt((1.0f - gridFb) / 6e-4f));
-        float injectionGain = 0.3f * tailComp;
-        for (int y = 0; y < size; ++y)
-            state[y * size + 0] += reverbInputL * injectionGain;
-        for (int x = 0; x < size; ++x)
-            state[(size - 1) * size + x] += reverbInputR * injectionGain;
+        const float injectionGain = 0.3f * tailComp;
+        const int n = grid.n;
+        for (int y = 0; y < n; ++y)
+            grid.at(0, y) += reverbInputL * injectionGain;
+        for (int x = 0; x < n; ++x)
+            grid.at(x, n - 1) += reverbInputR * injectionGain;
+        grid.step(diffK, gridFb);
 
-        for (int y = 0; y < size; ++y)
-        {
-            for (int x = 0; x < size; ++x)
-            {
-                int idx = y * size + x;
-                float u = state[idx];
-                int leftX = (x == 0) ? 1 : x - 1;
-                int rightX = (x == size - 1) ? size - 2 : x + 1;
-                int upY = (y == 0) ? 1 : y - 1;
-                int downY = (y == size - 1) ? size - 2 : y + 1;
-                float u_left = state[y * size + leftX];
-                float u_right = state[y * size + rightX];
-                float u_up = state[upY * size + x];
-                float u_down = state[downY * size + x];
-                float laplacian = (u_left + u_right + u_up + u_down) - 4.0f * u;
-                next[idx] = u + diffK * laplacian;
-            }
-        }
-        for (int i = 0; i < size * size; ++i)
-            next[i] *= gridFb;
-        state.swap(next);
-
-        // Samples a heat-grid cell at normalised coordinates (fx, fy).
-        auto tap = [&](float fx, float fy)
-        {
-            int tx = rack::math::clamp((int)(fx * size), 0, size - 1);
-            int ty = rack::math::clamp((int)(fy * size), 0, size - 1);
-            return state[ty * size + tx];
-        };
-        float rawL = (tap(0.28f, 0.62f) + tap(0.50f, 0.50f) + tap(0.72f, 0.35f)) * (1.0f / 3.0f);
-        float rawR = (tap(0.62f, 0.28f) + tap(0.50f, 0.50f) + tap(0.35f, 0.72f)) * (1.0f / 3.0f);
-        float dcCoef = 1.0f - std::exp(-2.0f * float(M_PI) * 40.0f / sampleRate);
+        const float rawL = (grid.tap(0.28f, 0.62f) + grid.tap(0.50f, 0.50f) + grid.tap(0.72f, 0.35f)) * (1.0f / 3.0f);
+        const float rawR = (grid.tap(0.62f, 0.28f) + grid.tap(0.50f, 0.50f) + grid.tap(0.35f, 0.72f)) * (1.0f / 3.0f);
         dcL += (rawL - dcL) * dcCoef;
         dcR += (rawR - dcR) * dcCoef;
         float heatL = lpL.process(rawL - dcL);
@@ -650,28 +773,50 @@ struct HeatRev : Module
         heatL = 3.0f * std::tanh(heatL * 0.3f / 3.0f); // hard-bounded to +/-3 V
         heatR = 3.0f * std::tanh(heatR * 0.3f / 3.0f);
 
-        // ---- Wet mix ----
-        const float erGain = 0.35f * space;
-        float wetL = (fdnL + erL * erGain + 0.35f * heatL) * level;
-        float wetR = (fdnR + erR * erGain + 0.35f * heatR) * level;
+        // ---- Watchdog: anything runaway or non-finite flushes EVERYTHING ----
+        const float chk = std::fabs(fdnL) + std::fabs(fdnR) + std::fabs(erL) + std::fabs(erR) +
+                          std::fabs(delayed.first) + std::fabs(delayed.second) +
+                          std::fabs(heatL) + std::fabs(heatR) + 0.f * (rawL + rawR);
+        const bool runaway = !(chk < HR_RUNAWAY) || !std::isfinite(rawL + rawR);
 
-        // Smooth limiter on the wet path: loud input can never blow up the output
-        wetL = 8.0f * std::tanh(wetL / 8.0f);
-        wetR = 8.0f * std::tanh(wetR / 8.0f);
-
-        // Safety net: if anything ever goes non-finite, flush the reverb instead of screaming
-        if (!std::isfinite(wetL) || !std::isfinite(wetR))
+        float wetL = 0.f, wetR = 0.f;
+        if (runaway)
         {
-            cathedral.reset();
-            std::fill(state.begin(), state.end(), 0.f);
-            std::fill(next.begin(), next.end(), 0.f);
-            wetL = wetR = 0.f;
+            flushAll();
+            ++flushCount;
+        }
+        else
+        {
+            // ---- Wet mix ----
+            const float erGain = 0.35f * space;
+            wetL = (fdnL + erL * erGain + 0.35f * heatL) * level;
+            wetR = (fdnR + erR * erGain + 0.35f * heatR) * level;
+
+            // Smooth limiter on the wet path: loud input can never blow up the output
+            wetL = 8.0f * std::tanh(wetL / 8.0f);
+            wetR = 8.0f * std::tanh(wetR / 8.0f);
+
+            if (!std::isfinite(wetL) || !std::isfinite(wetR))
+            {
+                flushAll();
+                ++flushCount;
+                wetL = wetR = 0.f;
+            }
+
+            // Fade the wet path in after (re)start so any start-up transient is masked
+            if (fade < 1.f)
+                fade = std::min(1.f, fade + fadeStep);
+            wetL *= fade;
+            wetR *= fade;
+
+            pkL = std::max(std::fabs(heatL), pkL * pkDecay);
+            pkR = std::max(std::fabs(heatR), pkR * pkDecay);
         }
 
         float outL = (1.0f - mix) * inL_raw + mix * wetL;
         float outR = (1.0f - mix) * inR_raw + mix * wetR;
 
-        // Soft-clips the output above ±9 V with a gentle 0.3 slope.
+        // Soft-clips the output above +/-9 V with a gentle 0.3 slope.
         auto softClip = [](float x)
         {
             const float limit = 9.0f;
@@ -681,10 +826,8 @@ struct HeatRev : Module
                 return -limit + (x + limit) * 0.3f;
             return x;
         };
-        outL = softClip(outL);
-        outR = softClip(outR);
-        outL = rack::math::clamp(outL, -10.0f, 10.0f);
-        outR = rack::math::clamp(outR, -10.0f, 10.0f);
+        outL = rack::math::clamp(softClip(outL), -10.0f, 10.0f);
+        outR = rack::math::clamp(softClip(outR), -10.0f, 10.0f);
 
         outputs[OUTPUT_L].setVoltage(outL);
         outputs[OUTPUT_R].setVoltage(outR);
@@ -693,7 +836,7 @@ struct HeatRev : Module
         if (++vizCounter >= 512)
         {
             vizCounter = 0;
-            updateViz();
+            publishViz();
         }
     }
 };
@@ -704,6 +847,41 @@ struct HeatRev : Module
 namespace
 {
 
+    static const int HR_SPARK_N = 76;
+
+    // Maps a level to 0..1 on a dB scale: 0 at -rangeDb below `top`, 1 at `top`.
+    static inline float hrMeter(float v, float top, float rangeDb)
+    {
+        const float db = 20.f * std::log10(std::max(v / top, 1e-6f));
+        return rack::math::clamp((db + rangeDb) / rangeDb, 0.f, 1.f);
+    }
+
+    // Diverging thermal colour map. u is the signed, normalised field value
+    // (about +/-1 at the display peak). Positive: black -> deep teal -> cyan ->
+    // white-hot. Negative: black -> indigo -> violet -> pale lilac.
+    static inline void hrHeatColor(float u, unsigned char *o)
+    {
+        static const float POS[5][3] = {{7, 11, 19}, {6, 62, 90}, {24, 150, 196}, {61, 224, 255}, {228, 251, 255}};
+        static const float NEG[5][3] = {{7, 11, 19}, {52, 18, 98}, {110, 56, 205}, {160, 110, 255}, {238, 226, 255}};
+        static const float STOP[5] = {0.f, 0.22f, 0.5f, 0.78f, 1.f};
+
+        if (!(u == u))
+            u = 0.f;
+        // Gamma 0.5 lifts the faint interior of the plate (heat that has diffused
+        // away from the injection edges is far weaker than the edges themselves)
+        // so structure stays visible instead of the map looking empty.
+        float m = std::sqrt(std::fabs(u));
+        m = m > 1.f ? 1.f : m;
+        const float(*C)[3] = (u >= 0.f) ? POS : NEG;
+        int s = 0;
+        while (s < 3 && m > STOP[s + 1])
+            ++s;
+        const float t = (m - STOP[s]) / (STOP[s + 1] - STOP[s]);
+        for (int c = 0; c < 3; ++c)
+            o[c] = (unsigned char)(C[s][c] + (C[s + 1][c] - C[s][c]) * t + 0.5f);
+        o[3] = 255;
+    }
+
     // Static artwork: base panel, display bezel, the REVERB section (three
     // knobs in row 1, four in row 2), the DELAY section, and the I/O row with
     // tinted output jacks.
@@ -711,9 +889,6 @@ namespace
     {
         HRPanelBackground() { box.size = Vec(HR_PANEL_W, HR_PANEL_H); }
 
-        // Draws all static panel art: base panel, bezel, REVERB/DELAY section
-        // headers and their knob cells, and the I/O row with four jack cells
-        // (outputs tinted).
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
@@ -746,56 +921,175 @@ namespace
     };
 
     // ------------------------------------------------------------
-    // Heat-map display: map on top, readout row under it
+    // Thermal display
+    //
+    //  +-----------------+  THERMAL FIELD
+    //  |                 |  GRID            48x48
+    //  |   heat plate    |  RT60             7.6 s
+    //  |   (true square, |  L  ======----
+    //  |   bilinear GPU  |  R  ====------
+    //  |   texture)      |  - [violet|cyan] +
+    //  +-----------------+  [ energy history ]
+    //
+    // The plate is a 64x64 RGBA texture, filtered by the GPU, so it is smooth at
+    // any zoom level. The UI eases the field toward the latest snapshot every
+    // frame, so motion looks fluid instead of stepping at the 90 Hz data rate.
     // ------------------------------------------------------------
     struct HRDisplayWidget : TransparentWidget
     {
         HeatRev *module = nullptr;
 
+        float disp[VIZ_N][VIZ_N] = {};
+        unsigned char pix[VIZ_N * VIZ_N * 4] = {};
+        int img = 0;
+        NVGcontext *imgVg = nullptr;
+
+        float meterL = 0.f, meterR = 0.f;
+        float spark[HR_SPARK_N] = {};
+        int sparkPos = 0, sparkTick = 0;
+        int gridN = 48;
+        float rt60 = 7.6f;
+        float demoT = 0.f;
+
         HRDisplayWidget(HeatRev *m) : module(m)
         {
             box.pos = Vec(HR_DISP_X, HR_DISP_Y);
             box.size = Vec(HR_DISP_W, HR_DISP_H);
+            for (int i = 0; i < VIZ_N * VIZ_N; ++i)
+                hrHeatColor(0.f, &pix[i * 4]);
         }
 
-        // Static layer: fills the display screen, draws the faint grid over
-        // the heat-map area, and adds the divider between the map and the
-        // readout row.
+        ~HRDisplayWidget()
+        {
+            if (img > 0 && imgVg && APP && APP->window && APP->window->vg == imgVg)
+                nvgDeleteImage(imgVg, img);
+        }
+
+        // Per-frame (UI thread): ease the displayed field toward the newest
+        // snapshot, resampling the n x n grid to the fixed 64x64 texture with
+        // bilinear interpolation, then colour-map it.
+        void step() override
+        {
+            TransparentWidget::step();
+            const int N = VIZ_N;
+
+            if (module)
+            {
+                const int n = rack::math::clamp(module->vizN, 4, N);
+                const float sc = (float)n / (float)N;
+                for (int y = 0; y < N; ++y)
+                {
+                    float fy = rack::math::clamp((y + 0.5f) * sc - 0.5f, 0.f, (float)(n - 1));
+                    const int y0 = (int)fy;
+                    const int y1 = std::min(y0 + 1, n - 1);
+                    const float ty = fy - (float)y0;
+                    for (int x = 0; x < N; ++x)
+                    {
+                        float fx = rack::math::clamp((x + 0.5f) * sc - 0.5f, 0.f, (float)(n - 1));
+                        const int x0 = (int)fx;
+                        const int x1 = std::min(x0 + 1, n - 1);
+                        const float tx = fx - (float)x0;
+                        const float a = module->viz[y0][x0] + (module->viz[y0][x1] - module->viz[y0][x0]) * tx;
+                        const float b = module->viz[y1][x0] + (module->viz[y1][x1] - module->viz[y1][x0]) * tx;
+                        float v = a + (b - a) * ty;
+                        if (!std::isfinite(v))
+                            v = 0.f;
+                        disp[y][x] += (v - disp[y][x]) * 0.45f;
+                    }
+                }
+                meterL += (hrMeter(module->vizPkL, 3.f, 48.f) - meterL) * 0.3f;
+                meterR += (hrMeter(module->vizPkR, 3.f, 48.f) - meterR) * 0.3f;
+                gridN = n;
+                rt60 = module->vizRt60;
+                if (++sparkTick >= 6) // ~10 Hz -> 7.6 s of history
+                {
+                    sparkTick = 0;
+                    spark[sparkPos] = rack::math::clamp((20.f * std::log10(module->vizEnergy + 1e-6f) + 70.f) / 90.f, 0.f, 1.f);
+                    sparkPos = (sparkPos + 1) % HR_SPARK_N;
+                }
+            }
+            else
+            {
+                // Module browser preview: a static, good-looking demo field
+                for (int y = 0; y < N; ++y)
+                    for (int x = 0; x < N; ++x)
+                    {
+                        const float fx = x / 63.f, fy = y / 63.f;
+                        disp[y][x] = 0.95f * std::sin(fx * 13.f) * std::cos(fy * 9.f) * std::exp(-1.6f * fx);
+                    }
+                meterL = 0.62f;
+                meterR = 0.45f;
+                gridN = 48;
+                rt60 = 7.6f;
+                for (int i = 0; i < HR_SPARK_N; ++i)
+                    spark[i] = 0.25f + 0.6f * std::exp(-0.05f * i) * (0.7f + 0.3f * std::sin(i * 0.7f));
+                sparkPos = 0;
+            }
+
+            for (int y = 0; y < N; ++y)
+                for (int x = 0; x < N; ++x)
+                    hrHeatColor(disp[y][x], &pix[(y * N + x) * 4]);
+        }
+
+        // Static layer: screen, plate recess, labels, legend and frames.
         void draw(const DrawArgs &args) override
         {
             NVGcontext *vg = args.vg;
             agmm::screen(vg, 0.f, 0.f, HR_DISP_W, HR_DISP_H);
 
-            // Faint grid over the map area only
+            // Plate recess + frame
             nvgBeginPath(vg);
-            for (int i = 0; i <= VIZ_COLS; i += 4)
-            {
-                nvgMoveTo(vg, i * VIZ_CELL + 0.5f, 0);
-                nvgLineTo(vg, i * VIZ_CELL + 0.5f, HR_VIZ_H);
-            }
-            for (int i = 0; i <= VIZ_ROWS; i += 4)
-            {
-                nvgMoveTo(vg, 0, i * VIZ_CELL + 0.5f);
-                nvgLineTo(vg, HR_VIZ_W, i * VIZ_CELL + 0.5f);
-            }
-            nvgStrokeColor(vg, nvgRGBA(0x3d, 0xe0, 0xff, 16));
+            nvgRoundedRect(vg, HR_PLATE_X - 1.f, HR_PLATE_Y - 1.f, HR_PLATE + 2.f, HR_PLATE + 2.f, 3.f);
+            nvgFillColor(vg, nvgRGBA(4, 7, 12, 255));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 38));
             nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
-            // Divider between the map and the readout row
+            const NVGcolor dim = nvgRGBA(138, 160, 184, 210);
+            agmm::text(vg, HR_RX, 8.f, "THERMAL FIELD", 6.5f, dim, agmm::ALIGN_L, 0.8f);
+
             nvgBeginPath(vg);
-            nvgMoveTo(vg, 0, HR_VIZ_H + 0.5f);
-            nvgLineTo(vg, HR_DISP_W, HR_VIZ_H + 0.5f);
-            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 24));
+            nvgMoveTo(vg, HR_RX, 14.5f);
+            nvgLineTo(vg, HR_RX + HR_RW, 14.5f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 28));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            agmm::text(vg, HR_RX, 22.f, "GRID", 6.5f, dim, agmm::ALIGN_L, 0.6f);
+            agmm::text(vg, HR_RX, 32.f, "RT60", 6.5f, dim, agmm::ALIGN_L, 0.6f);
+            agmm::text(vg, HR_RX, 42.f, "L", 6.5f, agmm::accent(), agmm::ALIGN_L, 0.6f);
+            agmm::text(vg, HR_RX, 50.f, "R", 6.5f, agmm::violet(), agmm::ALIGN_L, 0.6f);
+            agmm::text(vg, HR_RX, 58.f, "-", 7.f, agmm::violet(), agmm::ALIGN_L, 0.f);
+            agmm::text(vg, HR_RX + HR_RW, 58.f, "+", 7.f, agmm::accent(), agmm::ALIGN_R, 0.f);
+
+            // Meter tracks
+            for (int i = 0; i < 2; ++i)
+            {
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, HR_RX + 10.f, (i ? 48.f : 40.f), HR_RW - 10.f, 4.f, 2.f);
+                nvgFillColor(vg, nvgRGBA(255, 255, 255, 16));
+                nvgFill(vg);
+            }
+
+            // Legend bar track and history frame
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, HR_RX + 8.f, 56.f, HR_RW - 16.f, 4.f, 2.f);
+            nvgFillColor(vg, nvgRGBA(255, 255, 255, 10));
+            nvgFill(vg);
+
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, HR_RX + 0.5f, 63.5f, HR_RW - 1.f, 11.f, 2.f);
+            nvgFillColor(vg, nvgRGBA(4, 7, 12, 255));
+            nvgFill(vg);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+            nvgStrokeWidth(vg, 1.f);
             nvgStroke(vg);
 
             Widget::draw(args);
         }
 
-        // Layer-1 overlay: draws the heat-map cells (cyan positive, violet
-        // negative, opacity by magnitude) and the readout row with the grid
-        // size and the cyan/violet sign legend. Uses a demo pattern in the
-        // module browser.
+        // Self-lit layer: thermal texture, overlays, meters, values, history.
         void drawLayer(const DrawArgs &args, int layer) override
         {
             if (layer != 1)
@@ -804,39 +1098,166 @@ namespace
                 return;
             }
             NVGcontext *vg = args.vg;
+            const float PX = HR_PLATE_X, PY = HR_PLATE_Y, PS = HR_PLATE;
 
-            // Cells: cyan = positive, violet = negative, opacity = magnitude (flat fills)
-            for (int r = 0; r < VIZ_ROWS; ++r)
+            // ---- texture upload (re-create if the GL context changed) ----
+            if (img <= 0 || imgVg != vg)
             {
-                for (int c = 0; c < VIZ_COLS; ++c)
+                img = nvgCreateImageRGBA(vg, VIZ_N, VIZ_N, 0, pix);
+                imgVg = vg;
+            }
+            else
+            {
+                nvgUpdateImage(vg, img, pix);
+            }
+
+            if (img > 0)
+            {
+                NVGpaint p = nvgImagePattern(vg, PX, PY, PS, PS, 0.f, img, 1.f);
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, PX, PY, PS, PS, 2.f);
+                nvgFillPaint(vg, p);
+                nvgFill(vg);
+            }
+
+            // ---- plate overlays ----
+            // faint 8x8 reference grid
+            nvgBeginPath(vg);
+            for (int i = 1; i < 8; ++i)
+            {
+                const float o = PS * i / 8.f;
+                nvgMoveTo(vg, PX + o, PY);
+                nvgLineTo(vg, PX + o, PY + PS);
+                nvgMoveTo(vg, PX, PY + o);
+                nvgLineTo(vg, PX + PS, PY + o);
+            }
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 10));
+            nvgStrokeWidth(vg, 0.5f);
+            nvgStroke(vg);
+
+            // vignette
+            {
+                NVGpaint v = nvgRadialGradient(vg, PX + PS * 0.5f, PY + PS * 0.5f, PS * 0.35f, PS * 0.78f,
+                                               nvgRGBA(0, 0, 0, 0), nvgRGBA(0, 0, 0, 120));
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, PX, PY, PS, PS, 2.f);
+                nvgFillPaint(vg, v);
+                nvgFill(vg);
+            }
+            // glass highlight
+            {
+                NVGpaint gl = nvgLinearGradient(vg, 0.f, PY, 0.f, PY + PS * 0.45f,
+                                                nvgRGBA(255, 255, 255, 24), nvgRGBA(255, 255, 255, 0));
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, PX, PY, PS, PS * 0.45f, 2.f);
+                nvgFillPaint(vg, gl);
+                nvgFill(vg);
+            }
+
+            // injection edges: left channel enters on the left edge, right channel on the bottom edge
+            nvgBeginPath(vg);
+            nvgRect(vg, PX, PY + 1.f, 3.f, PS - 2.f);
+            nvgFillColor(vg, agmm::withA(agmm::accent(), 0.22f));
+            nvgFill(vg);
+            nvgBeginPath(vg);
+            nvgRect(vg, PX, PY + 1.f, 1.5f, PS - 2.f);
+            nvgFillColor(vg, agmm::withA(agmm::accent(), 0.95f));
+            nvgFill(vg);
+
+            nvgBeginPath(vg);
+            nvgRect(vg, PX + 1.f, PY + PS - 3.f, PS - 2.f, 3.f);
+            nvgFillColor(vg, agmm::withA(agmm::violet(), 0.22f));
+            nvgFill(vg);
+            nvgBeginPath(vg);
+            nvgRect(vg, PX + 1.f, PY + PS - 1.5f, PS - 2.f, 1.5f);
+            nvgFillColor(vg, agmm::withA(agmm::violet(), 0.95f));
+            nvgFill(vg);
+
+            // frame on top
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, PX + 0.25f, PY + 0.25f, PS - 0.5f, PS - 0.5f, 2.f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 46));
+            nvgStrokeWidth(vg, 0.8f);
+            nvgStroke(vg);
+
+            // ---- right column: values ----
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%dx%d", gridN, gridN);
+            agmm::text(vg, HR_RX + HR_RW, 22.f, buf, 7.5f, agmm::accent(), agmm::ALIGN_R, 0.6f);
+            if (rt60 < 10.f)
+                snprintf(buf, sizeof(buf), "%.1f s", rt60);
+            else
+                snprintf(buf, sizeof(buf), "%.0f s", rt60);
+            agmm::text(vg, HR_RX + HR_RW, 32.f, buf, 7.5f, nvgRGBA(228, 238, 248, 255), agmm::ALIGN_R, 0.6f);
+
+            // level meters (heat-layer output, dB scale)
+            const float mw = HR_RW - 10.f;
+            for (int i = 0; i < 2; ++i)
+            {
+                const float lvl = i ? meterR : meterL;
+                const float y = i ? 48.f : 40.f;
+                const NVGcolor c = i ? agmm::violet() : agmm::accent();
+                if (lvl > 0.01f)
                 {
-                    float v;
-                    if (module)
-                        v = module->viz[r][c];
-                    else
-                        v = 8.f * std::sin(c * 0.33f) * std::cos(r * 0.55f) * std::exp(-0.025f * c);
-
-                    float n = std::tanh(v * 0.25f);
-                    float a = std::fabs(n);
-                    if (a < 0.03f)
-                        continue;
-
+                    NVGpaint mp = nvgLinearGradient(vg, HR_RX + 10.f, 0.f, HR_RX + 10.f + mw, 0.f,
+                                                    agmm::withA(c, 0.35f), agmm::withA(c, 1.f));
                     nvgBeginPath(vg);
-                    nvgRect(vg, c * VIZ_CELL + 0.4f, r * VIZ_CELL + 0.4f, VIZ_CELL - 0.8f, VIZ_CELL - 0.8f);
-                    nvgFillColor(vg, agmm::withA(n > 0.f ? agmm::accent() : agmm::violet(), 0.2f + 0.8f * a));
+                    nvgRoundedRect(vg, HR_RX + 10.f, y, std::max(2.f, mw * lvl), 4.f, 2.f);
+                    nvgFillPaint(vg, mp);
                     nvgFill(vg);
                 }
             }
 
-            // ---- readout row (own row, never over the map) ----
-            char buf[32];
-            int sz = module ? module->size : 48;
-            snprintf(buf, sizeof(buf), "GRID %dx%d", sz, sz);
-            agmm::text(vg, 4.f, HR_FOOT_Y, buf, 7.f, agmm::accent(), agmm::ALIGN_L, 0.5f);
+            // sign legend: violet -> dark -> cyan
+            {
+                const float lx = HR_RX + 8.f, lw = HR_RW - 16.f;
+                NVGpaint a = nvgLinearGradient(vg, lx, 0.f, lx + lw * 0.5f, 0.f,
+                                               agmm::withA(agmm::violet(), 0.95f), nvgRGBA(7, 11, 19, 255));
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, lx, 56.f, lw * 0.5f + 0.5f, 4.f, 2.f);
+                nvgFillPaint(vg, a);
+                nvgFill(vg);
+                NVGpaint b = nvgLinearGradient(vg, lx + lw * 0.5f, 0.f, lx + lw, 0.f,
+                                               nvgRGBA(7, 11, 19, 255), agmm::withA(agmm::accent(), 0.95f));
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, lx + lw * 0.5f, 56.f, lw * 0.5f, 4.f, 2.f);
+                nvgFillPaint(vg, b);
+                nvgFill(vg);
+            }
 
-            const float negW = agmm::textWidth(vg, "VIOLET -", 7.f, 0.5f);
-            agmm::text(vg, HR_DISP_W - 4.f, HR_FOOT_Y, "VIOLET -", 7.f, agmm::violet(), agmm::ALIGN_R, 0.5f);
-            agmm::text(vg, HR_DISP_W - 4.f - negW - 6.f, HR_FOOT_Y, "CYAN +", 7.f, agmm::accent(), agmm::ALIGN_R, 0.5f);
+            // energy history (oldest -> newest), dB scale
+            {
+                const float x0 = HR_RX + 1.5f, w = HR_RW - 3.f;
+                const float yb = 73.f, hh = 8.f;
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, x0, yb);
+                for (int i = 0; i < HR_SPARK_N; ++i)
+                {
+                    const float v = spark[(sparkPos + i) % HR_SPARK_N];
+                    nvgLineTo(vg, x0 + w * i / (float)(HR_SPARK_N - 1), yb - hh * v);
+                }
+                nvgLineTo(vg, x0 + w, yb);
+                nvgClosePath(vg);
+                NVGpaint fp = nvgLinearGradient(vg, 0.f, yb - hh, 0.f, yb,
+                                                agmm::withA(agmm::accent(), 0.45f), agmm::withA(agmm::accent(), 0.02f));
+                nvgFillPaint(vg, fp);
+                nvgFill(vg);
+
+                nvgBeginPath(vg);
+                for (int i = 0; i < HR_SPARK_N; ++i)
+                {
+                    const float v = spark[(sparkPos + i) % HR_SPARK_N];
+                    const float px = x0 + w * i / (float)(HR_SPARK_N - 1);
+                    const float py = yb - hh * v;
+                    if (i == 0)
+                        nvgMoveTo(vg, px, py);
+                    else
+                        nvgLineTo(vg, px, py);
+                }
+                nvgStrokeColor(vg, agmm::withA(agmm::accent(), 0.95f));
+                nvgStrokeWidth(vg, 1.f);
+                nvgStroke(vg);
+            }
 
             Widget::drawLayer(args, layer);
         }
@@ -845,14 +1266,11 @@ namespace
 } // namespace
 
 // ------------------------------------------------------------
-// Module widget: adds the static panel, screws, the heat-map display, the
+// Module widget: adds the static panel, screws, the thermal display, the
 // reverb knobs, the delay knobs and the two in / two out jacks.
 // ------------------------------------------------------------
 struct HeatRevWidget : ModuleWidget
 {
-    // Builds the widget tree: static background, screws, live display, the
-    // three reverb row-1 knobs, the four reverb row-2 knobs, the four delay
-    // knobs, and the I/O jacks.
     HeatRevWidget(HeatRev *module)
     {
         setModule(module);
