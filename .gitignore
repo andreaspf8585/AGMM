@@ -11,3 +11,5 @@
 /dep
 /dist
 helper.py
+generate_docs.py
+generate_docs1.py
