@@ -1,5 +1,10 @@
 # AGMM
 author: Andreas Gkogkos, andreaspf8585@gmail.com
+
+## Module Documentation
+
+[Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
+
 # AGMM Module Catalogue
 
 The plugin is a collection of **57 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
