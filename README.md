@@ -14,7 +14,7 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 ## 1. Generative Ambient Instruments
 *Self-composing machines that schedule their own chords, layers and textures.*
 
-| Module | Description |
+| Module | Description | 
 |--------|-------------|
 | **AMB** | 36 HP generative ambient machine (Eno / AMB-1 style): an 8-voice detuned pad, 8 tape-loop bells of unequal prime lengths, sub bass, six Euclidean heartbeat layers, formant choir, sparse music-box plucks, pitched wind swells, shimmering glass partials. Runs through tape ping-pong echo, 28-voice granular cloud, probabilistic glitch stage, and an 8-line FDN reverb. Ten scales, automatic chord progression with 7 s cross-fade, external clock input with pulses-per-beat menu, optional clock-synced echo time. |
 | **AMB_MINI** | 28 HP compact sibling of AMB: cross-fading 8-voice pad, 8 tape-loop bells, sub bass, six Euclidean pulse layers, tape echo and an 8-line FDN reverb. Same automatic chord progression and ten-scale selection, without the choir / pluck / air / glass layers or the granular / glitch stages. Can be loaded alongside the full AMB in the same patch. |
