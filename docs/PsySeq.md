@@ -18,10 +18,11 @@ Key features:
 - Periodic mutation (with configurable wait cycles)
 - Randomize button + trigger
 - Clear, set all probabilities 100%, randomize all probabilities
-- Polyphonic CV output + inverted CV
+- CV output + inverted CV output
 - Step trigger, cycle gate
 - Live 8×8 grid with playhead, voltage bars, probability bars, skip crosses, start marker
 - Status screen with current step, HIT/SKIP flag, direction/RAND V/MUT chips
+- Typed voltage entry: volts ("2.5", "2.5v") or note names ("a#4v", "c3", "eb5"); note entry switches range to −10..10 V with C4 = 0 V
 
 ## Module Screenshot
 
@@ -33,6 +34,7 @@ Key features:
 
 - `PsySeq`: Core module class inheriting from `rack::Module`
 - `WaitCyclesParamQuantity`: Custom ParamQuantity that snaps to 0/4/8/16
+- `VoltageParamQuantity`: Custom ParamQuantity for the step voltage knobs (volt/note entry)
 - `PSPanelBackground`: Static panel artwork
 - `PSGridWidget`: Live 8×8 grid
 - `PSStatusWidget`: Status screen
@@ -45,6 +47,7 @@ Key features:
 ### Structures
 
 - `WaitCyclesParamQuantity`: snaps to `{0, 4, 8, 16}`
+- `VoltageParamQuantity`: overrides `getDisplayValueString()` / `setDisplayValueString()` to show volts in the module's current range and to parse note names or volts in the editable field
 
 ### State (grouped)
 
@@ -86,7 +89,7 @@ $$
 where $u \sim \text{Uniform}[0, 1]$.
 
 If visited:
-- Fire the step trigger
+- Fire the step trigger (5 ms pulse)
 - Update the held voltage to the current cell's value
 
 If skipped:
@@ -116,9 +119,9 @@ When a forward/reverse cycle completes, the module may attempt a mutation:
 - `waitCycles = 0, 4, 8, 16`
 - `mutationProb = knob value`
 
-If `cycleCounter >= waitCycles`:
-- With probability `mutationProb`, randomize all **active** step voltages (all steps in the sequence, not all 64)
-- Reset `cycleCounter = 0`
+The cycle counter increments on each completed cycle. If `waitCycles == 0` or `cycleCounter >= waitCycles`, a mutation attempt is made:
+- With probability `mutationProb`, randomize the voltages of all **active** steps (all steps in the current sequence, not all 64 cells)
+- `cycleCounter` is reset to 0
 
 ### Inverted CV output
 
@@ -130,7 +133,7 @@ This flips the voltage range, which can be useful for patching.
 
 ### Cycle gate
 
-A 1 ms pulse on the cycle output whenever a full cycle completes.
+A 1 ms pulse on the cycle output whenever a full forward/reverse cycle completes.
 
 ### Step trigger
 
@@ -142,10 +145,10 @@ A 5 ms pulse whenever a step is visited.
 
 | Parameter | Min | Max | Default | Description |
 |-----------|-----|-----|---------|-------------|
-| `STEPS_PARAM` | 1 | 64 | 8 | Steps |
-| `START_PARAM` | 1 | 64 | 1 | Start step |
+| `STEPS_PARAM` | 1 | 64 | 8 | Steps (snapped) |
+| `START_PARAM` | 1 | 64 | 1 | Start step (snapped) |
 | `MUTATION_PARAM` | 0 | 1 | 0 | Mutation probability |
-| `MUTATION_WAIT_PARAM` | 0, 4, 8, 16 | 0 | 0 | Wait cycles before mutation |
+| `MUTATION_WAIT_PARAM` | 0 | 16 | 0 | Wait cycles before mutation attempt (snaps to 0/4/8/16) |
 
 ### Switches
 
@@ -164,8 +167,8 @@ A 5 ms pulse whenever a step is visited.
 
 | Parameter | Min | Max | Default | Description |
 |-----------|-----|-----|---------|-------------|
-| `KNOB_OFFSET + 0..63` | 0 | 1 | 0 | Voltage trimpot |
-| `PROB_OFFSET + 0..63` | 0 | 1 | 1 | Probability trimpot |
+| `KNOB_OFFSET + 0..63` | 0 | 1 | 0 | Voltage trimpot (scaled into voltage range; editable as volts/notes) |
+| `PROB_OFFSET + 0..63` | 0 | 1 | 1 | Visit probability trimpot |
 
 ### Inputs
 
@@ -181,16 +184,16 @@ A 5 ms pulse whenever a step is visited.
 |--------|-------------|
 | `OUTPUT_OUT` | CV out |
 | `CYCLE_GATE_OUTPUT` | Cycle gate |
-| `STEP_TRIGGER_OUTPUT` | Step trigger |
+| `STEP_TRIGGER_OUTPUT` | Step trigger (every visited clock) |
 | `INV_OUTPUT` | Inverted CV |
 
 ### Lights
 
-- `LIGHT_OFFSET + 0..63` — per-cell gate LEDs
+- `LIGHT_OFFSET + 0..63` — per-cell gate LEDs (lit only when the current step is visited)
 
 ### Menu
 
-- Voltage range (0..1, −1..1, −2..2, −5..5, 0..5, 0..10, −10..10)
+- Voltage range: 0..1, −1..1, −2..2, −5..5, 0..5, 0..10, −10..10
 - Randomize all step voltages
 - Clear all step voltages
 - All probabilities 100%
@@ -227,27 +230,26 @@ A 5 ms pulse whenever a step is visited.
 1. **Randomize button** — On rising edge, randomize all 64 voltage trimpots.
 2. **Randomize input** — Same.
 3. **Read params** — Steps, start, direction.
-4. **Steps/start change** — Reset cycle counter.
-5. **Reset input** — Reset position and cycle counter.
+4. **Steps/start change** — Clamp position, reset cycle counter, refresh held CV.
+5. **Reset input** — Reset position, cycle counter, `curVisited = true`, refresh held CV.
 6. **Clock edge**:
-   - Advance position according to direction.
+   - Advance position according to direction; flag `cycleCompleted` on wrap.
    - Read probability of the current cell.
-   - Roll probability; if visited, fire step trigger, update held voltage. If skipped, do not update.
-   - If a cycle completed, increment cycle counter. If `waitCycles == 0` or `cycleCounter >= waitCycles`, attempt mutation.
-   - Fire cycle pulse on cycle completion.
+   - Roll probability; if visited, fire step trigger and flash, update held voltage. If skipped, hold.
+   - If a cycle completed, increment cycle counter. If `waitCycles == 0` or `cycleCounter >= waitCycles`, attempt mutation; on success, randomize active step voltages and flash. Always fire cycle pulse.
 7. **Write outputs** — CV, inverted CV, cycle gate, step trigger.
-8. **Update LEDs** — Light the current cell if visited.
-9. **Update display** — Flash step, flash mutation.
+8. **Update LEDs** — Light the current cell if visited; smooth-brightness transition.
+9. **Update display** — Decay step and mutation flashes.
 
 ## 7. Important Functions
 
 ### `mapIndex(int pos)`
 
-Maps a sequence position to a grid index.
+Maps a sequence position to a grid index (start-step offset, wrapped into 0..63).
 
 ### `computeVoltageForStep(int stepIndex, bool randomMode)`
 
-Returns the voltage for the given cell.
+Returns the voltage for the given cell (random in random mode, else trimpot scaled into range).
 
 ### `updateHeldVoltage()`
 
@@ -259,11 +261,11 @@ Sets the voltage range and refreshes the held CV.
 
 ### `randomizeAllStepKnobs()`
 
-Randomizes all 64 voltage trimpots.
+Randomizes all 64 voltage trimpots and refreshes the held CV.
 
 ### `clearAllStepKnobs()`
 
-Sets all voltage trimpots to 0.
+Sets all voltage trimpots to 0 and refreshes the held CV.
 
 ### `setAllProbabilities(float v)`
 
@@ -273,9 +275,21 @@ Sets all 64 probability trimpots to `v`.
 
 Randomizes all 64 probability trimpots.
 
+### `dataToJson()` / `dataFromJson(json_t *)`
+
+Serializes / restores `voltMin` and `voltMax`; falls back to −1..1 if invalid, then refreshes the held CV.
+
 ### `process(const ProcessArgs &args)`
 
 The main callback described in §6.
+
+### `VoltageParamQuantity::getDisplayValueString()`
+
+Returns the knob value in volts for the module's current voltage range.
+
+### `VoltageParamQuantity::setDisplayValueString(std::string s)`
+
+Parses note names ("a#4v", "c3", "eb5", "g-1") or plain volts ("2.5", "2.5v"). Note input switches the range to −10..10 V first. C4 = 0 V at 1 V/oct.
 
 ## 8. Mathematical Implementation
 
@@ -317,11 +331,10 @@ $$
 - No allocation in `process()`
 - All state is fixed-size
 - 64 trimpots × 2 (voltage + probability) = 128 floats
-- `ruleset[8]`: 8 ints
 
 ### Buffers
 
-- `ruleset[8]`: 8 ints
+- No additional buffers; the per-step trimpots serve as the pattern storage.
 
 ### Real-time Processing
 
@@ -345,7 +358,7 @@ $$
 
 - `plugin.hpp` — VCV Rack core
 - `agmm_ui.hpp` — shared AGMM UI helpers
-- `<cmath>`, `<cstdio>`, `<cstring>`, `<algorithm>`
+- `<cmath>`, `<cstdio>`, `<cstring>`, `<cstdlib>`, `<string>`, `<algorithm>`
 
 ### External Classes
 
@@ -357,6 +370,6 @@ $$
 
 `PsySeq` is an 8×8 step sequencer with per-cell voltage and probability. The probability feature is what makes it distinctive: each step has a chance of being skipped, which turns a simple sequence into a probabilistic one. Combined with the mutation feature, the sequence evolves over time.
 
-The display is excellent: the 8×8 grid shows the current step, the voltage bars and probability bars, the start marker, and the skip crosses. The status screen shows the current step, the HIT/SKIP flag, and the direction/mode chips. The voltage range can be set from 0..1 up to ±10 V, and the inverted CV output makes it easy to patch inverted melodies.
+The display is excellent: the 8×8 grid shows the current step, the voltage bars and probability bars, the start marker, and the skip crosses. The status screen shows the current step, the HIT/SKIP flag, and the direction/mode chips. The voltage range can be set from 0..1 up to ±10 V, and the inverted CV output makes it easy to patch inverted melodies. Typed voltage entry additionally accepts note names for melodic work.
 
 The main limitations are: only 8×8 (64 steps), no per-step gate length, and the mutation only affects voltages (not probabilities). For a more flexible sequencer, see `DiceOnSteroids` (which has a pattern recorder) or `ExpressArpeggiator` (which has an interactive display).

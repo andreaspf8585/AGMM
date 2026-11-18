@@ -15,9 +15,10 @@ Key features:
 - Pulse-width control for square
 - Chaos multiplier (×1, ×2, ×3, ×5, ×10)
 - CV range selectable (±5 V or ±10 V)
-- CV + attenuverter on pitch, chaos, waveform and pulse width
+- CV + attenuverter on chaos, waveform and pulse width
+- 1 V/oct pitch input (no attenuverter)
 - Reset input for the chaos drift
-- Editable frequency field (Hz or note name)
+- Editable frequency field (Hz or note name, with semitone offsets)
 - Scope + chaos drift history display
 
 ## Module Screenshot
@@ -77,7 +78,7 @@ with $\alpha = \min(2\pi f_c/f_s, 0.5)$ and $f_c = 1.5$ Hz. The slow filter make
 ### Pitch computation
 
 $$
-\text{pitch} = \text{basePitch} + \text{V/Oct} + \text{pitchCV} \cdot \text{atten} + \text{chaos} \cdot \text{depth} \cdot \text{mult}
+\text{pitch} = \text{basePitch} + \text{V/Oct} + \text{chaos} \cdot \text{depth} \cdot \text{mult}
 $$
 
 ### Fast 2^x approximation
@@ -95,7 +96,7 @@ This is accurate to ~1e-3 relative error, which is good enough for pitch.
 ### Waveforms
 
 - **Sine**: $\sin(2\pi\phi)$
-- **Triangle**: $1 - 4|\phi - 0.5|$ with a 90° phase shift (so it starts at 0)
+- **Triangle**: `(φ < 0.5 ? 4φ − 1 : 3 − 4φ)` — equivalent to $1 - 4|\phi - 0.5|$, trough at φ=0 and φ=1, peak at φ=0.5
 - **Saw**: $1 - 2\phi$, with minBLEP correction at wrap
 - **Square**: $(\phi < pw ? 1 : -1)$, with minBLEP correction at both edges
 
@@ -131,12 +132,11 @@ The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). 
 
 | Parameter | Min | Max | Default | Description |
 |-----------|-----|-----|---------|-------------|
-| `PITCH_PARAM` | 0 | 1 | 0.5 | Frequency (10 Hz .. 6 kHz) |
+| `PITCH_PARAM` | 0 | 1 | ≈C4 | Frequency (10 Hz .. 6 kHz, logarithmic) |
 | `CHAOS_PARAM` | 0 | 1 | 0 | Chaos depth |
 | `WAVE_PARAM` | 0 | 3 | 0 | Waveform |
 | `PW_PARAM` | 0 | 1 | 0.5 | Pulse width |
 | `CHAOS_MULT_PARAM` | 0 | 4 | 0 | Chaos multiplier |
-| `PITCH_ATTEN_PARAM` | −1 | 1 | 0 | Pitch CV attenuverter |
 | `CHAOS_ATTEN_PARAM` | −1 | 1 | 0 | Chaos CV attenuverter |
 | `WAVE_ATTEN_PARAM` | −1 | 1 | 0 | Wave CV attenuverter |
 | `PW_ATTEN_PARAM` | −1 | 1 | 0 | Pulse width CV attenuverter |
@@ -151,8 +151,7 @@ The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). 
 
 | Input | Description |
 |-------|-------------|
-| `CV_INPUT` | 1 V/oct pitch |
-| `PITCH_CV_INPUT` | Pitch modulation CV |
+| `CV_INPUT` | 1 V/oct pitch (polyphonic) |
 | `CHAOS_CV_INPUT` | Chaos CV |
 | `WAVE_CV_INPUT` | Waveform select CV |
 | `PW_CV_INPUT` | Pulse width CV |
@@ -162,22 +161,17 @@ The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). 
 
 | Output | Description |
 |--------|-------------|
-| `VCO_L_OUTPUT` | Left |
-| `VCO_R_OUTPUT` | Right |
+| `VCO_L_OUTPUT` | Left (polyphonic) |
+| `VCO_R_OUTPUT` | Right (polyphonic) |
 
 ### Lights
 
 - `CHAOS_LIGHT` — Chaos activity
 
-### Menu
-
-- Frequency (Hz or note name)
-- Display mode (Note or Hz)
-
 ### Enumerations
 
-- `ParamId`: Pitch, Chaos, ChaosMult, Wave, PW, PitchAtten, ChaosAtten, WaveAtten, PWAtten, CVRange
-- `InputId`: VOct, PitchCV, ChaosCV, WaveCV, PWCV, ChaosReset
+- `ParamId`: Pitch, Chaos, ChaosMult, Wave, PW, ChaosAtten, WaveAtten, PWAtten, CVRange
+- `InputId`: CV_INPUT (V/Oct), ChaosCV, WaveCV, PWCV, ChaosReset
 - `OutputId`: OutL, OutR
 - `LightId`: Chaos
 
@@ -188,7 +182,6 @@ The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). 
 | Name | Type | Range | Description |
 |------|------|-------|-------------|
 | `CV_INPUT` | CV | 1 V/oct | Pitch (polyphonic) |
-| `PITCH_CV_INPUT` | CV | ±10 V | Pitch modulation |
 | `CHAOS_CV_INPUT` | CV | ±10 V | Chaos modulation |
 | `WAVE_CV_INPUT` | CV | ±10 V | Waveform selection |
 | `PW_CV_INPUT` | CV | ±10 V | Pulse width modulation |
@@ -206,109 +199,121 @@ The CV range switch toggles between ±5 V (scale = 1) and ±10 V (scale = 0.5). 
 1. **Read base pitch** from FREQ knob.
 2. **Read controls** — Chaos, wave, pulse width, chaos multiplier, CV attens.
 3. **CV range scale** — 1.0 for ±5 V, 0.5 for ±10 V.
-4. **Chaos reset** — On rising edge, zero both drift values.
+4. **Chaos reset** — On rising edge (>1 V with previous ≤1 V), zero both drift values.
 5. **Update chaos** — Two independent one-pole filters on white noise.
-6. **Determine channels** — `max(1, CV_INPUT channels)`.
-7. **Grow voices array** if needed.
-8. **For each voice**:
+6. **Determine channels** — `max(1, CV_INPUT channels)`; set both outputs' channel counts; grow the voices vector if needed.
+7. **For each voice**:
    - Read V/Oct, chaos CV, wave CV, PW CV.
-   - Compute total pitch for L and R.
-   - Compute frequency with fast 2^x.
+   - Compute total pitch for L and R (independent chaos drift added per channel).
+   - Compute frequency with fast 2^x, clamped to 10 Hz..6 kHz.
    - Compute phase increment.
    - Determine wave index (quantized to 0..3).
-   - Determine PW.
-   - Render L and R with minBLEP.
-   - Write outputs.
-9. **LED** — Chaos drift × depth × gain.
-10. **Display** — History update.
+   - Determine PW (clamped to 0.01..0.99).
+   - Render L and R with minBLEP-corrected waveforms; write ±5 V outputs.
+   - For channel 0, update display fields and peak-hold `driftPeak`.
+8. **LED** — `clamp(|chaosDrift| * chaosKnob * gain, 0, 1)`, smooth-brightness.
+9. **Display** — At ~60 Hz, push the current `driftPeak * gain` into `driftHist`, advance `driftHead`, reset `driftPeak`.
 
 ## 7. Important Functions
 
+### `StFreqQ::mapToFreq(float v)`
+
+Maps a normalised knob value (0..1) to Hz on a 10 Hz..6 kHz log curve: `10 * 600^v`.
+
+### `StFreqQ::mapFromFreq(float f)`
+
+Inverse of `mapToFreq`; clamps `f` to 10..6000 Hz.
+
+### `StFreqQ::getDisplayValueString()`
+
+Returns the current frequency formatted as `"%.1f Hz"`.
+
 ### `StFreqQ::setDisplayValueString(std::string s)`
 
-Parses note names ("A4", "C#3") or frequencies ("440") into a knob value.
+Parses the editable text field. Accepts:
+- A raw frequency ("440", "261.63") → set directly
+- A note name with octave ("A4", "C#3", "Bb2") → converted to Hz via A4 = 440 Hz
+- A signed semitone offset from C4 ("+12", "-5") → `FREQ_C4 * 2^(st/12)`
 
-### `genWave(float &phase, float &lastPhase, int waveIdx, float pw, ...)`
+Whitespace is ignored; unrecognised text falls back to the base class.
 
-Generates one sample of the waveform with minBLEP corrections.
+### `Stagger::onReset(const ResetEvent &e)`
+
+Clears both chaos drifts, the drift peak and history, and drops all voices so they are recreated on the next `process()`.
 
 ### `Stagger::process(const ProcessArgs &args)`
 
-The main callback described in §6.
+Main callback, described in §6.
 
 ## 8. Mathematical Implementation
 
-### Fast 2^x
-
-```cpp
-u.i = (uint32_t)((1 << 23) * (x + 126.94269504f));
-```
-
-### Phase increment
+### Chaos drift (one-pole filter per channel)
 
 $$
-\Delta\phi = f \cdot \Delta t
+\text{drift} \leftarrow (1 - \alpha)\,\text{drift} + \alpha\,w, \quad w \sim \mathcal{U}[-1,1]
 $$
 
-### Frequency (from pitch)
-
 $$
-f = 261.626 \cdot 2^{\text{pitch}}
+\alpha = \min\!\left(2\pi \cdot 1.5 \cdot \frac{1}{f_s},\ 0.5\right)
 $$
 
-### Chaos filter
+### Pitch and frequency
 
 $$
-\text{chaos} \leftarrow (1 - \alpha) \text{chaos} + \alpha w, \quad \alpha = \min(2\pi f_c/f_s, 0.5)
+\text{pitch}_{L/R} = \text{basePitch} + \text{V/Oct} + \text{chaos}_{L/R} \cdot \text{depth} \cdot \text{mult}
 $$
 
-### Pulse width
-
 $$
-pw = \text{clamp}(\text{knob} + \text{cv} \cdot \text{atten}/10, 0.01, 0.99)
+f_{L/R} = \text{FREQ\_C4} \cdot 2^{\text{pitch}_{L/R}}, \quad \Delta\phi = f \cdot \Delta t
 $$
 
-### Wave selection
+### LED intensity
 
 $$
-\text{wave} = \text{clamp}(\text{knob} + \text{cv} \cdot \text{atten} \cdot 2/5, 0, 3)
+\text{intensity} = \operatorname{clamp}\!\big(|\text{drift}| \cdot \text{chaosKnob} \cdot 160,\ 0,\ 1\big)
+$$
+
+### CV range scale
+
+$$
+\text{scale} = \begin{cases} 1.0 & \text{±5 V range} \\ 0.5 & \text{±10 V range} \end{cases}
 $$
 
 ## 9. Performance and Optimization
 
 ### CPU Usage
 
-- Per voice: 2 channels × (phase + wave + minBLEP) ≈ 2 × 30 = 60 flops
-- Max 16 voices × 60 = 960 flops/sample
-- Chaos filters: 4 flops
-- Total: ~1000 flops/sample worst case
+- Per sample per voice: 2 oscillators (L and R) with minBLEP, each ~30–60 flops → ~100 flops/voice/sample
+- Scales linearly with polyphony
+- Per sample once: 2 noise draws, 2 one-pole filters, LED update, output writes
 
 ### Memory Allocation
 
-- `voices` is a `std::vector` that grows to the channel count (max 16)
-- `Voice` contains 6 minBLEP generators (each ~64 floats) ≈ 400 bytes/voice
-- Total: ~6.4 KB
+- Voices vector resized only when the channel count grows; no allocation once warmed up
+- Fixed-size `driftHist[128]`
+- `disp*` display state is fixed-size
 
 ### Buffers
 
-- `driftHist[128]`: 512 bytes
-- Per-voice state: ~400 bytes × 16 = 6.4 KB
+- `driftHist[128]` — scroll history for the chaos drift display
 
 ### Real-time Processing
 
-- All loops bounded by 16 (voices)
-- No allocation after the vector has grown once
-- minBLEP is a fixed-size ring buffer
+- All loops bounded
+- No allocation in steady state, no blocking
 
 ### Thread Safety
 
-- All state written by audio thread, read by UI thread via torn reads
+- Display fields (`dispFreq`, `dispPw`, `dispPhase`, `dispWave`, `dispChannels`, `driftHist`, `driftHead`) are written by the audio thread and read by the UI thread via torn reads; cosmetic only
+- Voice vector is only touched by the audio thread
 
 ### Numerical Stability
 
-- `fastExp2` is accurate for `x ∈ [-4, 4]` (which covers the pitch range)
-- `!std::isfinite` on output resets voice state
-- minBLEP keeps the square and saw bounded
+- Frequencies clamped to 10..6000 Hz
+- Pulse width clamped to 0.01..0.99
+- Chaos depth clamped to 0..1
+- Waveform selection clamped to 0..3
+- Filter coefficient α clamped to ≤0.5
 
 ## 10. Dependencies
 
@@ -317,20 +322,20 @@ $$
 - `plugin.hpp` — VCV Rack core
 - `agmm_ui.hpp` — shared AGMM UI helpers
 - `<cmath>`, `<cstdio>`, `<cstring>`, `<cstdint>`, `<vector>`, `<map>`, `<string>`, `<regex>`, `<algorithm>`, `<random>`
-- `"dsp/minblep.hpp"` — minBLEP generator
+- `"dsp/minblep.hpp"` — `rack::dsp::MinBlepGenerator`
 
 ### External Classes
 
 - `rack::Module`, `rack::TransparentWidget`, `rack::engine::ParamQuantity`
-- `rack::dsp::MinBlepGenerator<16, 16>`
+- `rack::dsp::MinBlepGenerator<16,16>`
 - `agmm::panelBase`, `agmm::bezel`, `agmm::cell`, `agmm::text`, `agmm::screen`, `agmm::plotFrame`, `agmm::sectionHeader`, `agmm::withA`, `agmm::violet`, `agmm::accent`, `agmm::bright`, `agmm::warm`, `agmm::dim`, `agmm::ALIGN_L/C/R`, `agmm::CyanLight`
 
 ## 11. Summary
 
-`Stagger` is a VCO whose defining feature is its **dual-channel drift**: each voice runs two independent oscillators with slow filtered random pitch drift, so the two outputs are never perfectly in tune. This gives a "staggering" stereo effect — the pitch slowly wobbles around the base note, and the L/R channels drift in different directions.
+`Stagger` is a polyphonic stereo VCO whose defining feature is the slow, filtered random "chaos" drift applied independently to the left and right channels. The result is a wide, unstable tone that slowly staggers out of tune with itself — great for pads, drones and anything that wants width and instability without explicit detune controls.
 
-The minBLEP anti-aliasing is essential: without it, the saw and square waves would alias badly at high frequencies. The `dsp::MinBlepGenerator` from Rack handles this efficiently.
+The DSP is straightforward but well-featured: four anti-aliased waveforms (minBLEP on saw and square), pulse-width control, a chaos multiplier switch, CV with attenuverters on chaos/wave/PW, a selectable CV range, and a chaos-reset input. The frequency field is editable and accepts Hz, note names, or semitone offsets from C4.
 
-The chaos multiplier is a nice touch: ×1 gives subtle drift, ×10 gives wild detuning. The reset input lets you snap back to zero if the drift has wandered too far.
+The display shows the current waveform (two cycles) with a phase marker, and a scrolling history of the chaos drift — so you can visually confirm the amount of instability at a glance.
 
-The main limitations are: the drift filter is fixed at 1.5 Hz (no rate control), and the chaos CV is a simple offset (no per-voice independence). But for a "drifty" VCO, this is exactly right.
+Compared with a plain VCO, Stagger trades precise tuning for deliberate instability. The pitch input is polyphonic and has no attenuverter, so pitch modulation must be done externally; the chaos depth is the primary modulator here. If you need fine pitch modulation, see other AGMM VCOs with a dedicated pitch-CV attenuverter.
