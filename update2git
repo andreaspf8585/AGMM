@@ -1,8 +1,0 @@
-
-cd ~/Documents/VCVRACK/Rack/Rack-SDK/AGMM
-
-git add .
-
-git commit -m "Update source files [skip ci]"
-
-git push origin main

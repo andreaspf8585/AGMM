@@ -13,3 +13,8 @@
 helper.py
 generate_docs.py
 generate_docs1.py
+compile
+compileVerbose
+screenshot_sgmm.ps1
+send2git
+update2git
