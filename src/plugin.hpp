@@ -65,3 +65,4 @@ extern Model* modelGalton;
 extern Model* modelAMB_MINI;
 extern Model* modelPlot;
 extern Model* modelEvolved;
+extern Model* modelArpLib;

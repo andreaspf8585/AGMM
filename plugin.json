@@ -239,7 +239,8 @@
       "name": "FancyADSR",
       "description": "FancyADSR",
       "tags": [
-        "Envelope","Polyphony"
+        "Envelope",
+        "Polyphony"
       ]
     },
     {
@@ -492,6 +493,14 @@
       "description": "Lifeform reacting to sound",
       "tags": [
         "Visualization"
+      ]
+    },
+    {
+      "slug": "ArpLib",
+      "name": "ArpLib",
+      "description": "Arpeggio",
+      "tags": [
+        "Arpeggio"
       ]
     }
   ]

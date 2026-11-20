@@ -115,6 +115,7 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 
 | Module | Description |
 |--------|-------------|
+| **Arplib** | 22 HP chord-progression arpeggiator. 20 stored chord sequences backed by a 20-group library (10 minor, 10 major, 50 progressions each) with per-chord circle-of-fifths overrides. 9 arpeggio patterns, swing, probability, gate randomisation, velocity humanise, and a RNDNEXT switch that replaces the fixed-order chord advance with a uniform random pick. Two-way SEQ knob / SEQ CV selection, PROG CV progression scanning, polyphonic chord output, change and loop triggers, and a live chord-strip + 16-step piano-roll display. |
 | **CellAutoGate** | One-dimensional elementary cellular automaton (Wolfram rules 0–255) on a 64-cell row, sampled at 1–16 positions to produce a polyphonic gate pattern. Internal or external clock, randomize/reset, with a history display and rule truth table. |
 | **ExpressArpeggiator** | Generative 16-step arpeggiator with root, 60+ scales, octave range and forward/backward/random/drunk/pendulum direction. Interactive display to paint notes, mute/lock steps, set loop length and direction; per-step mutation and randomization. |
 | **PsySeq** | 8 × 8 step sequencer with per-cell voltage and probability trimpots. Forward/reverse/random direction, adjustable start step, random-voltage-per-step mode, and periodic mutation (with configurable wait cycles). Outputs CV, inverted CV, cycle gate and step trigger; voltage knobs accept typed volts or note names. Live 8 × 8 grid and status screen. |
@@ -216,7 +217,7 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 | Oscillators & Voices | 5 | Ladder, Oscillator, Stagger, Stagger2, TritoneParadox |
 | Chaos & Modulation | 7 | BouncingBalls, Galton, PsyLFO, RandomWalk, Spikes, SpringPendulum, XBodyProblem |
 | Random & Probability | 2 | Dice, DiceOnSteroids |
-| Sequencers & Patterns | 4 | CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
+| Sequencers & Patterns | 5 | Arplib,CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
 | Pitch Processing | 1 | Quantara |
 | Sampling | 1 | Sampler |
 | Utilities & Logic | 5 | Gates, Merger, Range, Splitter, Swapper |
@@ -225,7 +226,9 @@ The plugin is a collection of **57 modules** grouped into functional families. M
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
 | Visualisers | 3 | Evolved, Lifeform, Plot |
-| **Total** | **57** | |
+| **Total** | **58** | |
 ## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
+
+[Just screenshots of the modules (alphabeticaly)](docs/ImagesList.md)
