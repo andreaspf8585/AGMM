@@ -1,13 +1,28 @@
 # AGMM
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 
+## Introduction
+The Generative Ambient Instruments collection is a comprehensive suite of 58 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
+
+At its core, the collection embraces the philosophy of self-composing machines—instruments that can schedule their own chords, layers, and textures. The flagship AMB module exemplifies this approach: an 8-voice detuned pad with tape-loop bells, Euclidean heartbeat layers, and probabilistic processing that runs through granular clouds and cathedral reverbs. Its compact sibling AMB_MINI offers the same automatic chord progression engine in a smaller footprint, allowing both to coexist in a single patch.
+
+Beyond the generative instruments, the collection offers an exhaustive array of reverbs—from the minimal feedback-delay warmth of Reverb to the fully parametric 8-line FDN cathedrals of InfinityRev and Whirlpool. The HeatRev module pushes further still, combining delay, FDN reverb, and a 2D Laplacian heat-grid diffusion network into a hybrid texture generator with live thermal visualization.
+
+The collection's chaos and modulation sources are equally ambitious: physics-driven generators based on pendula, strange attractors, N-body gravity simulations, and even a Galton board with real ball physics. These aren't abstract LFOs but simulated physical systems integrated at audio rate with RK4 methods, producing genuinely unpredictable yet controllable modulation.
+
+Probability and randomness are woven throughout—from the simple dice rolls of Dice to the 16-voice pattern-recording capabilities of DiceOnSteroids, from Euclidean step grids to generative arpeggiators like Arplib with its 20-group chord library.
+
+The collection is rounded out by practical utilities: polyphonic logic processors, sequential switches with crossfade, CV range mappers, mixers with per-channel CV control, and a polyphonic oscilloscope. Visual modules like Evolved (a ferrofluid lifeform with its own brain, moods, and trust system) and Lifeform add a dimension of audio-reactive generative eye candy.
+
+Whether you're building a self-playing ambient patch, exploring chaotic modulation, or simply seeking characterful reverbs and delays, this collection provides the building blocks—and the inspiration—for music that discovers itself.
+---
 ## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
 
 # AGMM Module Catalogue
 
-The plugin is a collection of **57 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **58 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
