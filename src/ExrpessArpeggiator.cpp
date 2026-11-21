@@ -10,7 +10,7 @@
 #include <memory>
 
 // ============================================================
-// ExpressArp
+// ExpressArp (updated 21 Nov 2026)
 // ============================================================
 //
 // -----------------------------------------------------------------------------
@@ -615,11 +615,14 @@ struct ExpressArpeggiator : Module
         int root = getRoot(), span = getSpan(), sIdx = getScaleIdx();
         if (root != lastRoot || sIdx != lastScale || span != lastSpan)
         {
+            bool keyOrScaleChanged = (root != lastRoot) || (sIdx != lastScale);
             lastRoot = root;
             lastScale = sIdx;
             lastSpan = span;
             updateScaleMask(root, sIdx);
             requantizeAll();
+            if (keyOrScaleChanged)
+                randomizePattern(); // same as pressing the RANDOM button once
         }
 
         numSteps = rack::math::clamp((int)std::round(params[STEPS_PARAM].getValue()), 2, 16);
@@ -745,6 +748,11 @@ struct ExpressArpeggiator : Module
         }
         targetV = (float)noteSemi[rack::math::clamp(currentStep, 0, 15)] / 12.f;
         outInit = false;
+        // Sync cached key/scale/span so loading a patch doesn't trigger a randomize
+        lastRoot = getRoot();
+        lastScale = getScaleIdx();
+        lastSpan = getSpan();
+        updateScaleMask(lastRoot, lastScale);
     }
 };
 
