@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![Ambience VCV Rack Module](images/ambience.png)
+![Ambience VCV Rack Module](images/Ambience.png)
 
 ## 2. Architecture
 

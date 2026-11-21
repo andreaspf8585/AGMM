@@ -23,7 +23,7 @@ Key features:
 
 ## Module Screenshot
 
-![Oscillator VCV Rack Module](images/oscillator.png)
+![Oscillator VCV Rack Module](images/Oscillator.png)
 
 ## 2. Architecture
 

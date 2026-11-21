@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![InstantDrone VCV Rack Module](images/instantdrone.png)
+![InstantDrone VCV Rack Module](images/InstantDrone.png)
 
 ## 2. Architecture
 

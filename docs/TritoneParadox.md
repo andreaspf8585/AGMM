@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![TritoneParadox VCV Rack Module](images/tritoneparadox.png)
+![TritoneParadox VCV Rack Module](images/TritoneParadox.png)
 
 ## 2. Architecture
 

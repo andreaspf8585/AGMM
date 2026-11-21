@@ -24,7 +24,7 @@ Key features:
 
 ## Module Screenshot
 
-![RandomWalk VCV Rack Module](images/randomwalk.png)
+![RandomWalk VCV Rack Module](images/RandomWalk.png)
 
 ## 2. Architecture
 

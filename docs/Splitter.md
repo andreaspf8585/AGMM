@@ -16,7 +16,7 @@ Key features:
 
 ## Module Screenshot
 
-![Splitter VCV Rack Module](images/splitter.png)
+![Splitter VCV Rack Module](images/Splitter.png)
 
 ## 2. Architecture
 

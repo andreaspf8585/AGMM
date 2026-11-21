@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![Reverb VCV Rack Module](images/reverb.png)
+![Reverb VCV Rack Module](images/Reverb.png)
 
 ## 2. Architecture
 

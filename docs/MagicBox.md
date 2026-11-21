@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![MagicBox VCV Rack Module](images/magicbox.png)
+![MagicBox VCV Rack Module](images/MagicBox.png)
 
 ## 2. Architecture
 

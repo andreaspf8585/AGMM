@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![Gates VCV Rack Module](images/gates.png)
+![Gates VCV Rack Module](images/Gates.png)
 
 ## 2. Architecture
 

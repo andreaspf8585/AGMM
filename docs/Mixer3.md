@@ -18,7 +18,7 @@ Key features:
 
 ## Module Screenshot
 
-![Mixer3 VCV Rack Module](images/mixer3.png)
+![Mixer3 VCV Rack Module](images/Mixer3.png)
 
 ## 2. Architecture
 

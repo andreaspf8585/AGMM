@@ -29,7 +29,7 @@ Key features:
 
 ## Module Screenshot
 
-![HeatRev VCV Rack Module](images/heatrev.png)
+![HeatRev VCV Rack Module](images/HeatRev.png)
 
 ## 2. Architecture
 

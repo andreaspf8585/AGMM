@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![Phasmal VCV Rack Module](images/phasmal.png)
+![Phasmal VCV Rack Module](images/Phasmal.png)
 
 ## 2. Architecture
 

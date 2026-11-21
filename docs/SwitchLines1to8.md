@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![SwitchLines1to8 VCV Rack Module](images/switchlines1to8.png)
+![SwitchLines1to8 VCV Rack Module](images/SwitchLines1to8.png)
 
 ## 2. Architecture
 

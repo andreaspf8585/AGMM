@@ -19,7 +19,7 @@ Key features:
 
 ## Module Screenshot
 
-![CellAutoGate VCV Rack Module](images/cellautogate.png)
+![CellAutoGate VCV Rack Module](images/CellAutoGate.png)
 
 ## 2. Architecture
 

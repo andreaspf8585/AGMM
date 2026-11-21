@@ -25,7 +25,7 @@ Key features:
 
 ## Module Screenshot
 
-![Range VCV Rack Module](images/range.png)
+![Range VCV Rack Module](images/Range.png)
 
 ## 2. Architecture
 

@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![Dice VCV Rack Module](images/dice.png)
+![Dice VCV Rack Module](images/Dice.png)
 
 ## 2. Architecture
 

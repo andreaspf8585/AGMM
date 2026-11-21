@@ -19,7 +19,7 @@ Key features:
 
 ## Module Screenshot
 
-![Merger VCV Rack Module](images/merger.png)
+![Merger VCV Rack Module](images/Merger.png)
 
 ## 2. Architecture
 

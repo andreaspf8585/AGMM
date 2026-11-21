@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![PsyReverb VCV Rack Module](images/psyreverb.png)
+![PsyReverb VCV Rack Module](images/PsyReverb.png)
 
 ## 2. Architecture
 

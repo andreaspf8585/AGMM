@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![BouncingBalls VCV Rack Module](images/bouncingballs.png)
+![BouncingBalls VCV Rack Module](images/BouncingBalls.png)
 
 ## 2. Architecture
 

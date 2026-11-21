@@ -25,7 +25,7 @@ Key features:
 
 ## Module Screenshot
 
-![Sampler VCV Rack Module](images/sampler.png)
+![Sampler VCV Rack Module](images/Sampler.png)
 
 ## 2. Architecture
 

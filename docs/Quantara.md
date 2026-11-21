@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![Quantara VCV Rack Module](images/quantara.png)
+![Quantara VCV Rack Module](images/Quantara.png)
 
 ## 2. Architecture
 

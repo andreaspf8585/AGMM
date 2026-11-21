@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![VCA2 VCV Rack Module](images/vca2.png)
+![VCA2 VCV Rack Module](images/VCA2.png)
 
 ## 2. Architecture
 

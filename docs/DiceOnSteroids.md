@@ -26,7 +26,7 @@ Key features:
 
 ## Module Screenshot
 
-![DiceOnSteroids VCV Rack Module](images/diceonsteroids.png)
+![DiceOnSteroids VCV Rack Module](images/DiceOnSteroids.png)
 
 ## 2. Architecture
 

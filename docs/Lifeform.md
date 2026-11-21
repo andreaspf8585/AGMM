@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![Lifeform VCV Rack Module](images/lifeform.png)
+![Lifeform VCV Rack Module](images/Lifeform.png)
 
 ## 2. Architecture
 

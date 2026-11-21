@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![DarkHall VCV Rack Module](images/darkhall.png)
+![DarkHall VCV Rack Module](images/DarkHall.png)
 
 ## 2. Architecture
 

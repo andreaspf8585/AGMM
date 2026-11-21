@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![VCAPoly VCV Rack Module](images/vcapoly.png)
+![VCAPoly VCV Rack Module](images/VCAPoly.png)
 
 ## 2. Architecture
 

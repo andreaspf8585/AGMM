@@ -19,7 +19,7 @@ Key features:
 
 ## Module Screenshot
 
-![RainStorm VCV Rack Module](images/rainstorm.png)
+![RainStorm VCV Rack Module](images/RainStorm.png)
 
 ## 2. Architecture
 

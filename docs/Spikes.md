@@ -20,7 +20,7 @@ Key features:
 
 ## Module Screenshot
 
-![Spikes VCV Rack Module](images/spikes.png)
+![Spikes VCV Rack Module](images/Spikes.png)
 
 ## 2. Architecture
 

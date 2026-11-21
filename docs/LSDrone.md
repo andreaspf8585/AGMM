@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![LSDrone VCV Rack Module](images/lsdrone.png)
+![LSDrone VCV Rack Module](images/LSDrone.png)
 
 ## 2. Architecture
 

@@ -23,7 +23,7 @@ Key features:
 
 ## Module Screenshot
 
-![Stagger VCV Rack Module](images/stagger.png)
+![Stagger VCV Rack Module](images/Stagger.png)
 
 ## 2. Architecture
 

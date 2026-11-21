@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![PsyLFO VCV Rack Module](images/psylfo.png)
+![PsyLFO VCV Rack Module](images/PsyLFO.png)
 
 ## 2. Architecture
 

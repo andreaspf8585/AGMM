@@ -27,7 +27,7 @@ Key features:
 
 ## Module Screenshot
 
-![Swapper VCV Rack Module](images/swapper.png)
+![Swapper VCV Rack Module](images/Swapper.png)
 
 ## 2. Architecture
 

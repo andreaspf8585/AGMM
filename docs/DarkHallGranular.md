@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![DarkHallGranular VCV Rack Module](images/darkhallgranular.png)
+![DarkHallGranular VCV Rack Module](images/DarkHallGranular.png)
 
 ## 2. Architecture
 

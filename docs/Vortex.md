@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![Vortex VCV Rack Module](images/vortex.png)
+![Vortex VCV Rack Module](images/Vortex.png)
 
 ## 2. Architecture
 

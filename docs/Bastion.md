@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![Bastion VCV Rack Module](images/bastion.png)
+![Bastion VCV Rack Module](images/Bastion.png)
 
 ## 2. Architecture
 

@@ -19,7 +19,7 @@ Key features:
 
 ## Module Screenshot
 
-![FancyADSR VCV Rack Module](images/fancyadsr.png)
+![FancyADSR VCV Rack Module](images/FancyADSR.png)
 
 ## 2. Architecture
 

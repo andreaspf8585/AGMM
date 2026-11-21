@@ -26,7 +26,7 @@ Key features:
 
 ## Module Screenshot
 
-![PsySeq VCV Rack Module](images/psyseq.png)
+![PsySeq VCV Rack Module](images/PsySeq.png)
 
 ## 2. Architecture
 

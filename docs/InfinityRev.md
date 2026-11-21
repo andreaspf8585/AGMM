@@ -26,7 +26,7 @@ Key features:
 
 ## Module Screenshot
 
-![InfinityRev VCV Rack Module](images/infinityrev.png)
+![InfinityRev VCV Rack Module](images/InfinityRev.png)
 
 ## 2. Architecture
 

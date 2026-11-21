@@ -27,7 +27,7 @@ Key features:
 
 ## Module Screenshot
 
-![PsyDelay VCV Rack Module](images/psydelay.png)
+![PsyDelay VCV Rack Module](images/PsyDelay.png)
 
 ## 2. Architecture
 

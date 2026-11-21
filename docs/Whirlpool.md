@@ -19,7 +19,7 @@ Key features:
 
 ## Module Screenshot
 
-![Whirlpool VCV Rack Module](images/whirlpool.png)
+![Whirlpool VCV Rack Module](images/Whirlpool.png)
 
 ## 2. Architecture
 

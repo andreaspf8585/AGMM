@@ -22,7 +22,7 @@ Key features:
 
 ## Module Screenshot
 
-![SickDelay VCV Rack Module](images/sickdelay.png)
+![SickDelay VCV Rack Module](images/SickDelay.png)
 
 ## 2. Architecture
 

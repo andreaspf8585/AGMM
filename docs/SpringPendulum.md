@@ -21,7 +21,7 @@ Key features:
 
 ## Module Screenshot
 
-![SpringPendulum VCV Rack Module](images/springpendulum.png)
+![SpringPendulum VCV Rack Module](images/SpringPendulum.png)
 
 ## 2. Architecture
 

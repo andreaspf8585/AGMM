@@ -26,7 +26,7 @@ Key features:
 
 ## Module Screenshot
 
-![Stasis VCV Rack Module](images/stasis.png)
+![Stasis VCV Rack Module](images/Stasis.png)
 
 ## 2. Architecture
 

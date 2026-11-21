@@ -25,7 +25,7 @@ Key features:
 
 ## Module Screenshot
 
-![Pharmakon VCV Rack Module](images/pharmakon.png)
+![Pharmakon VCV Rack Module](images/Pharmakon.png)
 
 ## 2. Architecture
 
