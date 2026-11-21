@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 
 ## Introduction
-The Generative Ambient Instruments collection is a comprehensive suite of 58 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
+The AGMM plugin is a comprehensive suite of 58 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
 
 At its core, the collection embraces the philosophy of self-composing machines—instruments that can schedule their own chords, layers, and textures. The flagship AMB module exemplifies this approach: an 8-voice detuned pad with tape-loop bells, Euclidean heartbeat layers, and probabilistic processing that runs through granular clouds and cathedral reverbs. Its compact sibling AMB_MINI offers the same automatic chord progression engine in a smaller footprint, allowing both to coexist in a single patch.
 
@@ -15,6 +15,7 @@ Probability and randomness are woven throughout—from the simple dice rolls of 
 The collection is rounded out by practical utilities: polyphonic logic processors, sequential switches with crossfade, CV range mappers, mixers with per-channel CV control, and a polyphonic oscilloscope. Visual modules like Evolved (a ferrofluid lifeform with its own brain, moods, and trust system) and Lifeform add a dimension of audio-reactive generative eye candy.
 
 Whether you're building a self-playing ambient patch, exploring chaotic modulation, or simply seeking characterful reverbs and delays, this collection provides the building blocks—and the inspiration—for music that discovers itself.
+
 ---
 ## Module Documentation
 
