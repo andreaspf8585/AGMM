@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 
 ## Introduction
-The AGMM plugin is a comprehensive suite of 58 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
+The AGMM plugin is a comprehensive suite of 59 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
 
 At its core, the collection embraces the philosophy of self-composing machines—instruments that can schedule their own chords, layers, and textures. The flagship AMB module exemplifies this approach: an 8-voice detuned pad with tape-loop bells, Euclidean heartbeat layers, and probabilistic processing that runs through granular clouds and cathedral reverbs. Its compact sibling AMB_MINI offers the same automatic chord progression engine in a smaller footprint, allowing both to coexist in a single patch.
 
@@ -12,7 +12,7 @@ The collection's chaos and modulation sources are equally ambitious: physics-dri
 
 Probability and randomness are woven throughout—from the simple dice rolls of Dice to the 16-voice pattern-recording capabilities of DiceOnSteroids, from Euclidean step grids to generative arpeggiators like Arplib with its 20-group chord library.
 
-The collection is rounded out by practical utilities: polyphonic logic processors, sequential switches with crossfade, CV range mappers, mixers with per-channel CV control, and a polyphonic oscilloscope. Visual modules like Evolved (a ferrofluid lifeform with its own brain, moods, and trust system) and Lifeform add a dimension of audio-reactive generative eye candy.
+The collection is rounded out by practical utilities: polyphonic logic processors, sequential switches with crossfade, CV range mappers, mixers with per-channel CV control, and a polyphonic oscilloscope. Visual modules like Evolved (a ferrofluid lifeform with its own brain, moods, and trust system) and Lifeform add a dimension of audio-reactive generative eye candy. And Crypto takes a different angle entirely: a frequency-code granular processor that turns every sample into a 16-bit code, decodes it back to sound through three different engines, and lets you watch the numbers dance across a Supercell-style processor chain.
 
 Whether you're building a self-playing ambient patch, exploring chaotic modulation, or simply seeking characterful reverbs and delays, this collection provides the building blocks—and the inspiration—for music that discovers itself.
 
@@ -23,7 +23,7 @@ Whether you're building a self-playing ambient patch, exploring chaotic modulati
 
 # AGMM Module Catalogue
 
-The plugin is a collection of **58 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **59 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
@@ -67,11 +67,12 @@ The plugin is a collection of **58 modules** grouped into functional families. M
 
 ---
 
-## 4. Multi-Effects
-*Everything-in-one boxes that combine several effect blocks.*
+## 4. Multi-Effects & Processors
+*Everything-in-one boxes that combine several effect blocks, plus the frequency-code granular processor.*
 
 | Module | Description |
 |--------|-------------|
+| **Crypto** | 54 HP polyphonic frequency-code granular processor. Every audio sample is coded as a 16-bit frequency code (LOW..HIGH exponential map) and shown as binary/octal/decimal/hex numbers; a clocked capture window per tick drives three engines (TONE mean-frequency oscillator, CRYPTO code-driven grain pool, CLOUD audio granulator). Supercell-style processor: POSITION, PITCH, SHAPE, MIX, SPACE, FEEDBACK, GAIN IN, GAIN OUT (all CV-able), 1 V/oct, tape-style saturating feedback into a ~5.4 s recording buffer, Freeverb-style reverb, and a NUMBERS / SPECTROGRAM / WAVE display. |
 | **Pharmakon** | Stereo multi-FX: modulated stereo delay (ping-pong, detune/chorus tap), Schroeder reverb, distortion, two-band shelving EQ, spacy LFO-modulated LPF and M/S width. 16 main parameters with individual CV and attenuverters. Display switches between waveform, bar spectrum and spectrum curve. |
 | **Vortex** | Dual-mode reverb / echo. Reverb is a plate with 12 CV-able parameters (pre-delay, size, decay, diffusion, damping, low cut, mod speed/depth, mix); echo is a modulated delay with ping-pong. Freeze (latch + gate), Clear (fade-out/reset/fade-in), stereo in/out switches, and WAVE/BARS/SPECTRUM display. |
 
@@ -164,7 +165,7 @@ The plugin is a collection of **58 modules** grouped into functional families. M
 |--------|-------------|
 | **Gates** | Polyphonic logic processor taking two gate inputs (A, B) and producing seven simultaneous logic outputs: AND, OR, NOT (A), NAND, NOR, XOR, XNOR. Live 9-row scrolling logic scope with adjustable time-per-screen. |
 | **Merger** | 16 monophonic inputs merged into one polyphonic output. Output channel count equals the highest connected input, so gaps carry 0 V and channel numbering stays stable. Display shows the active channel count and a 16-segment bar. |
-| **Range** | Utility CV range mapper: linearly rescales a [−5 V, +5 V] input onto an arbitrary [LOW, HIGH] output window, both adjustable from −10 V to +10 V. Display shows the live transfer curve, range markers and a moving dot for the current input/output. |
+| **Range** | Polyphonic utility CV range mapper: linearly rescales an adjustable input window [LOW IN, HIGH IN] onto an adjustable output window [LOW, HIGH], all four endpoints set by front-panel knobs (−10 V .. +10 V). Optional output clamp and input-range presets via right-click menu. Display shows the live transfer curve, output range markers, input window, and a moving dot for the current input/output (multi-channel dots for poly). |
 | **Splitter** | Expands a single polyphonic input into sixteen monophonic outputs. Each output jack carries one channel of the incoming poly signal (or 0 V). Display shows the current channel count and a 16-segment activity bar. |
 | **Swapper** | Dual-channel crossfader. Independent L→R and R→L amounts (knob + CV/attenuverter) blend the two signals into each output. Routing-diagram display shows the four link weights as line thickness plus IN/OUT level nodes. |
 
@@ -228,12 +229,12 @@ The plugin is a collection of **58 modules** grouped into functional families. M
 | Generative Ambient | 4 | AMB, AMB_MINI, InstantDrone, LSDrone |
 | Reverbs | 10 | Ambience, BlackHoleReverb, DarkHall, DarkHallGranular, HeatRev, InfinityRev, PsyReverb, PsyReverb2, Reverb, Whirlpool |
 | Delays & Echoes | 2 | PsyDelay, SickDelay |
-| Multi-Effects | 2 | Pharmakon, Vortex |
+| Multi-Effects & Processors | 3 | Crypto, Pharmakon, Vortex |
 | Filters & Waveshapers | 3 | Bastion, MagicBox, Phasmal |
 | Oscillators & Voices | 5 | Ladder, Oscillator, Stagger, Stagger2, TritoneParadox |
 | Chaos & Modulation | 7 | BouncingBalls, Galton, PsyLFO, RandomWalk, Spikes, SpringPendulum, XBodyProblem |
 | Random & Probability | 2 | Dice, DiceOnSteroids |
-| Sequencers & Patterns | 5 | Arplib,CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
+| Sequencers & Patterns | 5 | Arplib, CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
 | Pitch Processing | 1 | Quantara |
 | Sampling | 1 | Sampler |
 | Utilities & Logic | 5 | Gates, Merger, Range, Splitter, Swapper |
@@ -242,7 +243,7 @@ The plugin is a collection of **58 modules** grouped into functional families. M
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
 | Visualisers | 3 | Evolved, Lifeform, Plot |
-| **Total** | **58** | |
+| **Total** | **59** | |
 ## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)

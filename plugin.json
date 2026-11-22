@@ -263,9 +263,9 @@
     {
       "slug": "Range",
       "name": "Range",
-      "description": "offset",
+      "description": "Offset",
       "tags": [
-        "Normalize",
+        "Normalize","Polyphony",
         "Offset"
       ]
     },
@@ -501,6 +501,14 @@
       "description": "Arpeggio",
       "tags": [
         "Arpeggio"
+      ]
+    },
+    {
+      "slug": "Crypto",
+      "name": "Crypto",
+      "description": "Granular",
+      "tags": [
+        "Granular"
       ]
     }
   ]
