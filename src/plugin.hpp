@@ -67,3 +67,4 @@ extern Model* modelPlot;
 extern Model* modelEvolved;
 extern Model* modelArpLib;
 extern Model* modelCrypto;
+extern Model* modelLuckyGate;

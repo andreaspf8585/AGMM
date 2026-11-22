@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 
 ## Introduction
-The AGMM plugin is a comprehensive suite of 59 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
+The AGMM plugin is a comprehensive suite of 60 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
 
 At its core, the collection embraces the philosophy of self-composing machines—instruments that can schedule their own chords, layers, and textures. The flagship AMB module exemplifies this approach: an 8-voice detuned pad with tape-loop bells, Euclidean heartbeat layers, and probabilistic processing that runs through granular clouds and cathedral reverbs. Its compact sibling AMB_MINI offers the same automatic chord progression engine in a smaller footprint, allowing both to coexist in a single patch.
 
@@ -10,7 +10,7 @@ Beyond the generative instruments, the collection offers an exhaustive array of 
 
 The collection's chaos and modulation sources are equally ambitious: physics-driven generators based on pendula, strange attractors, N-body gravity simulations, and even a Galton board with real ball physics. These aren't abstract LFOs but simulated physical systems integrated at audio rate with RK4 methods, producing genuinely unpredictable yet controllable modulation.
 
-Probability and randomness are woven throughout—from the simple dice rolls of Dice to the 16-voice pattern-recording capabilities of DiceOnSteroids, from Euclidean step grids to generative arpeggiators like Arplib with its 20-group chord library.
+Probability and randomness are woven throughout—from the simple dice rolls of Dice to the 16-voice pattern-recording capabilities of DiceOnSteroids, from the per-channel dice of LuckyGate to Euclidean step grids and generative arpeggiators like ArpLib with its 20-group chord library.
 
 The collection is rounded out by practical utilities: polyphonic logic processors, sequential switches with crossfade, CV range mappers, mixers with per-channel CV control, and a polyphonic oscilloscope. Visual modules like Evolved (a ferrofluid lifeform with its own brain, moods, and trust system) and Lifeform add a dimension of audio-reactive generative eye candy. And Crypto takes a different angle entirely: a frequency-code granular processor that turns every sample into a 16-bit code, decodes it back to sound through three different engines, and lets you watch the numbers dance across a Supercell-style processor chain.
 
@@ -23,7 +23,7 @@ Whether you're building a self-playing ambient patch, exploring chaotic modulati
 
 # AGMM Module Catalogue
 
-The plugin is a collection of **59 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **60 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
@@ -124,6 +124,7 @@ The plugin is a collection of **59 modules** grouped into functional families. M
 |--------|-------------|
 | **Dice** | Polyphonic random-gate / random V/Oct generator. On each clock edge, per-voice dice rolls open gates with configurable probability and latch random voltages, output raw and quantized to one of 60+ scales. |
 | **DiceOnSteroids** | Expanded 16-voice probabilistic gate / random V/Oct generator with random modes (uniform, walk, drunk, gaussian), a 16 × 64 pattern recorder/player, train mode, glide, CV over most parameters, and an RNG seed input. |
+| **LuckyGate** | 8 HP polyphonic probabilistic gate. On every rising edge each channel rolls an independent die against the PROBABILITY knob (plus 0–10 V CV); a successful roll makes the output follow the input gate for its entire duration, otherwise it stays low. Live 16-cell channel grid (pass = accent, reject = warm), 32-slot rolling history, running HIT % and CH readouts, and a probability ring with a CV-modulated effective-value dot. |
 
 ---
 
@@ -233,7 +234,7 @@ The plugin is a collection of **59 modules** grouped into functional families. M
 | Filters & Waveshapers | 3 | Bastion, MagicBox, Phasmal |
 | Oscillators & Voices | 5 | Ladder, Oscillator, Stagger, Stagger2, TritoneParadox |
 | Chaos & Modulation | 7 | BouncingBalls, Galton, PsyLFO, RandomWalk, Spikes, SpringPendulum, XBodyProblem |
-| Random & Probability | 2 | Dice, DiceOnSteroids |
+| Random & Probability | 3 | Dice, DiceOnSteroids, LuckyGate |
 | Sequencers & Patterns | 5 | Arplib, CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
 | Pitch Processing | 1 | Quantara |
 | Sampling | 1 | Sampler |
@@ -243,7 +244,7 @@ The plugin is a collection of **59 modules** grouped into functional families. M
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
 | Visualisers | 3 | Evolved, Lifeform, Plot |
-| **Total** | **59** | |
+| **Total** | **60** | |
 ## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)

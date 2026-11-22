@@ -265,7 +265,8 @@
       "name": "Range",
       "description": "Offset",
       "tags": [
-        "Normalize","Polyphony",
+        "Normalize",
+        "Polyphony",
         "Offset"
       ]
     },
@@ -509,6 +510,15 @@
       "description": "Granular",
       "tags": [
         "Granular"
+      ]
+    },
+    {
+      "slug": "LuckyGate",
+      "name": "LuckyGate",
+      "description": "Outputs a signal with probability",
+      "tags": [
+        "Random",
+        "Gate","Polyphony"
       ]
     }
   ]
