@@ -2,7 +2,7 @@
 author: Andreas Gkogkos, andreaspf8585@gmail.com
 
 ## Introduction
-The AGMM plugin is a comprehensive suite of 60 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
+The AGMM plugin is a comprehensive suite of 61 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
 
 At its core, the collection embraces the philosophy of self-composing machines—instruments that can schedule their own chords, layers, and textures. The flagship AMB module exemplifies this approach: an 8-voice detuned pad with tape-loop bells, Euclidean heartbeat layers, and probabilistic processing that runs through granular clouds and cathedral reverbs. Its compact sibling AMB_MINI offers the same automatic chord progression engine in a smaller footprint, allowing both to coexist in a single patch.
 
@@ -23,7 +23,7 @@ Whether you're building a self-playing ambient patch, exploring chaotic modulati
 
 # AGMM Module Catalogue
 
-The plugin is a collection of **60 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
+The plugin is a collection of **61 modules** grouped into functional families. Most modules are standalone — you can build an entire patch from any single category — but they are designed to chain together (generative sources → modulation → filters/effects → mixers → outputs).
 
 ---
 
@@ -160,10 +160,11 @@ The plugin is a collection of **60 modules** grouped into functional families. M
 ---
 
 ## 12. Utilities & Logic
-*Routing, logic, range mapping and crossfading.*
+*Routing, logic, range mapping, crossfading and master clock generation.*
 
 | Module | Description |
 |--------|-------------|
+| **Clockwork** | 32 HP chainable master clock with six sub-clocks. Master tempo 30–300 BPM (snap knob) or external BPM input as 1 V/oct CV or as a clock at 4/8/12/24 PPQN with PLL-style tempo and phase lock. Each sub-clock has a multiply/divide ratio (x1…x64, /1…/64, including x1.5 and x2.5), swing, pulse width, delay, swing/PW CV inputs and a gate output. Phase-based engine keeps all clocks in sync through tempo changes; ratio changes are deferred to the next master bar and flagged with a SYNC badge on the per-row scope. Run/Reset buttons + inputs, Reset/Run/BPM chain outputs, optional reset-on-stop. Per-row two-period pattern scope with ghost outline, live playhead and frame progress; master scope with RUN/source/RST/LOCK status chips. |
 | **Gates** | Polyphonic logic processor taking two gate inputs (A, B) and producing seven simultaneous logic outputs: AND, OR, NOT (A), NAND, NOR, XOR, XNOR. Live 9-row scrolling logic scope with adjustable time-per-screen. |
 | **Merger** | 16 monophonic inputs merged into one polyphonic output. Output channel count equals the highest connected input, so gaps carry 0 V and channel numbering stays stable. Display shows the active channel count and a 16-segment bar. |
 | **Range** | Polyphonic utility CV range mapper: linearly rescales an adjustable input window [LOW IN, HIGH IN] onto an adjustable output window [LOW, HIGH], all four endpoints set by front-panel knobs (−10 V .. +10 V). Optional output clamp and input-range presets via right-click menu. Display shows the live transfer curve, output range markers, input window, and a moving dot for the current input/output (multi-channel dots for poly). |
@@ -238,13 +239,13 @@ The plugin is a collection of **60 modules** grouped into functional families. M
 | Sequencers & Patterns | 5 | Arplib, CellAutoGate, ExpressArpeggiator, PsySeq, Stasis |
 | Pitch Processing | 1 | Quantara |
 | Sampling | 1 | Sampler |
-| Utilities & Logic | 5 | Gates, Merger, Range, Splitter, Swapper |
+| Utilities & Logic | 6 | Clockwork, Gates, Merger, Range, Splitter, Swapper |
 | Mixers & VCAs | 4 | Mixer3, Mixer6, VCA2, VCAPoly |
 | Envelopes | 1 | FancyADSR |
 | Switches & Routing | 2 | SwitchLines1to8, SwitchLines8to1 |
 | Noise & Weather | 1 | RainStorm |
 | Visualisers | 3 | Evolved, Lifeform, Plot |
-| **Total** | **60** | |
+| **Total** | **61** | |
 ## Module Documentation
 
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)

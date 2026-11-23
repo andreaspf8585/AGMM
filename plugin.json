@@ -518,7 +518,17 @@
       "description": "Outputs a signal with probability",
       "tags": [
         "Random",
-        "Gate","Polyphony"
+        "Gate",
+        "Polyphony"
+      ]
+    },
+    {
+      "slug": "Clockwork",
+      "name": "Clockwork",
+      "description": "Clock",
+      "tags": [
+        "Clock",
+        "Timing"
       ]
     }
   ]
