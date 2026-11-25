@@ -1,5 +1,5 @@
 # AGMM
-author: Andreas Gkogkos, andreaspf8585@gmail.com
+author: Andreas Gkogkos, andreas.gkogkos@protonmail.com
 
 ## Introduction
 The AGMM plugin is a comprehensive suite of 61 modular synthesizer modules designed for creating evolving, self-composing soundscapes. Spanning from complete generative ambient machines to specialized effects, chaotic modulation sources, and probability-driven sequencers, this collection represents a complete toolkit for exploring the boundaries between composed and emergent music.
@@ -254,4 +254,4 @@ The plugin is a collection of **61 modules** grouped into functional families. M
 
 ## Manually install (use at your own risk)
 
-Get the latest plugin from https://github.com/andreaspf8585/AGMM/actions
+Get the latest plugin from https://github.com/andreaspf8585/AGMM/releases/tag/AGMM
