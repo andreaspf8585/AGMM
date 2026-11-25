@@ -251,3 +251,7 @@ The plugin is a collection of **61 modules** grouped into functional families. M
 [Explore the AGMM modules documentation (alphabeticaly)](docs/README.md)
 
 [Just screenshots of the modules (alphabeticaly)](docs/ImagesList.md)
+
+## Manually install (use at your own risk)
+
+Get the latest plugin from https://github.com/andreaspf8585/AGMM/actions
