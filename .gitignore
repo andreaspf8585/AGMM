@@ -18,5 +18,6 @@ compileVerbose
 screenshot_sgmm.ps1
 send2git
 update2git
-src/youtube_inject.py
-src/Gitload_inject.py
+
+youtube_inject.py
+Gitload_inject.py
