@@ -1078,6 +1078,7 @@ namespace
         {
             const int maxB = PH_FFT_N / 2 - 2;
             float b0 = fLo / binHz, b1 = fHi / binHz;
+            if (b0 > (float)maxB) return -200.f;
             if (b1 - b0 < 1.f)
             {
                 float cc = phClamp(0.5f * (b0 + b1), 1.f, (float)maxB);

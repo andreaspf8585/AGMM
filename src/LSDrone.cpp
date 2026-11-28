@@ -96,7 +96,13 @@ struct LSDroneEngine
     // zero-initialises them.
     void init(float sr)
     {
+        delete[] delayBufferL;
+        delete[] delayBufferR;
+        delete[] revBuffer;
+        delete[] echoBufferL;
+        delete[] echoBufferR;
         sampleRate = sr;
+        delayIdx = revIdx = echoIdx = 0;
         delayLength = (int)(3.0f * sampleRate);
         delayBufferL = new float[delayLength]();
         delayBufferR = new float[delayLength]();
