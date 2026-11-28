@@ -1101,6 +1101,7 @@ struct XBodyProblemWidget : ModuleWidget
 	// Context menu: pause, zero-momentum toggle, new random start.
 	void appendContextMenu(ui::Menu *menu) override
 	{
+		agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
 		agmm::addGitLink(menu); // adds "Visit my git repo!"
 		XBodyProblem *module = dynamic_cast<XBodyProblem *>(this->module);
 		if (!module)
