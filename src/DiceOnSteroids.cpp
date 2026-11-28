@@ -1,10 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include "Knob_arcs.hpp"
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -1261,7 +1263,8 @@ struct DiceOnSteroidsWidget : ModuleWidget
             for (int c = 0; c < 2; ++c)
                 addParam(createParamCentered<RoundSmallBlackKnob>(Vec(DS_LCOL[c], dsLKnobY(r)), module, knobIds[r * 2 + c]));
 
-        // ---- right block: outputs ----
+        agmm::addKnobArcs(this, 6.f);
+                // ---- right block: outputs ----
         const float r0 = DS_RCOL[0], r1 = DS_RCOL[1];
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, DS_ROUT_TOP[0] + 28.f), module, DiceOnSteroids::OUTPUT_GATES));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r1, DS_ROUT_TOP[0] + 28.f), module, DiceOnSteroids::OUTPUT_VOCT));
@@ -1301,6 +1304,8 @@ struct DiceOnSteroidsWidget : ModuleWidget
     // "Randomize seed" action, each with checkmarks on the active option.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         DiceOnSteroids *module = dynamic_cast<DiceOnSteroids *>(this->module);
         if (!module)
             return;

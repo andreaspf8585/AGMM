@@ -1,11 +1,15 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
+
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
+
 #include <algorithm>
 #include <vector>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // AMB_MINI — a compact generative ambient instrument inspired by Eno / AMB-1.
@@ -1449,8 +1453,19 @@ namespace
             addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(5), y3), module, AMB_MINI::TRIG_OUTPUT));
             addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(6), y3), module, AMB_MINI::CLOCK_OUTPUT));
             addOutput(createOutputCentered<DarkPJ301MPort>(Vec(ambCellX(7), y3), module, AMB_MINI::LEVEL_OUTPUT));
+            agmm::addKnobArcs(this, 6.f);
         }
-    };
+
+        
+    
+
+        void appendContextMenu(Menu *menu) override
+        {
+            agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+            agmm::addGitLink(menu); // adds "Visit my git repo!"
+            // ... your other menu items ...
+        }
+};
 
 } // anonymous namespace
 

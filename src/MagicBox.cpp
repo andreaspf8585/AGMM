@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -7,6 +9,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // =============================================================================
 // MAGICBOX — a waveshaper with a live transfer curve, a harmonic bar display
@@ -1245,7 +1248,7 @@ struct MagicBoxWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(
                 Vec(MB_KX[k], MB_KNOB_Y), module, MB_KNOBS[k].param));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // I/O
         addInput(createInputCentered<DarkPJ301MPort>(Vec(MB_IO_X[0], MB_IO_Y), module, MagicBox::IN_L_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(MB_IO_X[1], MB_IO_Y), module, MagicBox::IN_R_INPUT));
@@ -1257,6 +1260,7 @@ struct MagicBoxWidget : ModuleWidget
 
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         MagicBox *module = dynamic_cast<MagicBox *>(this->module);
         if (!module)
             return;
@@ -1281,6 +1285,8 @@ struct MagicBoxWidget : ModuleWidget
         menu->addChild(createBoolPtrMenuItem("Auto level (normalise to input envelope)", "", &module->autoLevel));
         menu->addChild(createBoolPtrMenuItem("DC blocker (turn off for CV signals)", "", &module->dcBlock));
     }
+
+    
 };
 
 Model *modelMagicBox = createModel<MagicBox, MagicBoxWidget>("MagicBox");

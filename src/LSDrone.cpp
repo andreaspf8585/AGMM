@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 #include <memory>
 
 // ============================================================================
@@ -1305,6 +1308,61 @@ namespace
         }
     };
 
+    // ------------------------------------------------------------
+    // Value arcs around the knobs (flat track + flat arc)
+    //
+    // Bipolar params (FINE A/B, DETUNE, attenuverters) fill from
+    // the centre, unipolar ones from the left end; negative bipolar values
+    // are drawn warm. The radius is set per knob to suit its size and plate.
+    // ------------------------------------------------------------
+    struct LSKnobArcs : TransparentWidget
+    {
+        struct Arc
+        {
+            Vec pos;
+            int param;
+            float radius;
+            bool bipolar;
+        };
+
+        LSDrone *module = nullptr;
+        std::vector<Arc> arcs;
+
+        LSKnobArcs(LSDrone *m) : module(m) { box.size = Vec(LS_PANEL_W, LS_PANEL_H); }
+
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
+            const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
+
+            for (const Arc &k : arcs)
+            {
+                // Track
+                nvgBeginPath(vg);
+                nvgArc(vg, k.pos.x, k.pos.y, k.radius, a0, a1, NVG_CW);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+                nvgStrokeWidth(vg, 2.f);
+                nvgLineCap(vg, NVG_BUTT);
+                nvgStroke(vg);
+
+                if (!module)
+                    continue;
+                float v = module->paramQuantities[k.param]->getScaledValue();
+                float from = k.bipolar ? 0.5f : 0.f;
+                float lo = std::min(from, v), hi = std::max(from, v);
+                if (hi - lo < 0.004f)
+                    continue;
+                NVGcolor col = (k.bipolar && v < 0.5f) ? agmm::warm() : agmm::accent();
+                nvgBeginPath(vg);
+                nvgArc(vg, k.pos.x, k.pos.y, k.radius, a0 + (a1 - a0) * lo, a0 + (a1 - a0) * hi, NVG_CW);
+                nvgStrokeColor(vg, col);
+                nvgStrokeWidth(vg, 2.f);
+                nvgStroke(vg);
+            }
+        }
+    };
+
 } // namespace
 
 // ============================================================
@@ -1323,6 +1381,8 @@ struct LSDroneWidget : ModuleWidget
         box.size = Vec(LS_PANEL_W, LS_PANEL_H);
 
         addChild(new LSPanelBackground());
+        LSKnobArcs *arcs = new LSKnobArcs(module);
+        addChild(arcs);
 
         addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
         addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
@@ -1343,6 +1403,11 @@ struct LSDroneWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, cy), module, c.param));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - LS_JACK_DX, cy), module, c.cv));
             addParam(createParamCentered<Trimpot>(Vec(cx + LS_JACK_DX, cy), module, c.attn));
+
+            const bool bipolar = c.param == LSDrone::PARAM_FINE_A || c.param == LSDrone::PARAM_FINE_B ||
+                                 c.param == LSDrone::PARAM_DETUNE;
+            arcs->arcs.push_back({Vec(cx, cy), c.param, 14.f, bipolar});
+            arcs->arcs.push_back({Vec(cx + LS_JACK_DX, cy), c.attn, 11.5f, true});
         }
 
         // I/O
@@ -1358,6 +1423,8 @@ struct LSDroneWidget : ModuleWidget
     // the active option.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         LSDrone *module = dynamic_cast<LSDrone *>(this->module);
         if (!module)
             return;

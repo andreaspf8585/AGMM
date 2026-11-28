@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -8,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <atomic>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // SpringPendulum
@@ -1165,13 +1168,15 @@ struct SpringPendulumWidget : ModuleWidget
             Vec(jx(4), jy), module, SpringPendulum::VOCT_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(jx(5), jy), module, SpringPendulum::GATE_OUTPUT));
-    }
+            agmm::addKnobArcs(this, 2.f);
+        }
 
     // Adds the right-click menu: a "Voct range" submenu (with re-roll on
     // selection) and a "Gate duration" submenu (with a checkmark on the
     // active option).
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         SpringPendulum *module = dynamic_cast<SpringPendulum *>(this->module);
         if (!module)
             return;
@@ -1209,6 +1214,8 @@ struct SpringPendulumWidget : ModuleWidget
                                              }
                                          }));
     }
+
+    
 };
 
 Model *modelSpringPendulum = createModel<SpringPendulum, SpringPendulumWidget>("SpringPendulum");

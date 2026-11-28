@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <algorithm>
@@ -6,6 +8,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "Knob_arcs.hpp"
+
+
 
 // ============================================================================
 // ArpLib  (22 HP)
@@ -1896,6 +1901,7 @@ struct ArpLibWidget : ModuleWidget
 		addOutput(createOutputCentered<PJ301MPort>(Vec(lay::colN(7, 4), outY), module, ArpLib::CHORD_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(lay::colN(7, 5), outY), module, ArpLib::CHANGE_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(lay::colN(7, 6), outY), module, ArpLib::LOOP_OUTPUT));
+		agmm::addKnobArcs(this, 6.f);
 	}
 
 	// Context menu: progression picker (minor / major categories), slot
@@ -1903,7 +1909,9 @@ struct ArpLibWidget : ModuleWidget
 	// chord only" toggle.
 	void appendContextMenu(Menu *menu) override
 	{
-		ArpLib *module = getModule<ArpLib>();
+	    agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+	    agmm::addGitLink(menu); // adds "Visit my git repo!"
+	    ArpLib *module = getModule<ArpLib>();
 		if (!module)
 			return;
 

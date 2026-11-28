@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include "Knob_arcs.hpp"
 
 static const int MX_SCOPE_N = 96;
 
@@ -458,7 +461,7 @@ struct Mixer6Widget : ModuleWidget
                 Vec(cx, top + 148.f), module,
                 (Mixer6::ParamId)(Mixer6::PARAM_CH1_ATTV + ch)));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // Master gain + stereo outputs
         // All three on one row, outputs symmetric around the gain knob.
         addParam(createParamCentered<RoundBlackKnob>(
@@ -467,10 +470,13 @@ struct Mixer6Widget : ModuleWidget
             Vec(MX_GAIN_CX - MX_OUT_OFFSET, MX_MASTER_TOP + 38.f), module, Mixer6::OUTPUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(MX_GAIN_CX + MX_OUT_OFFSET, MX_MASTER_TOP + 38.f), module, Mixer6::OUTPUT_R));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Mixer6 *module = dynamic_cast<Mixer6 *>(this->module);
         if (!module)
             return;

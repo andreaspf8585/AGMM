@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <algorithm>
 #include <random>
 #include <limits>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // PsyLFO
@@ -1054,6 +1057,7 @@ struct PsyLFOWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(5), y), module, PsyLFO::KICK_INPUT));
         addParam(createParamCentered<VCVButton>(Vec(plCtrlX(6), y), module, PsyLFO::RESET_BUTTON));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(plCtrlX(7), y), module, PsyLFO::RESET_CV_INPUT));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     // Adds the right-click menu: "Voct1 range" and "Voct2 range" submenus
@@ -1062,6 +1066,7 @@ struct PsyLFOWidget : ModuleWidget
     // a checkmark on the active duration).
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         PsyLFO *module = dynamic_cast<PsyLFO *>(this->module);
         if (!module)
             return;
@@ -1134,6 +1139,8 @@ struct PsyLFOWidget : ModuleWidget
                                              }
                                          }));
     }
+
+    
 };
 
 Model *modelPsyLFO = createModel<PsyLFO, PsyLFOWidget>("PsyLFO");

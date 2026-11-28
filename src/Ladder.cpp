@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -5,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Ladder — Shepard-tone VCO
@@ -935,11 +938,12 @@ struct LadderWidget : ModuleWidget
         for (int i = 0; i < 4; ++i)
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW1_X[i], LD_ROW1_Y), module, ids1[i]));
 
+        agmm::addKnobArcs(this, 2.f);    
         // Row 2: SPEED, OSCS, DIR
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW2_X[0], LD_ROW2_Y), module, Ladder::LADDER_SPEED_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LD_ROW2_X[1], LD_ROW2_Y), module, Ladder::NUM_OSCS_PARAM));
         addParam(createParamCentered<CKSS>(Vec(LD_ROW2_X[2], LD_ROW2_Y), module, Ladder::DIRECTION_PARAM));
-
+        agmm::addKnobArcs(this, 2.f);
         // I/O: input left, outputs right
         addInput(createInputCentered<DarkPJ301MPort>(Vec(LD_IO_X[0], LD_IO_Y), module, Ladder::VOCT_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(LD_IO_X[1], LD_IO_Y), module, Ladder::OUT_L_OUTPUT));
@@ -948,6 +952,8 @@ struct LadderWidget : ModuleWidget
 
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Ladder *m = dynamic_cast<Ladder *>(this->module);
         if (!m)
             return;

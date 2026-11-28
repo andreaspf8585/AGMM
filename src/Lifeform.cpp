@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // Lifeform.cpp
 // AGMM-styled ferrofluid visualiser.
 //
@@ -39,6 +41,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "Knob_arcs.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1308,12 +1311,19 @@ struct LifeformWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(LF_COL[col] + LF_KNOB_DX, cy), module, LF_KNOBS[i].param));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(LF_COL[col] + LF_JACK_DX, cy), module, LF_KNOBS[i].cv));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         const float jy = LF_IO_TOP + 24.f;
         addInput(createInputCentered<DarkPJ301MPort>(Vec(LF_IO_X[0], jy), module, LifeformModule::AUDIO_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(LF_IO_X[1], jy), module, LifeformModule::PULSE_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(LF_IO_X[2], jy), module, LifeformModule::ENV_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(LF_IO_X[3], jy), module, LifeformModule::FIELD_OUTPUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

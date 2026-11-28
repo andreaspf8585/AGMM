@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Stasis
@@ -871,6 +874,14 @@ struct StasisWidget : ModuleWidget
             addOutput(createOutputCentered<DarkPJ301MPort>(
                 Vec(cx, ST_OUT_TOP + ST_CH_JACK_DY), module, Stasis::CH_OUTPUT + i));
         }
+        //agmm::addKnobArcs(this, 2.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

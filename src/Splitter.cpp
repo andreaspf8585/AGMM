@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -5,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Splitter
@@ -269,6 +272,13 @@ struct SplitterWidget : ModuleWidget
                     Splitter::SPLIT_OUTPUT + r * 4 + c));
             }
         }
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

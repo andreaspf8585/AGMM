@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // VCA2 — dual VCA with per-channel gain limit (12 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -389,6 +391,13 @@ struct VCA2Widget : ModuleWidget
             addInput(createInputCentered<DarkPJ301MPort>(Vec(V2_CX[c], V2_TOP[1] + V2_JACK_DY), module, VCA2::INPUT_ENV1 + c));
             addOutput(createOutputCentered<DarkPJ301MPort>(Vec(V2_CX[c], V2_TOP[2] + V2_JACK_DY), module, VCA2::OUTPUT_1 + c));
         }
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

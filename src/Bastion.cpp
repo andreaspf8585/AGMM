@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
@@ -7,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // Bastion - Multi-Engine Filter Module
@@ -1417,6 +1420,7 @@ struct BastionWidget : ModuleWidget
             addParam(createParamCentered<Trimpot>(
                 Vec(cx + CELL_SUB_DX, CELL_TOP + CELL_JACK), module, trimIds[i]));
         }
+        agmm::addKnobArcs(this, 6.f);
 
         // ---- I/O: IN 1, IN 2, IN 3 | LP, BP, HP ----
         const float jy = IO_TOP + IO_JACK;
@@ -1432,6 +1436,8 @@ struct BastionWidget : ModuleWidget
     // checkmark for the active engine, and a "Reset State" action.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Bastion *module = dynamic_cast<Bastion *>(this->module);
         if (!module)
             return;

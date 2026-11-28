@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // Galton - interactive Galton board with real ball physics (40 HP)
 // ----------------------------------------------------------------------------
@@ -42,6 +44,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 namespace ag = agmm;
 
@@ -1504,7 +1507,7 @@ struct GaltonWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(glCellX(7, 10), yb), module, Galton::ROW_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(glCellX(8, 10), yb), module, Galton::VOCT_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(glCellX(9, 10), yb), module, Galton::VGATE_OUTPUT));
-
+        agmm::addKnobArcs(this, 2.f);
         // Slot LEDs
         for (int i = 0; i < GL_N; i++)
         {
@@ -1516,6 +1519,8 @@ struct GaltonWidget : ModuleWidget
 
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         ModuleWidget::appendContextMenu(menu);
         Galton *module = dynamic_cast<Galton *>(this->module);
         if (!module)

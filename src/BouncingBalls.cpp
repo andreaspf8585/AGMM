@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
@@ -6,6 +8,7 @@
 #include <memory>
 #include <random>
 #include <limits>
+#include "Knob_arcs.hpp"
 
 // =============================================================================
 // Bouncing Balls
@@ -1335,7 +1338,7 @@ struct BouncingBallsWidget : ModuleWidget
 
         addParam(createParamCentered<VCVButton>(Vec(l0, ly(4)), module, BouncingBalls::RESET_BUTTON));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, ly(4)), module, BouncingBalls::RESET_CV_INPUT));
-
+        agmm::addKnobArcs(this, 6.f);
         // ---- right block (all outputs are polyphonic) ----
         const float r0 = BB_RCOL[0], r1 = BB_RCOL[1];
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(r0, ly(0)), module, BouncingBalls::X_OUTPUT));
@@ -1361,6 +1364,7 @@ struct BouncingBallsWidget : ModuleWidget
     // duration" submenu, each with a checkmark on the active option.
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         BouncingBalls *module = dynamic_cast<BouncingBalls *>(this->module);
         if (!module)
             return;

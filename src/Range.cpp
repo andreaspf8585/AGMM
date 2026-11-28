@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Range
@@ -520,7 +523,7 @@ struct RangeWidget : ModuleWidget
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RG_KNOB_COL_X[0], rgKnobY(1)), module, Range::HIGH_IN_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RG_KNOB_COL_X[1], rgKnobY(0)), module, Range::LOW_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(RG_KNOB_COL_X[1], rgKnobY(1)), module, Range::HIGH_PARAM));
-
+        agmm::addKnobArcs(this, 2.f);
         // Ports
         addInput(createInputCentered<DarkPJ301MPort>(Vec(RG_PORT_X[0], rgPortY()), module, Range::SIGNAL_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(RG_PORT_X[1], rgPortY()), module, Range::SIGNAL_OUTPUT));
@@ -534,6 +537,8 @@ struct RangeWidget : ModuleWidget
     //     window when the input overshoots the input window.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Range *m = dynamic_cast<Range *>(module);
         if (!m)
             return;

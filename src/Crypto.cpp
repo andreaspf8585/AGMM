@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // Crypto.cpp - frequency-code granular processor for VCV Rack (AGMM panel kit, 54 HP).
 //
 // Concept
@@ -22,7 +24,7 @@
 //     { "slug": "Crypto", "name": "Crypto", "tags": [...] }
 
 #include "plugin.hpp"
-#include "agmm_ui.hpp"
+#include "agmm_ui.hpp"            
 
 #include <algorithm>
 #include <atomic>
@@ -1506,7 +1508,9 @@ namespace crypto
 
 		void appendContextMenu(Menu *menu) override
 		{
-			Crypto *m = dynamic_cast<Crypto *>(module);
+		    agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+		    agmm::addGitLink(menu); // adds "Visit my git repo!"
+		    Crypto *m = dynamic_cast<Crypto *>(module);
 			if (!m)
 				return;
 			menu->addChild(new MenuSeparator);

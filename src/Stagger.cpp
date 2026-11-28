@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <random>
 #include "dsp/minblep.hpp"
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Stagger
@@ -813,16 +816,23 @@ struct StaggerWidget : ModuleWidget
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 16.f, ST_A_JACK), module, cv[i]));
             addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, ST_A_JACK), module, att[i]));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // Row B
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(stColC(0), ST_B_Y), module, Stagger::CHAOS_MULT_PARAM));
         addParam(createParamCentered<CKSS>(Vec(stColC(1), ST_B_Y), module, Stagger::CV_RANGE_PARAM));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(stColC(2), ST_B_Y), module, Stagger::CHAOS_RESET_INPUT));
-
+        agmm::addKnobArcs(this, 2.f);
         // Row C: chaos light, then the outputs
         addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(stColC(0), ST_C_Y), module, Stagger::CHAOS_LIGHT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stColC(1), ST_C_Y), module, Stagger::VCO_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(stColC(2), ST_C_Y), module, Stagger::VCO_R_OUTPUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

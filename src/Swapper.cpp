@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // Swapper — 12 HP dual-channel crossfader / swapper
 // ----------------------------------------------------------------------------
@@ -18,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ---- panel layout (12 HP = 180 px wide) ----
 // All coordinates below are in Rack pixel space (RACK_GRID_WIDTH = 15 px).
@@ -348,13 +351,20 @@ struct SwapperWidget : ModuleWidget
             addParam(createParamCentered<Trimpot>(Vec(SW_COL[1], cy), module, att[r]));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(SW_COL[2], cy), module, cv[r]));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // I/O row: L IN, R IN, L OUT, R OUT.
         const float jy = SW_IO_TOP + SW_IO_JACK_DY;
         addInput(createInputCentered<DarkPJ301MPort>(Vec(swIoX(0), jy), module, Swapper::L_IN));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(swIoX(1), jy), module, Swapper::R_IN));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(swIoX(2), jy), module, Swapper::L_OUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(swIoX(3), jy), module, Swapper::R_OUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

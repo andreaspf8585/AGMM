@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // Vortex — dual-mode reverb / echo (32 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -24,7 +26,7 @@
 #include "VortexModule.hpp"
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include "Knob_arcs.hpp"
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -1297,12 +1299,15 @@ struct VortexWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vxStripX(8), sy), module, VortexModule::CLEAR_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(9), sy), module, VortexModule::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vxStripX(10), sy), module, VortexModule::OUT_R_OUTPUT));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     // Add a "Display" submenu (Wave / Bars / Spectrum) and a "CV range"
     // submenu (unipolar / bipolar) to the module context menu.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         VortexModule *module = dynamic_cast<VortexModule *>(this->module);
         if (!module)
             return;

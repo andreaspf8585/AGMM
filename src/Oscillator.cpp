@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,7 +8,7 @@
 #include <cstring>
 #include <cctype>
 #include <complex>
-#include <vector>
+#include <vector> 
 #include <string>
 #include <algorithm>
 #include <memory>
@@ -1441,6 +1443,13 @@ struct OscillatorWidget : ModuleWidget
 				addOutput(createOutputCentered<DarkPJ301MPort>(Vec(c.cx, osJackY(c)), module, c.output));
 		}
 	}
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
+    }
 };
 
 Model *modelOscillator = createModel<Oscillator, OscillatorWidget>("Oscillator");

@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <fstream>
 #include <osdialog.h>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Sampler
@@ -2177,12 +2180,15 @@ struct SamplerWidget : ModuleWidget
         addChild(new SPReadout(module, Sampler::XFADE_PARAM, SPReadout::MILLIS, 15.f, SP_CX[3], r2));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_CX[4], k2), module, Sampler::LEVEL_PARAM));
         addChild(new SPReadout(module, Sampler::LEVEL_PARAM, SPReadout::PERCENT, 1.f, SP_CX[4], r2));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     // Adds the right-click menu: load/save WAV dialogs, editing actions
     // (normalize, reverse, trim to loop, clear) and the auto-play toggle.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         ModuleWidget::appendContextMenu(menu);
 
         Sampler *module = dynamic_cast<Sampler *>(this->module);

@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // Black Hole Reverb
@@ -660,12 +663,15 @@ struct BlackHoleReverbWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(bhIoX(1), jy), module, BlackHoleReverb::IN_R));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(bhIoX(2), jy), module, BlackHoleReverb::OUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(bhIoX(3), jy), module, BlackHoleReverb::OUT_R));
+        agmm::addKnobArcs(this, 6.f);
     }
 
     // Adds the right-click "CV Range" submenu with two mutually exclusive,
     // checkmarked options that set the module's CV interpretation.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         BlackHoleReverb *module = dynamic_cast<BlackHoleReverb *>(this->module);
         if (!module)
             return;

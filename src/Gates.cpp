@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // Gates
@@ -504,7 +507,7 @@ struct GatesWidget : ModuleWidget
 
         // Time knob
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(GT_KNOBX, GT_KNOBY), module, Gates::PARAM_TIME));
-
+            agmm::addKnobArcs(this, 2.f);
         // Outputs
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(0), GT_OUT_Y), module, Gates::OUTPUT_AND));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(gtOutJx(1), GT_OUT_Y), module, Gates::OUTPUT_OR));
@@ -520,6 +523,13 @@ struct GatesWidget : ModuleWidget
         for (int i = 0; i < 7; ++i)
             addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
                 Vec(gtOutJx(i) + 16.f, GT_OUT_LED_Y), module, ledIds[i]));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

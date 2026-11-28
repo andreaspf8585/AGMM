@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 // ============================================================================
 // InstantDrone
@@ -666,6 +669,61 @@ namespace
         }
     };
 
+    // ------------------------------------------------------------
+    // Value arcs around the knobs (flat track + flat arc)
+    //
+    // Bipolar params (FREQ, GAIN) fill from
+    // the centre, unipolar ones from the left end; negative bipolar values
+    // are drawn warm. The radius is set per knob to suit its size and plate.
+    // ------------------------------------------------------------
+    struct DRKnobArcs : TransparentWidget
+    {
+        struct Arc
+        {
+            Vec pos;
+            int param;
+            float radius;
+            bool bipolar;
+        };
+
+        InstantDrone *module = nullptr;
+        std::vector<Arc> arcs;
+
+        DRKnobArcs(InstantDrone *m) : module(m) { box.size = Vec(DR_PANEL_W, DR_PANEL_H); }
+
+        void draw(const DrawArgs &args) override
+        {
+            NVGcontext *vg = args.vg;
+            const float a0 = -0.75f * (float)M_PI - (float)M_PI / 2.f;
+            const float a1 = 0.75f * (float)M_PI - (float)M_PI / 2.f;
+
+            for (const Arc &k : arcs)
+            {
+                // Track
+                nvgBeginPath(vg);
+                nvgArc(vg, k.pos.x, k.pos.y, k.radius, a0, a1, NVG_CW);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 30));
+                nvgStrokeWidth(vg, 2.f);
+                nvgLineCap(vg, NVG_BUTT);
+                nvgStroke(vg);
+
+                if (!module)
+                    continue;
+                float v = module->paramQuantities[k.param]->getScaledValue();
+                float from = k.bipolar ? 0.5f : 0.f;
+                float lo = std::min(from, v), hi = std::max(from, v);
+                if (hi - lo < 0.004f)
+                    continue;
+                NVGcolor col = (k.bipolar && v < 0.5f) ? agmm::warm() : agmm::accent();
+                nvgBeginPath(vg);
+                nvgArc(vg, k.pos.x, k.pos.y, k.radius, a0 + (a1 - a0) * lo, a0 + (a1 - a0) * hi, NVG_CW);
+                nvgStrokeColor(vg, col);
+                nvgStrokeWidth(vg, 2.f);
+                nvgStroke(vg);
+            }
+        }
+    };
+
 } // namespace
 
 // ------------------------------------------------------------
@@ -685,6 +743,8 @@ struct InstantDroneWidget : ModuleWidget
         box.size = Vec(DR_PANEL_W, DR_PANEL_H);
 
         addChild(new DRPanelBackground());
+        DRKnobArcs *arcs = new DRKnobArcs(module);
+        addChild(arcs);
 
         // Screws
         addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
@@ -703,7 +763,9 @@ struct InstantDroneWidget : ModuleWidget
 
         // Master section
         addParam(createParamCentered<RoundLargeBlackKnob>(Vec(DR_INT_CX, DR_TOP_Y + 54.f), module, InstantDrone::REVERB_WET_PARAM));
+        arcs->arcs.push_back({Vec(DR_INT_CX, DR_TOP_Y + 54.f), InstantDrone::REVERB_WET_PARAM, 25.f, false});
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(DR_GAIN_CX, DR_TOP_Y + 28.f), module, InstantDrone::OUTPUT_GAIN_PARAM));
+        arcs->arcs.push_back({Vec(DR_GAIN_CX, DR_TOP_Y + 28.f), InstantDrone::OUTPUT_GAIN_PARAM, 15.f, true});
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(DR_OUT_CX[0], DR_OUT_TOP + 25.f), module, InstantDrone::LEFT_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(DR_OUT_CX[1], DR_OUT_TOP + 25.f), module, InstantDrone::RIGHT_OUTPUT));
 
@@ -717,6 +779,12 @@ struct InstantDroneWidget : ModuleWidget
             addParam(createParamCentered<CKSSThree>(Vec(14.5f, ky), module, InstantDrone::WAVE1_PARAM + i));
 
             // Freq (V/Oct), Drift, Mix, Filter, Send: knob on top, CV jack below
+            const int rowKnobs[5] = {InstantDrone::FREQ1_PARAM + i, InstantDrone::DRIFT1_PARAM + i,
+                                     InstantDrone::MIX1_PARAM + i, InstantDrone::FILT1_PARAM + i,
+                                     InstantDrone::SEND1_PARAM + i};
+            for (int c = 0; c < 5; ++c)
+                arcs->arcs.push_back({Vec(DR_COLX[c], ky), rowKnobs[c], 15.f, c == 0});
+
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(DR_COLX[0], ky), module, InstantDrone::FREQ1_PARAM + i));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(DR_COLX[0], jy), module, InstantDrone::VOCT1_INPUT + i));
 
@@ -736,6 +804,13 @@ struct InstantDroneWidget : ModuleWidget
             addParam(createParamCentered<CKSS>(Vec(DR_COLX[5] - 5.f, ky), module, InstantDrone::ENV1_SWITCH + i));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(DR_COLX[5], jy), module, InstantDrone::ENV1_INPUT + i));
         }
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

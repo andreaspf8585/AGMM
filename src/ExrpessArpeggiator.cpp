@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
@@ -8,6 +10,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // ExpressArp (updated 21 Nov 2026)
@@ -1566,7 +1569,7 @@ struct ExpressArpeggiatorWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(
                 Vec(EA_KNOBS[k].x, EA_KNOBS[k].top + EA_KNOB_DY), module, EA_KNOBS[k].param));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // I/O row: 5 inputs, randomize button, 4 outputs
         addInput(createInputCentered<DarkPJ301MPort>(Vec(eaIoX(0), EA_IO_Y), module, ExpressArpeggiator::CLOCK_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(eaIoX(1), EA_IO_Y), module, ExpressArpeggiator::RESET_INPUT));
@@ -1587,6 +1590,7 @@ struct ExpressArpeggiatorWidget : ModuleWidget
     // unlocked steps, and generate a completely new pattern.
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         ExpressArpeggiator *module = dynamic_cast<ExpressArpeggiator *>(this->module);
         if (!module)
             return;
@@ -1607,6 +1611,8 @@ struct ExpressArpeggiatorWidget : ModuleWidget
         menu->addChild(createMenuItem("New pattern (clears locks and mutes)", "", [=]()
                                       { module->initPattern(); }));
     }
+
+    
 };
 
 Model *modelExpressArpeggiator = createModel<ExpressArpeggiator, ExpressArpeggiatorWidget>("ExpressArpeggiator");

@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // PsyDelay
@@ -910,7 +913,9 @@ struct PsyDelayWidget : ModuleWidget
         {
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PD_LCOL[i % 2], pdKnobY(i / 2)), module, leftIds[i]));
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PD_RCOL[i % 2], pdKnobY(i / 2)), module, rightIds[i]));
+            //agmm::addKnobArcs(this, 6.f);
         }
+        agmm::addKnobArcs(this, 6.f);
 
         // ---- switches with LEDs ----
         const int swIds[6] = {PsyDelay::REVERSE_SWITCH, PsyDelay::CHAOS_SWITCH, PsyDelay::PINGPONG_SWITCH,
@@ -937,6 +942,14 @@ struct PsyDelayWidget : ModuleWidget
             addInput(createInputCentered<DarkPJ301MPort>(Vec(pdCenterX(i), jy), module, cvIds[i]));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PD_RCOL[0], jy), module, PsyDelay::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PD_RCOL[1], jy), module, PsyDelay::OUT_R_OUTPUT));
+        agmm::addKnobArcs(this, 6.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

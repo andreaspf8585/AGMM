@@ -1,10 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include "Knob_arcs.hpp"
 #include <algorithm>
 
 // ============================================================
@@ -594,13 +596,16 @@ struct DiceWidget : ModuleWidget
         for (int i = 0; i < 16; ++i)
             addChild(createLightCentered<SmallLight<agmm::CyanLight>>(
                 Vec(DC_DX + (i + 0.5f) * DC_CHW, DC_LEDY), module, Dice::LIGHT_GATES + i));
-    }
+        agmm::addKnobArcs(this, 6.f);
+            }
 
     // Adds the right-click menu: "Gate time", "Random V/Oct range" and
     // "Quantization scale" submenus, each with a checkmark on the active
     // option.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Dice *module = dynamic_cast<Dice *>(this->module);
         if (!module)
             return;

@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -5,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // TritoneParadox - Shepard-tone pair generator for the tritone paradox
@@ -962,10 +965,13 @@ struct TritoneParadoxWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(6, 9), y3), module, TritoneParadox::GATE_A_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(7, 9), y3), module, TritoneParadox::GATE_B_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(tpCellX(8, 9), y3), module, TritoneParadox::EOC_OUTPUT));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         ModuleWidget::appendContextMenu(menu);
         TritoneParadox *m = dynamic_cast<TritoneParadox *>(module);
         if (!m)

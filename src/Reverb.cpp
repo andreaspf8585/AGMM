@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Reverb
@@ -392,6 +395,7 @@ struct ReverbWidget : ModuleWidget
     ReverbWidget(Reverb *module)
     {
         setModule(module);
+        
         box.size = Vec(RV_PANEL_W, RV_PANEL_H);
 
         addChild(new RvPanelBackground());
@@ -413,6 +417,14 @@ struct ReverbWidget : ModuleWidget
         // I/O jacks: input left, output right
         addInput(createInputCentered<DarkPJ301MPort>(Vec(RV_COL[0], rvPortY()), module, Reverb::AUDIO_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(RV_COL[1], rvPortY()), module, Reverb::AUDIO_OUTPUT));
+        agmm::addKnobArcs(this, 6.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

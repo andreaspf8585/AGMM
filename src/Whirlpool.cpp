@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // Whirlpool — FDN reverb (20 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -20,7 +22,7 @@
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include "Knob_arcs.hpp"
 #include <vector>
 #include <algorithm>
 
@@ -1377,11 +1379,14 @@ struct WhirlpoolWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(whCol(2), jy), module, Whirlpool::CLEAR_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(whCol(3), jy), module, Whirlpool::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(whCol(4), jy), module, Whirlpool::OUT_R_OUTPUT));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     // Add a "Display" submenu (Wave / Bars / Spectrum).
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Whirlpool *module = dynamic_cast<Whirlpool *>(this->module);
         if (!module)
             return;

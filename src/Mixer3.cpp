@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include "Knob_arcs.hpp"
 
 static const int M3_SCOPE_N = 96;
 
@@ -444,7 +447,7 @@ struct Mixer3Widget : ModuleWidget
             addParam(createParamCentered<Trimpot>(
                 Vec(rx, top + 122.f), module, (Mixer3::ParamId)(Mixer3::PARAM_CH1_ATTV + ch)));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // Master gain + stereo outputs
         // All three sit on the same row (+38 inside the master plates).
         addParam(createParamCentered<RoundBlackKnob>(
@@ -453,10 +456,13 @@ struct Mixer3Widget : ModuleWidget
             Vec(M3_OUT_CX[0], M3_MASTER_TOP + 38.f), module, Mixer3::OUTPUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(M3_OUT_CX[1], M3_MASTER_TOP + 38.f), module, Mixer3::OUTPUT_R));
+        agmm::addKnobArcs(this, 2.f);
     }
 
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Mixer3 *module = dynamic_cast<Mixer3 *>(this->module);
         if (!module)
             return;

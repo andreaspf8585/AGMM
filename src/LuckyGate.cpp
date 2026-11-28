@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 
@@ -17,7 +19,7 @@ struct LuckyGate : Module {
 		PROB_CV_INPUT,
 		INPUTS_LEN
 	};
-	enum OutputId {
+	enum OutputId {  
 		GATE_OUTPUT,
 		OUTPUTS_LEN
 	};
@@ -290,6 +292,13 @@ struct LuckyGateWidget : ModuleWidget {
 		addInput(createInputCentered<PJ301MPort>(Vec(87.f, 262.f + 31.f), module, LuckyGate::GATE_INPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(60.f, 314.f + 31.f), module, LuckyGate::GATE_OUTPUT));
 	}
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
+    }
 };
 
 

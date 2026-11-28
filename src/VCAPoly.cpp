@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // VCAPoly — polyphonic VCA with global limit (14 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -519,6 +521,13 @@ struct VCAPolyWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(1), VP_JTOP + VP_JDY), module, VCAPoly::INPUT_ENV));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(vpJx(2), VP_JTOP + VP_JDY), module, VCAPoly::INPUT_LIMIT_CV));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(vpJx(3), VP_JTOP + VP_JDY), module, VCAPoly::OUTPUT_AUDIO));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

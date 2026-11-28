@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Spikes
@@ -804,7 +807,8 @@ struct SpikesWidget : ModuleWidget
         for (int i = 0; i < 6; ++i)
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(SP_KCOL[i % 3], SP_KTOP[i / 3] + 32.f), module, ids[i]));
 
-        // ---------------- jack row (jack at +30 inside its cell) ----------------
+        agmm::addKnobArcs(this, 2.f);
+            // ---------------- jack row (jack at +30 inside its cell) ----------------
         const float jy = SP_IOTOP + 30.f;
         addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(0), jy), module, Spikes::SPEED_INPUT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(spJx(1), jy), module, Spikes::BLEND_INPUT));
@@ -814,6 +818,13 @@ struct SpikesWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(4), jy), module, Spikes::Y_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(5), jy), module, Spikes::Z_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(spJx(6), jy), module, Spikes::MIX_OUTPUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

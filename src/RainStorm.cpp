@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // RainStorm.cpp
 // AGMM RainStorm: layered rain + random, distance-aware thunder + echo + reverb.
 //
@@ -37,6 +39,7 @@
 #include <random>
 #include <algorithm>
 #include <cstdint>
+#include "Knob_arcs.hpp"
 
 // =============================================================================
 // Layout constants (28 HP = 420 px wide)
@@ -1191,22 +1194,30 @@ struct RainStormWidget : ModuleWidget
                            RainStorm::ECHO_FEEDBACK_CV, RainStorm::ECHO_MIX_CV};
         for (int i = 0; i < 8; ++i)
         {
-            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(i), rsKnobY(RS_R1)), module, pa[i]));
+            addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(i), rsKnobY(RS_R1)+4), module, pa[i]));
             if (ca[i] >= 0)
                 addInput(createInputCentered<DarkPJ301MPort>(Vec(rsCol(i), rsCvY(RS_R1)), module, ca[i]));
         }
-
+        agmm::addKnobArcs(this, 3.f);
         // ---- row B ----
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(1), rsKnobY(RS_R2)), module, RainStorm::OUTPUT_GAIN_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(1), rsKnobY(RS_R2)+4), module, RainStorm::OUTPUT_GAIN_PARAM));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(rsCol(1), rsCvY(RS_R2)), module, RainStorm::OUTPUT_GAIN_CV));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(2), rsKnobY(RS_R2)), module, RainStorm::REVERB_SIZE_PARAM));
-        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(3), rsKnobY(RS_R2)), module, RainStorm::REVERB_MIX_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(2), rsKnobY(RS_R2)+4), module, RainStorm::REVERB_SIZE_PARAM));
+        addParam(createParamCentered<RoundSmallBlackKnob>(Vec(rsCol(3), rsKnobY(RS_R2)+4), module, RainStorm::REVERB_MIX_PARAM));
 
         addInput(createInputCentered<DarkPJ301MPort>(Vec(rsCol(4), rsJackY(RS_R2)), module, RainStorm::TRIG_INPUT));
         addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(rsCol(4), RS_R2 + 72.f), module, RainStorm::THUNDER_LIGHT));
 
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(rsCol(5), rsJackY(RS_R2)), module, RainStorm::L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(rsCol(6), rsJackY(RS_R2)), module, RainStorm::R_OUTPUT));
+        agmm::addKnobArcs(this, 3.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

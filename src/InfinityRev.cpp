@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
@@ -5,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 //  InfinityRev - 8-line Feedback Delay Network reverb
@@ -792,9 +795,11 @@ struct InfinityRevWidget : ModuleWidget
         const int row2[4] = {InfinityRev::MOD_PARAM, InfinityRev::ER_PARAM, InfinityRev::WIDTH_PARAM, InfinityRev::MIX_PARAM};
         for (int i = 0; i < 5; ++i)
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(irCol(i), IR_R1 + IR_KNOB_DY), module, row1[i]));
-        for (int i = 0; i < 4; ++i)
+        agmm::addKnobArcs(this, 2.f);
+            for (int i = 0; i < 4; ++i)
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(irCol(i), IR_R2 + IR_KNOB_DY), module, row2[i]));
-        addParam(createParamCentered<CKSS>(Vec(irCol(4) - 8.f, IR_R2 + 34.f), module, InfinityRev::FREEZE_PARAM));
+        agmm::addKnobArcs(this, 2.f);
+            addParam(createParamCentered<CKSS>(Vec(irCol(4) - 8.f, IR_R2 + 34.f), module, InfinityRev::FREEZE_PARAM));
         addChild(createLightCentered<SmallLight<agmm::VioletLight>>(Vec(irCol(4) + 14.f, IR_R2 + 34.f), module, InfinityRev::FREEZE_LIGHT));
 
         addInput(createInputCentered<DarkPJ301MPort>(Vec(irJx(0), IR_JY), module, InfinityRev::INPUT_L));
@@ -805,6 +810,13 @@ struct InfinityRevWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(irJx(5), IR_JY), module, InfinityRev::FREEZE_GATE_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(irJx(6), IR_JY), module, InfinityRev::OUTPUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(irJx(7), IR_JY), module, InfinityRev::OUTPUT_R));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

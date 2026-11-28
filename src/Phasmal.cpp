@@ -1,9 +1,11 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // Phasmal.cpp
 // AGMM-styled stereo phaser with feedback, LFO sweep, and a live
 // frequency-response display.
 //
 // ============================================================================
-// OVERVIEW
+// OVERVIEW 
 // ============================================================================
 // Phasmal is a 20 HP stereo phaser. Its core is a chain of first-order
 // all-pass stages (2, 4, 6, 8, 10 or 12 stages) with global feedback, whose
@@ -741,6 +743,7 @@ struct PhasmalWidget : ModuleWidget
     // Triangle options and a checkmark on the current shape.
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Phasmal *module = dynamic_cast<Phasmal *>(this->module);
         if (!module)
             return;
@@ -760,6 +763,8 @@ struct PhasmalWidget : ModuleWidget
                                              }
                                          }));
     }
+
+    
 };
 
 Model *modelPhasmal = createModel<Phasmal, PhasmalWidget>("Phasmal");

@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // Dark Hall
@@ -614,6 +617,14 @@ struct DarkHallWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(dhIoX(1), jy), module, DarkHall::IN_R));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dhIoX(2), jy), module, DarkHall::OUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(dhIoX(3), jy), module, DarkHall::OUT_R));
+        agmm::addKnobArcs(this, 6.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

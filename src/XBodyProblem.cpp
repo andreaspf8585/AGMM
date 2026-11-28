@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // XBodyProblem — N-body gravity LFO (28 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -1099,6 +1101,7 @@ struct XBodyProblemWidget : ModuleWidget
 	// Context menu: pause, zero-momentum toggle, new random start.
 	void appendContextMenu(ui::Menu *menu) override
 	{
+		agmm::addGitLink(menu); // adds "Visit my git repo!"
 		XBodyProblem *module = dynamic_cast<XBodyProblem *>(this->module);
 		if (!module)
 			return;
@@ -1109,6 +1112,8 @@ struct XBodyProblemWidget : ModuleWidget
 		menu->addChild(createMenuItem("New random start", "", [=]()
 									  { module->doReset(); }));
 	}
+
+    
 };
 
 Model *modelXBodyProblem = createModel<XBodyProblem, XBodyProblemWidget>("XBodyProblem");

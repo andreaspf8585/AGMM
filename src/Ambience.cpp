@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <cstdio>
@@ -5,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 // ANDREAS GOGOS
 
 // =============================================================================
@@ -1192,6 +1195,7 @@ struct AmbienceWidget : ModuleWidget
             float cy = AM_ROW_TOP[i / 4] + AM_CELL_KNOB;
             addParam(createParamCentered<RoundBlackKnob>(Vec(cx, cy), module, knobIds[i]));
         }
+        agmm::addKnobArcs(this, 6.f);
 
         // Freeze: switch with its LED beside it, both inside the cell
         {
@@ -1209,6 +1213,13 @@ struct AmbienceWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(amIoX(4), AM_IO_JACK_Y), module, Ambience::FREEZE_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(amIoX(5), AM_IO_JACK_Y), module, Ambience::OUTPUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(amIoX(6), AM_IO_JACK_Y), module, Ambience::OUTPUT_R));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

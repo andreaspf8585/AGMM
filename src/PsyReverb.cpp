@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // PsyReverb
@@ -637,12 +640,19 @@ struct PsyReverbWidget : ModuleWidget
             addParam(createParamCentered<Trimpot>(Vec(PR_ATX, cy), module, attens[i]));
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PR_KX, cy), module, knobs[i]));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         const float y = prIoY();
         addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(0), y), module, PsyReverb::INPUT_LEFT));
         addInput(createInputCentered<DarkPJ301MPort>(Vec(prIoX(1), y), module, PsyReverb::INPUT_RIGHT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(2), y), module, PsyReverb::OUTPUT_LEFT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(prIoX(3), y), module, PsyReverb::OUTPUT_RIGHT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

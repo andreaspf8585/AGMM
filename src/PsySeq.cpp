@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -6,6 +8,7 @@
 #include <cstdlib>
 #include <string>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // PsySeq
@@ -1072,7 +1075,7 @@ struct PsySeqWidget : ModuleWidget
         addParam(createParamCentered<CKSS>(Vec(PS_LCOL[1], ky[1]), module, PsySeq::RANDOM_VOLTAGE_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[0], ky[2]), module, PsySeq::MUTATION_WAIT_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(PS_LCOL[1], ky[2]), module, PsySeq::MUTATION_PARAM));
-
+        agmm::addKnobArcs(this, 2.f);
         // ---- right block: jacks sit 32 px below each cell's top edge ----
         const float jy[4] = {PS_RTOP[0] + 32.f, PS_RTOP[1] + 32.f, PS_RTOP[2] + 32.f, PS_RTOP[3] + 32.f};
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(PS_RCOL[0], jy[0]), module, PsySeq::OUTPUT_OUT));
@@ -1100,6 +1103,7 @@ struct PsySeqWidget : ModuleWidget
     // probabilities".
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         PsySeq *module = dynamic_cast<PsySeq *>(this->module);
         if (!module)
             return;
@@ -1132,6 +1136,8 @@ struct PsySeqWidget : ModuleWidget
         menu->addChild(createMenuItem("Randomize all probabilities", "", [=]()
                                       { module->randomizeAllProbabilities(); }));
     }
+
+    
 };
 
 Model *modelPsySeq = createModel<PsySeq, PsySeqWidget>("PsySeq");

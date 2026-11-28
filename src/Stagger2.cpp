@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -12,6 +14,7 @@
 #include <random>
 #include <initializer_list>
 #include "dsp/minblep.hpp"
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // Stagger2  (32 HP)
@@ -1966,7 +1969,7 @@ struct Stagger2Widget : ModuleWidget
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 14.f, S2_R1_JACK), module, cv[i]));
             addParam(createParamCentered<Trimpot>(Vec(cx + 14.f, S2_R1_JACK), module, att[i]));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // ---- row 2: pitch / reset / trigger / chaos multiplier / CV range ----
         const float y2 = S2_T2 + S2_CTL_DY;
         addInput(createInputCentered<DarkPJ301MPort>(Vec(s2Col(0), y2), module, Stagger2::CV_INPUT));
@@ -1976,7 +1979,7 @@ struct Stagger2Widget : ModuleWidget
         addParam(createParamCentered<CKSS>(Vec(s2Col(4), y2), module, Stagger2::TRIG_MODE_PARAM));
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(5), y2), module, Stagger2::CHAOS_MULT_PARAM));
         addParam(createParamCentered<CKSS>(Vec(s2Col(6), y2), module, Stagger2::CV_RANGE_PARAM));
-
+        agmm::addKnobArcs(this, 2.f);
         // ---- row 3: delay, then reverb size / time ----
         const float y3 = S2_T3 + S2_CTL_DY;
         addParam(createParamCentered<RoundSmallBlackKnob>(Vec(s2Col(0), y3), module, Stagger2::DELAY_TIME_PARAM));
@@ -1995,6 +1998,14 @@ struct Stagger2Widget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(s2Col(4), y4), module, Stagger2::FX_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(s2Col(5), y4), module, Stagger2::FX_R_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(s2Col(6), y4), module, Stagger2::VCO_OUTPUT));
+        agmm::addKnobArcs(this, 2.f);    
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

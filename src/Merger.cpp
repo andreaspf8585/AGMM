@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -16,7 +18,7 @@
 // instead of compacting the cable, which would silently re-pitch downstream
 // modules whenever a cable is added or removed.
 // =============================================================================
-
+ 
 // ------------------------------------------------------------
 // Layout (12 HP = 180 x 380)
 // Every control sits in a plate with its label ABOVE it.
@@ -290,6 +292,13 @@ struct MergerWidget : ModuleWidget
         // Polyphonic output
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(MG_OUT_X, MG_OUT_TOP + 29.f), module, Merger::POLY_OUTPUT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

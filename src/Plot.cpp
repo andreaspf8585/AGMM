@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // Plot — polyphonic oscilloscope / signal visualizer (24 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -31,6 +33,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "Knob_arcs.hpp"
 
 // ------------------------------------------------------------
 // Layout constants (24 HP = 360 px wide)
@@ -1097,7 +1100,7 @@ struct PlotWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx[i], knobY), module, knobIds[i]));
             addChild(new PlotLabel(Vec(cx[i], knobY + 21.f), knobNames[i], i < 4 ? lbl : dimL));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // --- Selectors ----------------------------------------------------
         const float selY = 312.f;
         addSelector(cx[0], selY, Plot::PARAM_VIEW, module, {"A + B", "A ONLY", "B ONLY"},
@@ -1133,6 +1136,13 @@ struct PlotWidget : ModuleWidget
         addChild(createLightCentered<SmallLight<GreenLight>>(
             Vec(PLOT_W - 20.f, 22.f), module, Plot::LIGHT_TRIG));
         addChild(new PlotLabel(Vec(PLOT_W - 44.f, 22.f), "TRIG", dimL));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

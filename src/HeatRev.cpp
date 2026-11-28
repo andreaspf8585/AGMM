@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <vector>
@@ -6,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <utility>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // HeatRev
@@ -1307,6 +1310,14 @@ struct HeatRevWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(HR_KX4[1], HR_PORTY), module, HeatRev::INPUT_R));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(HR_KX4[2], HR_PORTY), module, HeatRev::OUTPUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(HR_KX4[3], HR_PORTY), module, HeatRev::OUTPUT_R));
+        agmm::addKnobArcs(this, 2.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

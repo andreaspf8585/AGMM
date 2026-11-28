@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <cmath>
 #include <algorithm>
@@ -5,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <cstdio>
+#include "Knob_arcs.hpp"
 
 // =============================================================================
 // Dark Hall Granular
@@ -887,12 +890,15 @@ struct DarkHallGranularWidget : ModuleWidget
             Vec(DHG_IO_CX[3], DHG_IO_JACK_Y), module, DarkHallGranular::OUT_L));
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(DHG_IO_CX[4], DHG_IO_JACK_Y), module, DarkHallGranular::OUT_R));
-    }
+            agmm::addKnobArcs(this, 6.f);
+        }
 
     // Adds the right-click "CV Range" submenu with two mutually exclusive,
     // checkmarked options that set the module's CV interpretation.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         DarkHallGranular *module = dynamic_cast<DarkHallGranular *>(this->module);
         if (!module)
             return;

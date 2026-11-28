@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // PsyReverb2.cpp
 // Single-file VCV Rack module styled to match AGMM's Reverb panel.
 // Based on Airwindows Galactic / Sapphire Galaxy, extended with damping,
@@ -41,7 +43,7 @@
 
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
-
+#include "Knob_arcs.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1755,7 +1757,7 @@ struct PsyReverb2Widget : ModuleWidget
             addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, p2JackY(row)), module,
                                                   PsyReverb2Module::ATTN_FIRST + i));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // Row 3: FREEZE (col 2), CLEAR (col 3), BYPASS (col 4), CV range (col 5)
         const float t3 = P2_ROW_TOP[2];
         addParam(createParamCentered<TL1105>(Vec(p2ColX(2), t3 + 32.f), module,
@@ -1785,6 +1787,8 @@ struct PsyReverb2Widget : ModuleWidget
     // "clear reverb tank" action.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         PsyReverb2Module *m = dynamic_cast<PsyReverb2Module *>(this->module);
         assert(m);
 

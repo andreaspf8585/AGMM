@@ -1,10 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <algorithm>
-#include <cstring>
+#include "Knob_arcs.hpp"
 #include <memory>
 
 // =============================================================================
@@ -807,13 +809,21 @@ struct CellAutoGateWidget : ModuleWidget
         addOutput(createOutputCentered<DarkPJ301MPort>(
             Vec(CA_RIGHT_X, CA_GATES_TOP + CA_JACK_DY), module, CellAutoGate::GATE_OUTPUT));
 
-        // Gate LEDs under the display
+        agmm::addKnobArcs(this, 6.f);
+            // Gate LEDs under the display
         float ledStartX = DISP_X + 8.f;
         float ledEndX = DISP_X + DISP_W - 8.f;
         float spacing = (ledEndX - ledStartX) / 15.f;
         for (int i = 0; i < 16; ++i)
             addChild(createLightCentered<SmallLight<CaCyanLight>>(
                 Vec(ledStartX + i * spacing, CA_LED_Y), module, CellAutoGate::GATE_LIGHT_1 + i));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

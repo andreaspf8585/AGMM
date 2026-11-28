@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -7,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include "Knob_arcs.hpp"
 
 using namespace rack;
 
@@ -1502,7 +1505,7 @@ struct PharmakonWidget : ModuleWidget
             addParam(createParamCentered<Trimpot>(Vec(cx + 16.f, phJackY(row)), module,
                                                   Pharmakon::ATTN_FIRST + i));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // Row 3, col 4: FREEZE switch.  Row 3, col 5: CV range selector.
         addParam(createParamCentered<CKSS>(Vec(phColX(4), PH_ROW_TOP[2] + 40.f), module, Pharmakon::PARAM_FREEZE));
         addChild(new PHCvRangeWidget(module, phColX(5), PH_ROW_TOP[2]));
@@ -1522,6 +1525,8 @@ struct PharmakonWidget : ModuleWidget
     // toggle, all as checkmarked choices.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Pharmakon *m = dynamic_cast<Pharmakon *>(this->module);
         assert(m);
 

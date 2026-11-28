@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // Clockwork.cpp - chainable master clock with six sub-clocks (AGMM).
 //
 // Features (inspired by Impromptu's Clocked(https://library.vcvrack.com/ImpromptuModular/Clocked), re-implemented from scratch):
@@ -21,6 +23,7 @@
 //   - Touching a swing / PW / delay knob shows its value on that row's display
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
+#include "Knob_arcs.hpp"
 
 namespace ag = agmm;
 
@@ -987,7 +990,7 @@ struct ClockworkWidget : ModuleWidget
 			addChild(createLightCentered<SmallLight<ag::CyanLight>>(Vec(COL_LED, cy), module, Clockwork::CLK_LIGHTS + ch));
 			addOutput(createOutputCentered<PJ301MPort>(Vec(COL_OUT, cy), module, Clockwork::CLK_OUTPUTS + ch));
 		}
-
+		agmm::addKnobArcs(this, 2.f);
 		// ---- bottom row ----
 		addOutput(createOutputCentered<PJ301MPort>(Vec(24.f, 352.f), module, Clockwork::RESET_OUTPUT));
 		addOutput(createOutputCentered<PJ301MPort>(Vec(94.f, 352.f), module, Clockwork::RUN_OUTPUT));
@@ -996,7 +999,9 @@ struct ClockworkWidget : ModuleWidget
 
 	void appendContextMenu(Menu* menu) override
 	{
-		Clockwork* m = dynamic_cast<Clockwork*>(module);
+	    agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+	    agmm::addGitLink(menu); // adds "Visit my git repo!"
+	    Clockwork* m = dynamic_cast<Clockwork*>(module);
 		if (!m)
 			return;
 		menu->addChild(new MenuSeparator);

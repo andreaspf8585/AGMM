@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // ============================================================================
 // SwitchLines8to1 — 8-to-1 sequential switch (24 HP Rack module)
 // ----------------------------------------------------------------------------
@@ -904,6 +906,13 @@ struct SwitchLines8to1Widget : ModuleWidget
             addOutput(createOutputCentered<DarkPJ301MPort>(
                 Vec(cx, SW_GATE_TOP + SW_CH_JACK_DY), module, SwitchLines8to1::GATE_OUTPUT + i));
         }
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

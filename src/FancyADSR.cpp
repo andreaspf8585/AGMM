@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================
 // FancyADSR
@@ -1015,6 +1018,7 @@ struct FancyADSRWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, FA_ROWA_TOP + 30.f), module, knobIds[i]));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx - 8.f, FA_ROWA_TOP + 58.f), module, cvIds[i]));
         }
+        agmm::addKnobArcs(this, 2.f);
 
         // ---- row B: mode, shapes, loop, time ----
         const float by = FA_ROWB_TOP + 30.f;
@@ -1037,6 +1041,8 @@ struct FancyADSRWidget : ModuleWidget
     // Right-click menu: choose which polyphony channel the display shows.
     void appendContextMenu(Menu *menu) override
     {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         FancyADSR *m = dynamic_cast<FancyADSR *>(this->module);
         if (!m)
             return;

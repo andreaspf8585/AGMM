@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -1264,6 +1266,7 @@ struct QuantaraWidget : ModuleWidget
     // actions.
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         Quantara *module = dynamic_cast<Quantara *>(this->module);
         if (!module)
             return;
@@ -1312,6 +1315,8 @@ struct QuantaraWidget : ModuleWidget
                     module->params[Quantara::SCALE_PARAM].setValue((float)(QZ_NUM_SCALES - 1)); }));
                                          }));
     }
+
+    
 };
 
 Model *modelQuantara = createModel<Quantara, QuantaraWidget>("Quantara");

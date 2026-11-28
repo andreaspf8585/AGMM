@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 // Evolved.cpp
 // AGMM-styled "evolved" ferrofluid lifeform visualiser - 36 HP.
 //
@@ -49,6 +51,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "Knob_arcs.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -2287,7 +2290,7 @@ struct EvolvedWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(cx, EV_CTRL_TOP + 30.f), module, EV_KNOBS[i].param));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(cx, EV_CTRL_TOP + 55.f), module, EV_KNOBS[i].cv));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // I/O band: 2 inputs, 6 outputs, 4 buttons
         const float jy = EV_IO_TOP + 24.f;
         addInput(createInputCentered<DarkPJ301MPort>(Vec(evIoX(0), jy), module, Evolved::AUDIO_INPUT));
@@ -2306,6 +2309,13 @@ struct EvolvedWidget : ModuleWidget
         addChild(createLightCentered<SmallLight<agmm::VioletLight>>(Vec(evIoX(8) + 13.f, jy), module, Evolved::PAUSE_LIGHT));
         addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(evIoX(10) + 13.f, jy), module, Evolved::AUDIO_LIGHT));
         addChild(createLightCentered<SmallLight<agmm::CyanLight>>(Vec(evIoX(11) + 13.f, jy), module, Evolved::MOUSE_LIGHT));
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 

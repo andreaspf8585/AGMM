@@ -1,3 +1,5 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
@@ -7,6 +9,7 @@
 #include <random>
 #include <limits>
 #include <array>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // RandomWalk
@@ -1192,7 +1195,7 @@ struct RandomWalkWidget : ModuleWidget
             addParam(createParamCentered<RoundSmallBlackKnob>(Vec(l0, y), module, knobs[r]));
             addInput(createInputCentered<DarkPJ301MPort>(Vec(l1, y), module, cvs[r]));
         }
-
+        agmm::addKnobArcs(this, 2.f);
         // ---- right block (all outputs are polyphonic) ----
         const float r0 = RW_RCOL[0], r1 = RW_RCOL[1];
         const float y0 = rwCtlY(RW_ROW_TOP[0]), y1 = rwCtlY(RW_ROW_TOP[1]);
@@ -1213,6 +1216,7 @@ struct RandomWalkWidget : ModuleWidget
     // and "Gate X duration" / "Gate Y duration" submenus.
     void appendContextMenu(ui::Menu *menu) override
     {
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
         RandomWalk *module = dynamic_cast<RandomWalk *>(this->module);
         if (!module)
             return;
@@ -1276,6 +1280,8 @@ struct RandomWalkWidget : ModuleWidget
                                              }
                                          }));
     }
+
+    
 };
 
 Model *modelRandomWalk = createModel<RandomWalk, RandomWalkWidget>("RandomWalk");

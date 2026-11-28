@@ -1,9 +1,12 @@
+#include "YouTubeLoad.hpp"
+#include "GitLoad.hpp"
 #include "plugin.hpp"
 #include "agmm_ui.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include "Knob_arcs.hpp"
 
 // ============================================================================
 // SickDelay
@@ -710,6 +713,14 @@ struct SickDelayWidget : ModuleWidget
         addInput(createInputCentered<DarkPJ301MPort>(Vec(sdIoX(3), jy), module, SickDelay::CLOCK_INPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(sdIoX(4), jy), module, SickDelay::OUT_L_OUTPUT));
         addOutput(createOutputCentered<DarkPJ301MPort>(Vec(sdIoX(5), jy), module, SickDelay::OUT_R_OUTPUT));
+        agmm::addKnobArcs(this, 6.f);
+    }
+
+    void appendContextMenu(Menu *menu) override
+    {
+        agmm::addYouTubeLink(menu); // adds "Visit my youtube channel!"
+        agmm::addGitLink(menu); // adds "Visit my git repo!"
+        // ... your other menu items ...
     }
 };
 
